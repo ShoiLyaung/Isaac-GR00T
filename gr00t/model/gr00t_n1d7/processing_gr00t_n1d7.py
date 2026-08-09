@@ -758,6 +758,7 @@ class Gr00tN1d7Processor(BaseProcessor):
                 "use_mean_std",
                 "model_name",
                 "model_type",
+                "max_action_horizon",
             ]
             for key in override_keys:
                 if key in kwargs:

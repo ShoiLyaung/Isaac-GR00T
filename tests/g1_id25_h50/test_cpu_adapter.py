@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -16,6 +19,8 @@ from gr00t.data.dataset.g1_id25_h50_adapter import (
     ADAPTER_KIND,
     BASELINE_ID,
     CONFIG_SCHEMA_VERSION,
+    CANONICAL_INFO_SHA256,
+    CANONICAL_MODALITY_SHA256,
     EMBODIMENT_ID,
     EMBODIMENT_TAG,
     G1Id25H50EpisodeLoader,
@@ -31,6 +36,7 @@ from gr00t.data.dataset.g1_id25_h50_adapter import (
     inspire_u_to_rad,
     load_adapter_config,
     resolve_decoded_action_26d,
+    scatter_inspire_u_to_sim_joint_targets,
 )
 
 
@@ -189,7 +195,7 @@ def test_frozen_zoh_offsets_are_exact_and_repeated():
 def test_loader_view_stats_and_episode_contract(tmp_path: Path):
     canonical = _make_canonical(tmp_path / "canonical")
     view = tmp_path / "view"
-    manifest = build_metadata_loader_view(canonical, view)
+    manifest = build_metadata_loader_view(canonical, view, enforce_frozen_identity=False)
     assert manifest["true_50hz_capture"] is False
     assert (view / "data").is_symlink()
     assert (view / "videos").is_symlink()
@@ -232,18 +238,20 @@ def test_loader_view_is_non_overwriting(tmp_path: Path):
     canonical = _make_canonical(tmp_path / "canonical")
     view = tmp_path / "view"
     before = (canonical / "meta/info.json").read_bytes()
-    build_metadata_loader_view(canonical, view)
+    build_metadata_loader_view(canonical, view, enforce_frozen_identity=False)
     assert (canonical / "meta/info.json").read_bytes() == before
     with pytest.raises(FileExistsError):
-        build_metadata_loader_view(canonical, view)
+        build_metadata_loader_view(canonical, view, enforce_frozen_identity=False)
     with pytest.raises(ValueError):
-        build_metadata_loader_view(canonical, canonical / "nested-view")
+        build_metadata_loader_view(
+            canonical, canonical / "nested-view", enforce_frozen_identity=False
+        )
 
 
 def test_invalid_row_and_unverified_runtime_are_rejected(tmp_path: Path):
     canonical = _make_canonical(tmp_path / "canonical")
     view = tmp_path / "view"
-    build_metadata_loader_view(canonical, view)
+    build_metadata_loader_view(canonical, view, enforce_frozen_identity=False)
     derived = tmp_path / "relative.json"
     compute_h50_relative_statistics(canonical, derived)
     config_path = _write_adapter_config(tmp_path / "adapter.json", derived)
@@ -287,6 +295,15 @@ def test_action_mask_decode_lock_and_inspire_roundtrip():
     u = np.linspace(0.0, 1.0, 6, dtype=np.float32)
     assert inspire_rad_to_u(inspire_u_to_rad(u)) == pytest.approx(u, abs=2e-7)
 
+    left = np.linspace(0.0, 1.0, 6, dtype=np.float32)
+    right = np.linspace(1.0, 0.0, 6, dtype=np.float32)
+    full = scatter_inspire_u_to_sim_joint_targets(np.zeros(53, dtype=np.float32), left, right)
+    assert full[[31, 32, 30, 29, 43, 33]] == pytest.approx(inspire_u_to_rad(left))
+    assert full[[36, 37, 35, 34, 48, 38]] == pytest.approx(inspire_u_to_rad(right))
+    inactive = np.ones(53, dtype=bool)
+    inactive[[31, 32, 30, 29, 43, 33, 36, 37, 35, 34, 48, 38]] = False
+    assert np.all(full[inactive] == 0.0)
+
 
 def test_finetune_config_exposes_bounded_adapter_and_horizon_fields():
     cfg = FinetuneConfig(
@@ -300,3 +317,126 @@ def test_finetune_config_exposes_bounded_adapter_and_horizon_fields():
     assert cfg.dataset_adapter == ADAPTER_KIND
     assert cfg.adapter_config_path == "adapter.json"
     assert cfg.action_horizon == 50
+
+
+def test_checkpoint_processor_h40_can_be_overridden_to_h50(tmp_path: Path, monkeypatch):
+    from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import Gr00tN1d7Processor
+
+    checkpoint = tmp_path / "processor-checkpoint"
+    _write_json(
+        checkpoint / "processor_config.json",
+        {
+            "processor_kwargs": {
+                "modality_configs": {},
+                "max_action_horizon": 40,
+            }
+        },
+    )
+    _write_json(checkpoint / "statistics.json", {})
+    _write_json(checkpoint / "embodiment_id.json", {})
+
+    captured = {}
+
+    def capture_init(self, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(Gr00tN1d7Processor, "__init__", capture_init)
+    Gr00tN1d7Processor.from_pretrained(
+        checkpoint,
+        max_action_horizon=50,
+        transformers_loading_kwargs={"local_files_only": True},
+    )
+    assert captured["max_action_horizon"] == 50
+    assert captured["model_name"] == "nvidia/Cosmos-Reason2-2B"
+
+
+def test_factory_adapter_branch_never_calls_canonical_stats_writers():
+    from gr00t.data.dataset.factory import DatasetFactory
+
+    spec = SimpleNamespace(
+        dataset_paths=["loader-view"],
+        embodiment_tag=EMBODIMENT_TAG,
+        mix_ratio=1.0,
+        dataset_adapter=ADAPTER_KIND,
+        adapter_config_path="adapter.json",
+    )
+    data = SimpleNamespace(
+        datasets=[spec],
+        mode="single_turn",
+        modality_configs={EMBODIMENT_TAG: {}},
+        video_backend="torchcodec",
+        shard_size=128,
+        episode_sampling_rate=0.1,
+        seed=42,
+        allow_padding=False,
+        num_shards_per_epoch=1,
+        override_pretraining_statistics=True,
+    )
+    config = SimpleNamespace(data=data, training=SimpleNamespace(eval_strategy="no"))
+    fake_dataset = MagicMock()
+    fake_dataset.__len__.return_value = 1
+    mixture = object()
+
+    with (
+        patch("gr00t.data.dataset.factory.generate_stats") as generate_stats,
+        patch("gr00t.data.dataset.factory.generate_rel_stats") as generate_rel_stats,
+        patch(
+            "gr00t.data.dataset.g1_id25_h50_adapter.G1Id25H50SingleStepDataset",
+            return_value=fake_dataset,
+        ) as adapter_dataset,
+        patch("gr00t.data.dataset.factory.ShardedMixtureDataset", return_value=mixture),
+    ):
+        result, eval_result = DatasetFactory(config).build(MagicMock())
+
+    assert result is mixture
+    assert eval_result is None
+    generate_stats.assert_not_called()
+    generate_rel_stats.assert_not_called()
+    adapter_dataset.assert_called_once()
+
+
+def test_frozen_canonical_metadata_identity_is_current():
+    root = Path("/home/sl/datasets/insertion_shaft_main_300ep_groot/meta")
+    assert hashlib.sha256((root / "info.json").read_bytes()).hexdigest() == CANONICAL_INFO_SHA256
+    assert (
+        hashlib.sha256((root / "modality.json").read_bytes()).hexdigest()
+        == CANONICAL_MODALITY_SHA256
+    )
+
+
+def test_adapter_config_rejects_unknown_fields(tmp_path: Path):
+    relative = tmp_path / "relative.json"
+    config = _write_adapter_config(tmp_path / "adapter.json", relative)
+    payload = json.loads(config.read_text())
+    payload["unknown"] = "forbidden"
+    config.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="schema mismatch"):
+        load_adapter_config(config)
+
+
+@pytest.mark.parametrize("defect", ["float64", "nan", "hand_range"])
+def test_loader_rejects_dtype_nonfinite_and_hand_range(tmp_path: Path, defect: str):
+    canonical = _make_canonical(tmp_path / "canonical")
+    derived = tmp_path / "relative.json"
+    compute_h50_relative_statistics(canonical, derived)
+    config = _write_adapter_config(tmp_path / "adapter.json", derived)
+    view = tmp_path / "view"
+    build_metadata_loader_view(canonical, view, enforce_frozen_identity=False)
+    parquet = canonical / "data/chunk-000/episode_000000.parquet"
+    frame = pd.read_parquet(parquet)
+    rows = [np.array(row, copy=True) for row in frame["observation.state"]]
+    if defect == "float64":
+        rows = [row.astype(np.float64) for row in rows]
+    elif defect == "nan":
+        rows[0][0] = np.nan
+    else:
+        rows[0][14] = 1.1
+    frame["observation.state"] = rows
+    frame.to_parquet(parquet, index=False)
+    modality = _load_modality_config(Path(__file__).parents[2])
+    loader = G1Id25H50EpisodeLoader(
+        view, modality, config, require_runtime_verified_fixed_state=False
+    )
+    error = TypeError if defect == "float64" else ValueError
+    with pytest.raises(error):
+        loader._load_parquet_data(0)

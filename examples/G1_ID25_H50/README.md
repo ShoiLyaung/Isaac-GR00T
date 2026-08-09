@@ -12,6 +12,9 @@ The implementation is intentionally split into three non-overwriting steps:
    derived output.
 3. `cpu_adapter_probe.py` validates one episode without video decoding, model
    loading, CUDA, training, inference, evaluation, or simulation.
+4. `cpu_processor_probe.py` decodes one real head frame and exercises the real
+   checkpoint processor metadata, H50 state/action processing, mock VLM
+   collation, and processor save/reload without loading model weights.
 
 The template fixed leg/waist values are CPU fixtures only. `DatasetFactory`
 requires `runtime_verified_fixed_state=true` before the adapter can enter the

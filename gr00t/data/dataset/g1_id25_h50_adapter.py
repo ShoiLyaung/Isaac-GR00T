@@ -36,6 +36,8 @@ RAW_LANGUAGE_SLUG = "insertion_shaft_main_300ep"
 VIEW_SCHEMA_VERSION = "g1-id25-h50-loader-view-v1"
 CONFIG_SCHEMA_VERSION = "g1-id25-h50-adapter-config-v1"
 STATS_SCHEMA_VERSION = "g1-id25-h50-relative-stats-v1"
+CANONICAL_INFO_SHA256 = "74bd5f7758fa000939fe6bc461e325ebc8ff276e6c03f232c6d1179f76cf53fb"
+CANONICAL_MODALITY_SHA256 = "d20c33542b42e3f114af54e9f3e7432d3528e38a64b4216a6c44d33bcdcba67d"
 
 STATE_SLICES = {
     "left_arm": (0, 7),
@@ -121,7 +123,12 @@ def _assert_external_output(source_root: Path, output_path: Path) -> None:
         raise ValueError(f"Derived output must not be inside canonical input: {output}")
 
 
-def build_metadata_loader_view(canonical_root: str | Path, view_root: str | Path) -> dict[str, Any]:
+def build_metadata_loader_view(
+    canonical_root: str | Path,
+    view_root: str | Path,
+    *,
+    enforce_frozen_identity: bool = True,
+) -> dict[str, Any]:
     """Create a non-overwriting metadata view with read-only data/video symlinks.
 
     The view fixes path-template compatibility, exposes exactly one real head
@@ -146,6 +153,11 @@ def build_metadata_loader_view(canonical_root: str | Path, view_root: str | Path
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"Canonical metadata missing: {missing}")
+    if enforce_frozen_identity:
+        if _sha256(canonical_meta / "info.json") != CANONICAL_INFO_SHA256:
+            raise ValueError("Canonical info.json identity mismatch")
+        if _sha256(canonical_meta / "modality.json") != CANONICAL_MODALITY_SHA256:
+            raise ValueError("Canonical modality.json identity mismatch")
 
     view_meta = view_root / "meta"
     view_meta.mkdir(parents=True)
@@ -207,6 +219,28 @@ def build_metadata_loader_view(canonical_root: str | Path, view_root: str | Path
 def load_adapter_config(path: str | Path) -> dict[str, Any]:
     path = Path(path)
     cfg = _json_load(path)
+    allowed_keys = {
+        "schema_version",
+        "adapter_kind",
+        "baseline_id",
+        "embodiment_tag",
+        "embodiment_id",
+        "temporal_option",
+        "source_index_formula",
+        "source_rate_hz",
+        "target_rate_hz",
+        "true_50hz_capture",
+        "horizon",
+        "active_action_dims",
+        "hand_scope",
+        "language",
+        "runtime_verified_fixed_state",
+        "fixed_state",
+        "fixed_action",
+        "derived_relative_stats_path",
+    }
+    if set(cfg) != allowed_keys:
+        raise ValueError(f"Adapter config schema mismatch: {sorted(set(cfg) ^ allowed_keys)}")
     required_exact = {
         "schema_version": CONFIG_SCHEMA_VERSION,
         "adapter_kind": ADAPTER_KIND,
@@ -264,6 +298,16 @@ def _slice_stats(stats: dict[str, Any], start: int, end: int) -> dict[str, Any]:
             raise ValueError(f"Invalid canonical statistic {name} shape {values.shape}")
         result[name] = values[start:end].tolist()
     return result
+
+
+def _stack_float32_rows(series: pd.Series, *, field: str) -> np.ndarray:
+    rows = []
+    for value in series:
+        row = np.asarray(value)
+        if row.dtype != np.float32:
+            raise TypeError(f"{field} must materialize as float32, got {row.dtype}")
+        rows.append(row)
+    return np.vstack(rows)
 
 
 def _validate_relative_stats(stats: dict[str, Any]) -> dict[str, Any]:
@@ -332,8 +376,8 @@ class G1Id25H50EpisodeLoader(LeRobotEpisodeLoader):
         if missing:
             raise KeyError(f"Canonical parquet columns missing: {sorted(missing)}")
 
-        states = np.vstack([np.asarray(v, dtype=np.float32) for v in raw["observation.state"]])
-        actions = np.vstack([np.asarray(v, dtype=np.float32) for v in raw["action"]])
+        states = _stack_float32_rows(raw["observation.state"], field="observation.state")
+        actions = _stack_float32_rows(raw["action"], field="action")
         if states.shape != (len(raw), ACTIVE_ACTION_DIM):
             raise ValueError(f"Expected canonical state [L,26], got {states.shape}")
         if actions.shape != (len(raw), ACTIVE_ACTION_DIM):
@@ -497,6 +541,26 @@ def inspire_rad_to_u(rad: np.ndarray) -> np.ndarray:
     return result
 
 
+def scatter_inspire_u_to_sim_joint_targets(
+    full_joint_targets: np.ndarray,
+    left_u: np.ndarray,
+    right_u: np.ndarray,
+) -> np.ndarray:
+    """Apply the frozen Inspire-6 order exactly once at simulator ingress."""
+
+    targets = np.asarray(full_joint_targets, dtype=np.float32)
+    if targets.ndim != 1 or targets.shape[0] <= max(*LEFT_INSPIRE_SIM_INDICES, *RIGHT_INSPIRE_SIM_INDICES):
+        raise ValueError("Full simulator joint target vector is too short")
+    result = targets.copy()
+    left_rad = inspire_u_to_rad(left_u)
+    right_rad = inspire_u_to_rad(right_u)
+    if left_rad.shape != (6,) or right_rad.shape != (6,):
+        raise ValueError("Simulator ingress expects one six-dimensional command per hand")
+    result[list(LEFT_INSPIRE_SIM_INDICES)] = left_rad
+    result[list(RIGHT_INSPIRE_SIM_INDICES)] = right_rad
+    return result
+
+
 def _stats_for_trajectories(values: np.ndarray) -> dict[str, list[list[float]]]:
     if values.ndim != 3 or values.shape[1:] != (HORIZON, 7):
         raise ValueError(f"Expected [N,50,7], got {values.shape}")
@@ -545,10 +609,15 @@ def compute_h50_relative_statistics(
         )
         if not np.all(frame["annotation.human.validity"].to_numpy() == 1):
             raise ValueError(f"Invalid row in episode {episode_index}")
-        state = np.vstack([np.asarray(v, dtype=np.float32) for v in frame["observation.state"]])
-        action = np.vstack([np.asarray(v, dtype=np.float32) for v in frame["action"]])
+        state = _stack_float32_rows(frame["observation.state"], field="observation.state")
+        action = _stack_float32_rows(frame["action"], field="action")
         if state.shape != action.shape or state.shape[1] != ACTIVE_ACTION_DIM:
             raise ValueError(f"Episode {episode_index} state/action shape mismatch")
+        if not np.isfinite(state).all() or not np.isfinite(action).all():
+            raise ValueError(f"Episode {episode_index} contains non-finite state/action")
+        hand_values = np.concatenate((state[:, 14:26], action[:, 14:26]), axis=0)
+        if np.any(hand_values < 0.0) or np.any(hand_values > 1.0):
+            raise ValueError(f"Episode {episode_index} Inspire command is outside [0,1]")
         n_anchors = len(frame) - SOURCE_SPAN + 1
         if n_anchors <= 0:
             continue

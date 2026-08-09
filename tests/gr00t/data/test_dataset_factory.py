@@ -47,6 +47,8 @@ def _make_mock_config():
     dataset_spec.dataset_paths = ["/fake/dataset_path"]
     dataset_spec.embodiment_tag = "new_embodiment"
     dataset_spec.mix_ratio = 1.0
+    dataset_spec.dataset_adapter = None
+    dataset_spec.adapter_config_path = None
     config.data.datasets = [dataset_spec]
 
     config.data.modality_configs = {
