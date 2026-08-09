@@ -10,9 +10,11 @@ The implementation is intentionally split into three non-overwriting steps:
    canonical data/videos.
 2. `compute_relative_stats.py` writes H50 relative arm statistics to a separate
    derived output.
-3. `cpu_adapter_probe.py` validates one episode without video decoding, model
+3. `write_temporal_provenance.py` writes exact per-anchor/tick synthetic-ZOH
+   lineage to a derived parquet without modifying canonical data.
+4. `cpu_adapter_probe.py` validates one episode without video decoding, model
    loading, CUDA, training, inference, evaluation, or simulation.
-4. `cpu_processor_probe.py` decodes one real head frame and exercises the real
+5. `cpu_processor_probe.py` decodes one real head frame and exercises the real
    checkpoint processor metadata, H50 state/action processing, mock VLM
    collation, and processor save/reload without loading model weights.
 

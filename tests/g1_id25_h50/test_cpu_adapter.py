@@ -37,6 +37,7 @@ from gr00t.data.dataset.g1_id25_h50_adapter import (
     load_adapter_config,
     resolve_decoded_action_26d,
     scatter_inspire_u_to_sim_joint_targets,
+    write_h50_temporal_provenance,
 )
 
 
@@ -232,6 +233,25 @@ def test_loader_view_stats_and_episode_contract(tmp_path: Path):
     statistics = loader.get_dataset_statistics()
     assert np.asarray(statistics["relative_action"]["left_arm"]["mean"]).shape == (50, 7)
     assert np.asarray(statistics["state"]["left_hand"]["mean"]).shape == (6,)
+
+    provenance_path = tmp_path / "derived/temporal_provenance.parquet"
+    provenance = write_h50_temporal_provenance(canonical, provenance_path)
+    assert provenance["anchors"] == 6
+    assert provenance["rows"] == 300
+    lineage = pd.read_parquet(provenance_path)
+    assert lineage.iloc[0].to_dict() == {
+        "episode_index": 0,
+        "anchor_row": 0,
+        "target_tick": 0,
+        "source_offset": 0,
+        "source_row": 0,
+        "repeated_from_previous_tick": False,
+    }
+    assert lineage.iloc[1]["repeated_from_previous_tick"]
+    assert lineage.iloc[-1]["source_row"] == 34
+    assert provenance_path.exists()
+    with pytest.raises(FileExistsError):
+        write_h50_temporal_provenance(canonical, provenance_path)
 
 
 def test_loader_view_is_non_overwriting(tmp_path: Path):

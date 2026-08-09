@@ -20,6 +20,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
 from gr00t.data.dataset.sharded_single_step_dataset import ShardedSingleStepDataset
@@ -652,3 +654,84 @@ def compute_h50_relative_statistics(
         )
     _json_dump_new(output_path, result)
     return result
+
+
+def write_h50_temporal_provenance(
+    dataset_root: str | Path,
+    output_path: str | Path,
+) -> dict[str, Any]:
+    """Write exact per-anchor/tick synthetic-ZOH lineage as a derived parquet."""
+
+    dataset_root = Path(dataset_root).resolve()
+    output_path = Path(output_path)
+    _assert_external_output(dataset_root, output_path)
+    if output_path.exists():
+        raise FileExistsError(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    info_path = dataset_root / "meta" / "info.json"
+    episodes_path = dataset_root / "meta" / "episodes.jsonl"
+    info = _json_load(info_path)
+    with episodes_path.open("r", encoding="utf-8") as stream:
+        episodes = [json.loads(line) for line in stream]
+
+    schema = pa.schema(
+        [
+            ("episode_index", pa.int32()),
+            ("anchor_row", pa.int32()),
+            ("target_tick", pa.int16()),
+            ("source_offset", pa.int16()),
+            ("source_row", pa.int32()),
+            ("repeated_from_previous_tick", pa.bool_()),
+        ],
+        metadata={
+            b"schema_version": b"g1-id25-h50-temporal-provenance-v1",
+            b"baseline_id": BASELINE_ID.encode(),
+            b"temporal_option": TEMPORAL_OPTION.encode(),
+            b"source_index_formula": b"n+floor(3*k/5)",
+            b"source_rate_hz": b"30",
+            b"target_rate_hz": b"50",
+            b"true_50hz_capture": b"false",
+            b"canonical_info_sha256": _sha256(info_path).encode(),
+        },
+    )
+    offsets = np.asarray(h50_zoh_offsets(), dtype=np.int16)
+    repeated = np.zeros(HORIZON, dtype=bool)
+    repeated[1:] = offsets[1:] == offsets[:-1]
+    writer = pq.ParquetWriter(output_path, schema, compression="zstd")
+    anchors_total = 0
+    rows_total = 0
+    try:
+        for episode in episodes:
+            episode_index = int(episode["episode_index"])
+            episode_length = int(episode["length"])
+            n_anchors = max(episode_length - SOURCE_SPAN + 1, 0)
+            if n_anchors == 0:
+                continue
+            anchors = np.repeat(np.arange(n_anchors, dtype=np.int32), HORIZON)
+            tiled_offsets = np.tile(offsets, n_anchors)
+            table = pa.table(
+                {
+                    "episode_index": np.full(n_anchors * HORIZON, episode_index, np.int32),
+                    "anchor_row": anchors,
+                    "target_tick": np.tile(np.arange(HORIZON, dtype=np.int16), n_anchors),
+                    "source_offset": tiled_offsets,
+                    "source_row": anchors + tiled_offsets.astype(np.int32),
+                    "repeated_from_previous_tick": np.tile(repeated, n_anchors),
+                },
+                schema=schema,
+            )
+            writer.write_table(table)
+            anchors_total += n_anchors
+            rows_total += n_anchors * HORIZON
+    finally:
+        writer.close()
+
+    return {
+        "schema_version": "g1-id25-h50-temporal-provenance-v1",
+        "episodes": len(episodes),
+        "anchors": anchors_total,
+        "rows": rows_total,
+        "horizon": HORIZON,
+        "true_50hz_capture": False,
+        "output_sha256": _sha256(output_path),
+    }
