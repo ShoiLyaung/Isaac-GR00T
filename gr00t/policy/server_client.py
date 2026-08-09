@@ -188,6 +188,9 @@ class PolicyClient(BasePolicy):
 
     def _init_socket(self):
         """Initialize or reinitialize the socket with current settings"""
+        old_socket = getattr(self, "socket", None)
+        if old_socket is not None:
+            old_socket.close(linger=0)
         self.socket = self.context.socket(zmq.REQ)
         self.socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
         self.socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
@@ -243,8 +246,18 @@ class PolicyClient(BasePolicy):
 
     def __del__(self):
         """Cleanup resources on destruction"""
-        self.socket.close()
-        self.context.term()
+        self.close()
+
+    def close(self) -> None:
+        """Close only this client's socket/context; never terminate a server process."""
+        socket = getattr(self, "socket", None)
+        if socket is not None:
+            socket.close(linger=0)
+            self.socket = None
+        context = getattr(self, "context", None)
+        if context is not None:
+            context.term()
+            self.context = None
 
     def _get_action(
         self, observation: dict[str, Any], options: dict[str, Any] | None = None
