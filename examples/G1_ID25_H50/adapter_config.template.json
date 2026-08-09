@@ -1,0 +1,28 @@
+{
+  "schema_version": "g1-id25-h50-adapter-config-v1",
+  "adapter_kind": "g1_id25_h50_synthetic_zoh_v1",
+  "baseline_id": "ID25_INSPIRE6_TASK_BASELINE",
+  "embodiment_tag": "unitree_g1_full_body_with_waist_height_nav_cmd",
+  "embodiment_id": 25,
+  "temporal_option": "SYNTHETIC_30HZ_TO_50HZ_CAUSAL_ZOH_V1",
+  "source_index_formula": "n+floor(3*k/5)",
+  "source_rate_hz": 30,
+  "target_rate_hz": 50,
+  "true_50hz_capture": false,
+  "horizon": 50,
+  "active_action_dims": 26,
+  "hand_scope": "PROJECT_INSPIRE6_EXTENSION_NO_DIRECT_OFFICIAL_MATCH",
+  "language": "Insert the shaft into the manipulator housing.",
+  "runtime_verified_fixed_state": false,
+  "fixed_state": {
+    "left_leg": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "right_leg": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "waist": [0.0, 0.0, 0.0]
+  },
+  "fixed_action": {
+    "waist": [0.0, 0.0, 0.0],
+    "base_height_command": [0.0],
+    "navigate_command": [0.0, 0.0, 0.0]
+  },
+  "derived_relative_stats_path": "/ABSOLUTE/PATH/TO/g1_id25_h50_relative_stats.json"
+}

@@ -54,24 +54,47 @@ class DatasetFactory:
                 embodiment_tag = dataset_spec.embodiment_tag
                 assert embodiment_tag is not None, "Embodiment tag is required"
                 assert self.config.data.mode == "single_turn", "Only single turn mode is supported"
-                if torch.distributed.is_initialized():
-                    if torch.distributed.get_rank() == 0:
+                if dataset_spec.dataset_adapter is None:
+                    if torch.distributed.is_initialized():
+                        if torch.distributed.get_rank() == 0:
+                            generate_stats(dataset_path)
+                            generate_rel_stats(dataset_path, EmbodimentTag(embodiment_tag))
+                    else:
                         generate_stats(dataset_path)
                         generate_rel_stats(dataset_path, EmbodimentTag(embodiment_tag))
+                    barrier()
+                    dataset = ShardedSingleStepDataset(
+                        dataset_path=dataset_path,
+                        embodiment_tag=EmbodimentTag(embodiment_tag),
+                        modality_configs=self.config.data.modality_configs[embodiment_tag],
+                        video_backend=self.config.data.video_backend,
+                        shard_size=self.config.data.shard_size,
+                        episode_sampling_rate=self.config.data.episode_sampling_rate,
+                        seed=self.config.data.seed,
+                        allow_padding=self.config.data.allow_padding,
+                    )
+                elif dataset_spec.dataset_adapter == "g1_id25_h50_synthetic_zoh_v1":
+                    from gr00t.data.dataset.g1_id25_h50_adapter import (
+                        G1Id25H50SingleStepDataset,
+                    )
+
+                    if dataset_spec.adapter_config_path is None:
+                        raise ValueError("G1 ID25/H50 adapter requires adapter_config_path")
+                    if embodiment_tag != "unitree_g1_full_body_with_waist_height_nav_cmd":
+                        raise ValueError("G1 ID25/H50 adapter requires the frozen UNITREE_G1 tag")
+                    dataset = G1Id25H50SingleStepDataset(
+                        dataset_path=dataset_path,
+                        embodiment_tag=EmbodimentTag(embodiment_tag),
+                        modality_configs=self.config.data.modality_configs[embodiment_tag],
+                        video_backend=self.config.data.video_backend,
+                        shard_size=self.config.data.shard_size,
+                        episode_sampling_rate=self.config.data.episode_sampling_rate,
+                        seed=self.config.data.seed,
+                        allow_padding=self.config.data.allow_padding,
+                        adapter_config_path=dataset_spec.adapter_config_path,
+                    )
                 else:
-                    generate_stats(dataset_path)
-                    generate_rel_stats(dataset_path, EmbodimentTag(embodiment_tag))
-                barrier()
-                dataset = ShardedSingleStepDataset(
-                    dataset_path=dataset_path,
-                    embodiment_tag=EmbodimentTag(embodiment_tag),
-                    modality_configs=self.config.data.modality_configs[embodiment_tag],
-                    video_backend=self.config.data.video_backend,
-                    shard_size=self.config.data.shard_size,
-                    episode_sampling_rate=self.config.data.episode_sampling_rate,
-                    seed=self.config.data.seed,
-                    allow_padding=self.config.data.allow_padding,
-                )
+                    raise ValueError(f"Unknown dataset adapter: {dataset_spec.dataset_adapter}")
                 datasets.append(dataset)
             dataset_lengths = np.array([len(dataset) for dataset in datasets])
             dataset_relative_lengths = dataset_lengths / dataset_lengths.sum()

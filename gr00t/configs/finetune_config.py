@@ -40,9 +40,18 @@ class FinetuneConfig:
 
     modality_config_path: str | None = None
     """
-    Path to a Python file defining the modality configuration for the given embodiment. 
-    If None, use the pre-registered modality config in `gr00t/configs/data/embodiment_configs.py`. 
+    Path to a Python file defining the modality configuration for the given embodiment.
+    If None, use the pre-registered modality config in `gr00t/configs/data/embodiment_configs.py`.
     """
+
+    dataset_adapter: str | None = None
+    """Optional registered dataset adapter identity."""
+
+    adapter_config_path: str | None = None
+    """Machine-readable adapter contract/config path."""
+
+    action_horizon: int | None = None
+    """Optional model/processor action-horizon override persisted in derived checkpoints."""
 
     # --- Model Tuning Flags ---
     tune_llm: bool = False

@@ -46,6 +46,11 @@ class SingleDatasetConfig:
     # If not provided, falls back to dataset_paths for evaluation
     val_dataset_path: Optional[str] = None
 
+    # Optional, explicit dataset adapter.  The default None preserves the
+    # upstream loader and statistics behavior.
+    dataset_adapter: Optional[str] = None
+    adapter_config_path: Optional[str] = None
+
 
 @dataclass
 class DataConfig:
