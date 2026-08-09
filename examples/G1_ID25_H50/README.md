@@ -28,6 +28,9 @@ baseline uses two dedicated evaluation entries:
   insertion-shaft launcher. It requires a separately authorized running policy
   server, one simulator environment, real request timeouts, typed termination
   causes, and scoped client/environment cleanup.
+- `run_policy_server.py --execute-model-server ...` is the paired loopback-only
+  server. It requests Transformers loading info and fails on every missing,
+  unexpected, mismatched key or loading error before serving any request.
 
 The formula `n+floor(3*k/5)` belongs to dataset-target construction only. The
 simulator consumes decoded H50 targets as `chunk_index=k`, one target per 50 Hz

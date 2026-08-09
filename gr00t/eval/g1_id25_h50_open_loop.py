@@ -221,6 +221,7 @@ def main(config: OpenLoopConfig) -> None:
         embodiment_tag=EmbodimentTag(EMBODIMENT_TAG),
         model_path=config.model_path,
         device=config.device,
+        strict_checkpoint_loading=True,
     )
     validate_loaded_policy_contract(policy)
     result = evaluate_g1_id25_h50_anchor(

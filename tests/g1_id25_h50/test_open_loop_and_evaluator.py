@@ -28,6 +28,7 @@ from gr00t.eval.sim.UnitreeIsaacLab.g1_id25_h50_insertion import (
     validate_policy_modality_config,
 )
 from gr00t.policy import BasePolicy
+from gr00t.policy.gr00t_policy import _validate_checkpoint_loading_info
 
 
 CONFIG = Path(__file__).resolve().parents[2] / "examples/G1_ID25_H50/g1_id25_h50_config.py"
@@ -171,6 +172,21 @@ def test_reload_and_server_modality_guards() -> None:
     bad_modality.pop("language")
     with pytest.raises(RuntimeError):
         validate_policy_modality_config(bad_modality)
+
+
+def test_strict_loading_info_rejects_every_partial_reload_class() -> None:
+    empty = {
+        "missing_keys": [],
+        "unexpected_keys": [],
+        "mismatched_keys": [],
+        "error_msgs": [],
+    }
+    _validate_checkpoint_loading_info(empty, Path("/fixture/checkpoint"))
+    for key in empty:
+        bad = {name: [] for name in empty}
+        bad[key] = ["fixture"]
+        with pytest.raises(RuntimeError, match="Strict checkpoint reload mismatch"):
+            _validate_checkpoint_loading_info(bad, Path("/fixture/checkpoint"))
 
 
 def test_sim_observation_and_ingress_contract() -> None:

@@ -58,6 +58,27 @@ def _rec_to_dtype(x: Any, dtype: torch.dtype) -> Any:
         return x
 
 
+def _validate_checkpoint_loading_info(
+    loading_info: dict[str, Any], model_dir: Path
+) -> None:
+    """Reject any partial or shape-coerced fresh checkpoint reload."""
+
+    failures = []
+    for key, label in (
+        ("missing_keys", "Missing keys"),
+        ("unexpected_keys", "Unexpected keys"),
+        ("mismatched_keys", "Mismatched keys"),
+        ("error_msgs", "Loading errors"),
+    ):
+        values = loading_info.get(key, [])
+        if values:
+            failures.append(f"{label} ({len(values)}): {values}")
+    if failures:
+        raise RuntimeError(
+            f"Strict checkpoint reload mismatch for {model_dir}:\n" + "\n".join(failures)
+        )
+
+
 class Gr00tPolicy(BasePolicy):
     """Core policy class for Gr00t model inference.
 
@@ -78,6 +99,7 @@ class Gr00tPolicy(BasePolicy):
         *,
         device: int | str,
         strict: bool = True,
+        strict_checkpoint_loading: bool = False,
     ):
         """Initialize the Gr00t Policy.
 
@@ -87,6 +109,8 @@ class Gr00tPolicy(BasePolicy):
             model_path: Path to the pretrained model checkpoint directory
             device: Device to run the model on (e.g., 'cuda:0', 0, 'cpu')
             strict: Whether to enforce strict input validation (default: True)
+            strict_checkpoint_loading: Whether to reject every loading-info
+                missing/unexpected/mismatched key or loading error.
         """
         # Import this to register all models.
         import gr00t.model  # noqa: F401
@@ -97,7 +121,13 @@ class Gr00tPolicy(BasePolicy):
         model_dir = Path(model_path)
 
         # Load the pretrained model and move to target device with bfloat16 precision
-        model = AutoModel.from_pretrained(model_dir)
+        if strict_checkpoint_loading:
+            model, loading_info = AutoModel.from_pretrained(
+                model_dir, output_loading_info=True
+            )
+            _validate_checkpoint_loading_info(loading_info, model_dir)
+        else:
+            model = AutoModel.from_pretrained(model_dir)
         model.eval()  # Set model to evaluation mode
         model.to(device=device, dtype=torch.bfloat16)
         self.model = model
