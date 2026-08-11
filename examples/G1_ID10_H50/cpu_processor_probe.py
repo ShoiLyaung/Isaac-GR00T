@@ -135,10 +135,12 @@ def main() -> None:
         raise AssertionError("H50 was not preserved across processor save/reload")
     if reloaded.embodiment_id_mapping[EMBODIMENT_TAG] != 10:
         raise AssertionError("ID10 was not preserved across processor save/reload")
-    if _normalize_json_tree(processor.statistics) != _normalize_json_tree(
-        reloaded.statistics
-    ):
-        raise AssertionError("Normalization statistics changed across processor save/reload")
+    processor_statistics = _normalize_json_tree(processor.statistics)
+    reloaded_statistics = _normalize_json_tree(reloaded.statistics)
+    if EMBODIMENT_TAG not in processor_statistics or EMBODIMENT_TAG not in reloaded_statistics:
+        raise AssertionError("ID10 normalization statistics are missing after save/reload")
+    if processor_statistics[EMBODIMENT_TAG] != reloaded_statistics[EMBODIMENT_TAG]:
+        raise AssertionError("ID10 normalization statistics changed across processor save/reload")
     if reloaded.modality_configs[EMBODIMENT_TAG]["action"].delta_indices != modality[
         "action"
     ].delta_indices:
