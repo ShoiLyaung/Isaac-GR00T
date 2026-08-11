@@ -40,7 +40,6 @@ from gr00t.data.dataset.g1_id10_h50_adapter import (
     _stack_float32_rows,
     inspire_rad_to_u,
     inspire_u_to_rad,
-    resolve_decoded_action_26d,
     scatter_inspire_u_to_sim_joint_targets,
 )
 from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
@@ -312,6 +311,53 @@ def apply_active_action_mask(item: dict[str, Any]) -> dict[str, Any]:
     result = dict(item)
     result["action_mask"] = mask
     return result
+
+
+def resolve_decoded_action_26d(
+    decoded: dict[str, np.ndarray], *, clamp_hand: bool = True
+) -> tuple[np.ndarray, int]:
+    """Resolve one finite H40 decoded chunk to the active 26-D boundary.
+
+    ``StateActionProcessor.unapply_action`` has already converted the relative
+    arm outputs to absolute joint targets.  This helper therefore validates and
+    concatenates the decoded groups without adding the anchor state a second
+    time.  Inactive full-body groups are shape-checked and then excluded from
+    the returned simulator-facing chunk.
+    """
+
+    required_dims = {
+        "left_arm": 7,
+        "right_arm": 7,
+        "left_hand": 6,
+        "right_hand": 6,
+        **FIXED_ACTION_DIMS,
+    }
+    arrays: dict[str, np.ndarray] = {}
+    for key, dim in required_dims.items():
+        if key not in decoded:
+            raise KeyError(f"Decoded action missing {key}")
+        value = np.asarray(decoded[key], dtype=np.float32)
+        if value.shape != (HORIZON, dim) or not np.isfinite(value).all():
+            raise ValueError(f"Decoded {key} must be finite shape {(HORIZON, dim)}")
+        arrays[key] = value
+
+    clamp_count = 0
+    hands = []
+    for key in ("left_hand", "right_hand"):
+        value = arrays[key]
+        outside = (value < 0.0) | (value > 1.0)
+        outside_count = int(outside.sum())
+        clamp_count += outside_count
+        if outside_count and not clamp_hand:
+            raise ValueError("Decoded Inspire command outside [0,1]")
+        hands.append(np.clip(value, 0.0, 1.0) if clamp_hand else value)
+
+    active = np.concatenate(
+        [arrays["left_arm"], arrays["right_arm"], hands[0], hands[1]], axis=-1
+    )
+    if active.shape != (HORIZON, ACTIVE_ACTION_DIM) or not np.isfinite(active).all():
+        raise AssertionError("Resolved H40 active action must be finite [40,26]")
+    return active, clamp_count
 
 
 def _stats_for_trajectories(values: np.ndarray) -> dict[str, list[list[float]]]:

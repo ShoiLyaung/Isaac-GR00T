@@ -27,6 +27,7 @@ from gr00t.data.dataset.g1_id10_h40_native30_adapter import (
     compute_h40_relative_statistics,
     h40_native30_offsets,
     load_adapter_config,
+    resolve_decoded_action_26d,
 )
 
 
@@ -193,6 +194,38 @@ def test_mask_is_exactly_40_by_26():
     assert torch.all(result["action_mask"][:, 26:] == 0)
     with pytest.raises(ValueError, match=r"\[40,132\]"):
         apply_active_action_mask({"action_mask": torch.ones((50, 132))})
+
+
+def test_h40_finite_action_helper_is_horizon_specific_and_fail_closed():
+    decoded = {
+        "left_arm": np.ones((40, 7), dtype=np.float32),
+        "right_arm": np.full((40, 7), 2.0, dtype=np.float32),
+        "left_hand": np.full((40, 6), -0.1, dtype=np.float32),
+        "right_hand": np.full((40, 6), 1.1, dtype=np.float32),
+        "waist": np.full((40, 3), 99.0, dtype=np.float32),
+        "base_height_command": np.full((40, 1), 99.0, dtype=np.float32),
+        "navigate_command": np.full((40, 3), 99.0, dtype=np.float32),
+    }
+    active, clamp_count = resolve_decoded_action_26d(decoded)
+    assert active.shape == (40, 26)
+    assert np.isfinite(active).all()
+    assert clamp_count == 480
+    assert np.all(active[:, 14:20] == 0)
+    assert np.all(active[:, 20:26] == 1)
+    assert not np.any(active == 99.0)
+
+    with pytest.raises(ValueError, match=r"finite shape \(40, 7\)"):
+        resolve_decoded_action_26d({**decoded, "left_arm": np.ones((50, 7))})
+    with pytest.raises(ValueError, match="outside"):
+        resolve_decoded_action_26d(decoded, clamp_hand=False)
+    with pytest.raises(ValueError, match=r"finite shape \(40, 6\)"):
+        bad = np.zeros((40, 6), dtype=np.float32)
+        bad[0, 0] = np.nan
+        resolve_decoded_action_26d({**decoded, "left_hand": bad})
+    with pytest.raises(KeyError, match="navigate_command"):
+        resolve_decoded_action_26d(
+            {key: value for key, value in decoded.items() if key != "navigate_command"}
+        )
 
 
 def test_h50_config_is_rejected_as_h40(tmp_path: Path):
