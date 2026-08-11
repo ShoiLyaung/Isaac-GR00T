@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import torch
 
 from gr00t.data.dataset.g1_id10_h50_adapter import (
@@ -41,6 +42,23 @@ def _mock_vlm_processor() -> MagicMock:
         "image_grid_thw": torch.tensor([[1, 1, 1]], dtype=torch.int64),
     }
     return mock
+
+
+def _normalize_json_tree(value):
+    """Normalize enum keys and array scalars before an exact metadata comparison."""
+
+    if isinstance(value, dict):
+        return {
+            str(getattr(key, "value", key)): _normalize_json_tree(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_json_tree(child) for child in value]
+    if isinstance(value, np.ndarray):
+        return _normalize_json_tree(value.tolist())
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def main() -> None:
@@ -117,7 +135,9 @@ def main() -> None:
         raise AssertionError("H50 was not preserved across processor save/reload")
     if reloaded.embodiment_id_mapping[EMBODIMENT_TAG] != 10:
         raise AssertionError("ID10 was not preserved across processor save/reload")
-    if processor.statistics != reloaded.statistics:
+    if _normalize_json_tree(processor.statistics) != _normalize_json_tree(
+        reloaded.statistics
+    ):
         raise AssertionError("Normalization statistics changed across processor save/reload")
     if reloaded.modality_configs[EMBODIMENT_TAG]["action"].delta_indices != modality[
         "action"
