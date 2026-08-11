@@ -1,0 +1,95 @@
+from __future__ import annotations
+
+import copy
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+
+SCRIPT = (
+    Path(__file__).parents[2]
+    / "examples/G1_ID10_H40_NATIVE30/strict_load_finite_action.py"
+)
+SPEC = importlib.util.spec_from_file_location("g1_h40_strict_load_contract", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+def _contract() -> dict:
+    return {
+        "embodiment_id": 10,
+        "model_action_horizon": 40,
+        "processor_action_horizon": 40,
+        "model_max_state_dim": 132,
+        "model_max_action_dim": 132,
+        "processor_max_state_dim": 132,
+        "processor_max_action_dim": 132,
+        "action_head": "Gr00tN1d7ActionHead",
+        "alternate_vl_dit": "AlternateVLDiT",
+        "alternate_vl_dit_blocks": 32,
+        "num_inference_timesteps": 4,
+        "tune_llm": False,
+        "tune_visual": False,
+        "tune_top_llm_layers": 0,
+        "backbone_trainable_parameters": 0,
+        "action_delta_indices": list(range(40)),
+        "video_delta_indices": [0],
+        "state_delta_indices": [0],
+        "action_group_order": MODULE.ACTION_GROUPS,
+        "temporal_option": MODULE.TEMPORAL_OPTION,
+        "true_30hz_hardware_clock_proven": False,
+    }
+
+
+def test_strict_loading_requires_all_four_categories_empty():
+    clean = {
+        "missing_keys": [],
+        "unexpected_keys": [],
+        "mismatched_keys": [],
+        "error_msgs": [],
+    }
+    summary = MODULE.strict_loading_summary(clean)
+    assert summary["all_zero"] is True
+    assert all(summary[key]["count"] == 0 for key in ("missing", "unexpected", "mismatched", "error"))
+    for key in clean:
+        dirty = copy.deepcopy(clean)
+        dirty[key] = [f"sentinel-{key}"]
+        with pytest.raises(RuntimeError, match="Strict checkpoint loading mismatch"):
+            MODULE.strict_loading_summary(dirty)
+
+
+def test_exact_h40_runtime_contract_accepts_only_frozen_values():
+    contract = _contract()
+    MODULE.assert_exact_runtime_contract(contract)
+    mutations = {
+        "embodiment_id": 25,
+        "model_action_horizon": 50,
+        "processor_action_horizon": 50,
+        "model_max_action_dim": 131,
+        "alternate_vl_dit": "DiT",
+        "alternate_vl_dit_blocks": 16,
+        "num_inference_timesteps": 5,
+        "tune_llm": True,
+        "backbone_trainable_parameters": 1,
+        "true_30hz_hardware_clock_proven": True,
+    }
+    for key, value in mutations.items():
+        changed = copy.deepcopy(contract)
+        changed[key] = value
+        with pytest.raises(RuntimeError, match="Contract mismatch"):
+            MODULE.assert_exact_runtime_contract(changed)
+
+
+def test_exact_h40_runtime_contract_rejects_offsets_and_group_order():
+    for key, value in (
+        ("action_delta_indices", list(range(39))),
+        ("video_delta_indices", [-1, 0]),
+        ("state_delta_indices", [0, 1]),
+        ("action_group_order", list(reversed(MODULE.ACTION_GROUPS))),
+    ):
+        changed = copy.deepcopy(_contract())
+        changed[key] = value
+        with pytest.raises(RuntimeError):
+            MODULE.assert_exact_runtime_contract(changed)
