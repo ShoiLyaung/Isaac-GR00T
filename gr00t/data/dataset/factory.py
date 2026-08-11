@@ -113,6 +113,26 @@ class DatasetFactory:
                         allow_padding=self.config.data.allow_padding,
                         adapter_config_path=dataset_spec.adapter_config_path,
                     )
+                elif dataset_spec.dataset_adapter == "g1_id10_h40_native30_v1":
+                    from gr00t.data.dataset.g1_id10_h40_native30_adapter import (
+                        G1Id10H40Native30SingleStepDataset,
+                    )
+
+                    if dataset_spec.adapter_config_path is None:
+                        raise ValueError("G1 ID10/H40/native30 adapter requires adapter_config_path")
+                    if embodiment_tag != "new_embodiment":
+                        raise ValueError("G1 ID10/H40/native30 adapter requires NEW_EMBODIMENT")
+                    dataset = G1Id10H40Native30SingleStepDataset(
+                        dataset_path=dataset_path,
+                        embodiment_tag=EmbodimentTag(embodiment_tag),
+                        modality_configs=self.config.data.modality_configs[embodiment_tag],
+                        video_backend=self.config.data.video_backend,
+                        shard_size=self.config.data.shard_size,
+                        episode_sampling_rate=self.config.data.episode_sampling_rate,
+                        seed=self.config.data.seed,
+                        allow_padding=self.config.data.allow_padding,
+                        adapter_config_path=dataset_spec.adapter_config_path,
+                    )
                 else:
                     raise ValueError(f"Unknown dataset adapter: {dataset_spec.dataset_adapter}")
                 datasets.append(dataset)

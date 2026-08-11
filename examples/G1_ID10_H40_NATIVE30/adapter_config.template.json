@@ -1,0 +1,28 @@
+{
+  "schema_version": "g1-id10-h40-native30-adapter-config-v1",
+  "adapter_kind": "g1_id10_h40_native30_v1",
+  "baseline_id": "ID10_INSPIRE6_TASK_BASELINE_H40_NATIVE30",
+  "embodiment_tag": "new_embodiment",
+  "embodiment_id": 10,
+  "temporal_option": "CANONICAL_NATIVE_REPRESENTED_30HZ_ROW_GRID_V1",
+  "source_index_formula": "n+k",
+  "row_grid_rate_hz": 30,
+  "true_30hz_hardware_clock_proven": false,
+  "true_50hz_capture": false,
+  "horizon": 40,
+  "active_action_dims": 26,
+  "hand_scope": "PROJECT_INSPIRE6_EXTENSION_NO_DIRECT_OFFICIAL_MATCH",
+  "language": "Insert the shaft into the manipulator housing.",
+  "runtime_verified_fixed_state": false,
+  "fixed_state": {
+    "left_leg": [0, 0, 0, 0, 0, 0],
+    "right_leg": [0, 0, 0, 0, 0, 0],
+    "waist": [0, 0, 0]
+  },
+  "fixed_action": {
+    "waist": [0, 0, 0],
+    "base_height_command": [0],
+    "navigate_command": [0, 0, 0]
+  },
+  "derived_relative_stats_path": "<ABSOLUTE_H40_RELATIVE_STATS_JSON>"
+}
