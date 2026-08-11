@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -93,3 +95,49 @@ def test_exact_h40_runtime_contract_rejects_offsets_and_group_order():
         changed[key] = value
         with pytest.raises(RuntimeError):
             MODULE.assert_exact_runtime_contract(changed)
+
+
+def test_artifact_identity_uses_index_declared_shards(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    processor = tmp_path / "processor"
+    checkpoint.mkdir()
+    processor.mkdir()
+    (checkpoint / "config.json").write_text("{}\n", encoding="utf-8")
+    shards = ["model-00001-of-00003.safetensors", "model-00003-of-00003.safetensors"]
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"a": shards[0], "b": shards[1], "c": shards[0]}}),
+        encoding="utf-8",
+    )
+    for name in shards:
+        (checkpoint / name).write_bytes(name.encode())
+    for name in ("processor_config.json", "statistics.json", "embodiment_id.json"):
+        (processor / name).write_text("{}\n", encoding="utf-8")
+
+    identity = MODULE._artifact_identity(checkpoint, processor)
+    assert list(identity["checkpoint"]) == [
+        "config.json",
+        "model.safetensors.index.json",
+        *shards,
+    ]
+    assert identity["checkpoint"][shards[0]]["sha256"] == hashlib.sha256(
+        shards[0].encode()
+    ).hexdigest()
+
+
+def test_artifact_identity_rejects_missing_or_unsafe_shards(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    processor = tmp_path / "processor"
+    checkpoint.mkdir()
+    processor.mkdir()
+    (checkpoint / "config.json").write_text("{}\n", encoding="utf-8")
+    for name in ("processor_config.json", "statistics.json", "embodiment_id.json"):
+        (processor / name).write_text("{}\n", encoding="utf-8")
+
+    index = checkpoint / "model.safetensors.index.json"
+    index.write_text(json.dumps({"weight_map": {"a": "missing.safetensors"}}), encoding="utf-8")
+    with pytest.raises(FileNotFoundError):
+        MODULE._artifact_identity(checkpoint, processor)
+
+    index.write_text(json.dumps({"weight_map": {"a": "../escape.safetensors"}}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Invalid checkpoint shard inventory"):
+        MODULE._artifact_identity(checkpoint, processor)

@@ -144,12 +144,24 @@ def _parameter_summary(module: torch.nn.Module) -> dict[str, int]:
 
 
 def _artifact_identity(checkpoint: Path, processor_dir: Path) -> dict[str, Any]:
-    checkpoint_files = [
-        "config.json",
-        "model.safetensors.index.json",
-        "model-00001-of-00002.safetensors",
-        "model-00002-of-00002.safetensors",
-    ]
+    index_name = "model.safetensors.index.json"
+    with (checkpoint / index_name).open("r", encoding="utf-8") as stream:
+        index = json.load(stream)
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise RuntimeError("Checkpoint safetensors index has no non-empty weight_map")
+    shard_names = sorted(set(weight_map.values()))
+    if not shard_names or any(
+        not isinstance(name, str)
+        or Path(name).name != name
+        or not name.endswith(".safetensors")
+        for name in shard_names
+    ):
+        raise RuntimeError(f"Invalid checkpoint shard inventory: {shard_names!r}")
+    checkpoint_files = ["config.json", index_name, *shard_names]
+    missing = [name for name in checkpoint_files if not (checkpoint / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"Checkpoint artifact inventory is incomplete: {missing}")
     processor_files = ["processor_config.json", "statistics.json", "embodiment_id.json"]
     return {
         "checkpoint": {
