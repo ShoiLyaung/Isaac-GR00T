@@ -383,7 +383,12 @@ def _nccl_flight_recorder_summary() -> dict[str, Any]:
             "last_record_id": max(record_ids) if record_ids else None,
             "no_circular_buffer_wrap": no_wrap,
             "operation_sequence_sha256": _digest(operations),
-            "operation_sequence": operations,
+            # The digest, count, and record-id bounds are sufficient to compare
+            # collective order across ranks.  Keeping the complete sequence in
+            # the gathered post-train object grows to hundreds of megabytes on
+            # long runs and adds a large, evidence-only NCCL transfer after the
+            # final optimizer step.
+            "operation_sequence_included": False,
             "error": None,
         }
     except BaseException as exc:
