@@ -10,6 +10,7 @@ compared before rank 0 writes one immutable JSON file per rank and phase.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 import hashlib
@@ -193,11 +194,14 @@ class FiniteTrainingMonitor(TrainerCallback):
         if torch.is_tensor(loss) and loss.numel() == 1:
             self._losses.append(loss.detach().reshape(()))
 
-    def capture_batch(self, inputs: dict[str, Any]) -> None:
+    def capture_batch(self, inputs: Mapping[str, Any]) -> None:
         if self._first_batch is not None:
             return
+        payload = inputs.get("inputs")
+        if not isinstance(payload, Mapping):
+            payload = inputs
         summary = {}
-        for key, value in sorted(inputs.items()):
+        for key, value in sorted(payload.items()):
             if not torch.is_tensor(value):
                 summary[key] = {"python_type": type(value).__qualname__}
                 continue
@@ -315,7 +319,7 @@ class EvidenceTrainerMixin:
         if inputs is None and len(args) >= 2:
             inputs = args[1]
         monitor = getattr(self, "_cleanroom_finite_monitor", None)
-        if monitor is not None and isinstance(inputs, dict):
+        if monitor is not None and isinstance(inputs, Mapping):
             monitor.capture_batch(inputs)
         loss = super().training_step(*args, **kwargs)
         if monitor is not None:
