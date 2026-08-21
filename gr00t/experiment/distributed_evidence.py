@@ -459,6 +459,7 @@ def record_pretrain(
     summary = {
         "phase": "pretrain",
         **_rank_identity(),
+        "resolved_config": _jsonable(config),
         "resolved_config_sha256": _digest(config),
         **_parameter_summary(model),
         "dataset_contract": _dataset_contract_summary(config, train_dataset),
@@ -471,6 +472,7 @@ def record_pretrain(
         summary,
         [
             "resolved_config_sha256",
+            "resolved_config",
             "parameters_sha256",
             "trainable_parameter_count",
             "trainable_key_set_sha256",
