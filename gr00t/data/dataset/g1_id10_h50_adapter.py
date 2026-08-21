@@ -335,6 +335,9 @@ def _validate_relative_stats(stats: dict[str, Any]) -> dict[str, Any]:
 class G1Id10H50EpisodeLoader(LeRobotEpisodeLoader):
     """Episode loader that exposes the frozen full-body project surface."""
 
+    raw_language_slug = RAW_LANGUAGE_SLUG
+    language = LANGUAGE
+
     def __init__(
         self,
         dataset_path: str | Path,
@@ -393,7 +396,9 @@ class G1Id10H50EpisodeLoader(LeRobotEpisodeLoader):
             raise ValueError("episode_index mismatch")
         if not np.all(raw["task_index"].to_numpy() == 0):
             raise ValueError("Only frozen task_index=0 is accepted")
-        if set(raw["annotation.human.action.task_description"].tolist()) != {RAW_LANGUAGE_SLUG}:
+        if set(raw["annotation.human.action.task_description"].tolist()) != {
+            self.raw_language_slug
+        }:
             raise ValueError("Raw language slug mismatch")
         if not np.all(raw["annotation.human.validity"].to_numpy() == 1):
             raise ValueError("Invalid demonstration row encountered")
@@ -403,7 +408,7 @@ class G1Id10H50EpisodeLoader(LeRobotEpisodeLoader):
                 raise ValueError("Inspire hand command u must be within [0,1]")
 
         result = pd.DataFrame(index=raw.index)
-        result["language.annotation.human.task_description"] = [LANGUAGE] * len(raw)
+        result["language.annotation.human.task_description"] = [self.language] * len(raw)
         for key, dim in FIXED_STATE_DIMS.items():
             value = np.asarray(self.adapter_config["fixed_state"][key], dtype=np.float32)
             assert value.shape == (dim,)

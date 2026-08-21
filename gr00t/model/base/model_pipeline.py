@@ -21,7 +21,7 @@ from gr00t.configs.base_config import Config
 from gr00t.data.collator import BasicDataCollator
 from gr00t.data.dataset.factory import DatasetFactory
 from gr00t.data.interfaces import BaseProcessor
-from gr00t.experiment.dist_utils import get_rank
+from gr00t.experiment.dist_utils import get_rank, run_on_rank0
 import numpy as np
 import torch
 from transformers import PreTrainedModel
@@ -63,6 +63,11 @@ def convert_tensors_to_lists(obj):
         return [convert_tensors_to_lists(item) for item in obj]
     else:
         return obj
+
+
+def _save_json(path: Path, value) -> None:
+    with path.open("w", encoding="utf-8") as stream:
+        json.dump(value, stream, indent=2)
 
 
 class BasicPipeline(ModelPipeline):
@@ -113,9 +118,12 @@ class BasicPipeline(ModelPipeline):
         # Save dataset statistics for inference
         stats = train_dataset.get_dataset_statistics()
         stats_dict = convert_tensors_to_lists(stats)
-        # Save statistics
-        with open(save_cfg_dir / "dataset_statistics.json", "w") as f:
-            json.dump(stats_dict, f, indent=2)
+        run_on_rank0(
+            _save_json,
+            save_cfg_dir / "dataset_statistics.json",
+            stats_dict,
+            label="basic_pipeline.dataset_statistics",
+        )
         logging.info("Saved dataset statistics for inference")
 
         return train_dataset, eval_dataset

@@ -28,12 +28,23 @@ from transformers import TrainingArguments, set_seed
 import wandb
 
 from gr00t.configs.base_config import Config
+from gr00t.experiment.dist_utils import run_on_rank0, run_or_wait_on_rank0
+from gr00t.experiment.distributed_evidence import (
+    EvidenceTrainerMixin,
+    create_monitor,
+    record_posttrain,
+    record_pretrain,
+)
 
 # Use custom trainer that profiles data loading & forward times
 from gr00t.experiment.trainer import Gr00tTrainer, ProfCallback
 from gr00t.experiment.utils import BestMetricCheckpointCallback, CheckpointFormatCallback
 from gr00t.model import MODEL_REGISTRY
 from gr00t.utils.initial_actions import INITIAL_ACTIONS_FILENAME, save_initial_actions
+
+
+class CleanroomEvidenceTrainer(EvidenceTrainerMixin, Gr00tTrainer):
+    """Official trainer plus optional scalar-only conformance observation."""
 
 
 def setup_logging(debug: bool = False):
@@ -113,22 +124,61 @@ def warn_configs(config: Config):
         )
 
 
+def _init_distributed_process_group() -> int:
+    """Bind CUDA before eagerly initializing the NCCL communicator."""
+
+    if dist.is_initialized():
+        return dist.get_rank()
+    if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(
+            backend="nccl",
+            device_id=torch.device(f"cuda:{local_rank}"),
+        )
+        return dist.get_rank()
+    return 0
+
+
+def save_run_config_artifacts(
+    save_cfg_dir: Path,
+    output_dir: Path,
+    config: Config,
+    experiment_name: str,
+) -> None:
+    """Write the resolved config artifacts from rank 0."""
+
+    save_cfg_dir.mkdir(parents=True, exist_ok=True)
+    config.save(save_cfg_dir / "config.yaml")
+    omegaconf_config = OmegaConf.create(config.__dict__)
+    omegaconf_config["max_steps"] = config.training.max_steps
+    omegaconf_config["save_steps"] = config.training.save_steps
+    OmegaConf.save(omegaconf_config, save_cfg_dir / "conf.yaml", resolve=True)
+    with (output_dir / "wandb_config.json").open("w", encoding="utf-8") as stream:
+        json.dump(
+            {
+                "project": config.training.wandb_project,
+                "run_id": experiment_name,
+            },
+            stream,
+        )
+    logging.info(f"Saved config to {save_cfg_dir}")
+
+
+def save_initial_actions_artifact(train_dataset, save_cfg_dir: Path) -> None:
+    initial_actions = train_dataset.get_initial_actions()
+    if not initial_actions:
+        return
+    initial_actions_path = save_cfg_dir / INITIAL_ACTIONS_FILENAME
+    save_initial_actions(initial_actions, initial_actions_path)
+    logging.info(f"Saved {len(initial_actions)} initial actions to {initial_actions_path}")
+
+
 def run(config: Config):
     warn_configs(config)
 
     """Main training function."""
-    # If using distributed training, initialize the process group
-    if dist.is_initialized():
-        global_rank = dist.get_rank()
-    elif "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
-        dist.init_process_group(backend="nccl")
-        # only meaningful for torchrun, for ray it is always 0
-        local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local_rank)
-        global_rank = dist.get_rank()
-    else:
-        local_rank = 0
-        global_rank = 0
+    global_rank = _init_distributed_process_group()
 
     # Setup
     setup_logging()
@@ -147,42 +197,36 @@ def run(config: Config):
         output_dir = Path(config.training.output_dir) / config.training.experiment_name
         experiment_name = config.training.experiment_name
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    run_on_rank0(
+        output_dir.mkdir,
+        parents=True,
+        exist_ok=True,
+        label="output_dir.mkdir",
+    )
 
-    # Save config
     save_cfg_dir = output_dir / "experiment_cfg"
     processor_dir = output_dir / "processor"
-    config.save(save_cfg_dir / "config.yaml")
-    omegaconf_config = OmegaConf.create(config.__dict__)
-    omegaconf_config["max_steps"] = config.training.max_steps
-    omegaconf_config["save_steps"] = config.training.save_steps
-    OmegaConf.save(omegaconf_config, save_cfg_dir / "conf.yaml", resolve=True)
-    wandb_config_file = output_dir / "wandb_config.json"
-    with open(wandb_config_file, "w") as f:
-        json.dump(
-            {
-                "project": config.training.wandb_project,
-                "run_id": experiment_name,
-            },
-            f,
-        )
+    run_on_rank0(
+        save_run_config_artifacts,
+        save_cfg_dir,
+        output_dir,
+        config,
+        experiment_name,
+    )
 
-    logging.info(f"Saved config to {save_cfg_dir}")
-
-    # Initialize wandb if configured, but only on the main process
-    if config.training.use_wandb and global_rank == 0:
-        # Add git commit hash and version info to config
-        config_dict = {
-            **config.__dict__,
-            "git_commit_hash": os.environ.get("GROOT_COMMIT_HASH", "unknown"),
-        }
-
-        wandb.init(
-            project=config.training.wandb_project,
-            name=experiment_name,
-            config=config_dict,
-            tags=[config.data.mode],
-        )
+    if config.training.use_wandb:
+        with run_or_wait_on_rank0(label="wandb.init") as is_rank0:
+            if is_rank0:
+                config_dict = {
+                    **config.__dict__,
+                    "git_commit_hash": os.environ.get("GROOT_COMMIT_HASH", "unknown"),
+                }
+                wandb.init(
+                    project=config.training.wandb_project,
+                    name=experiment_name,
+                    config=config_dict,
+                    tags=[config.data.mode],
+                )
 
     # Setup model training pipeline.
     pipeline = MODEL_REGISTRY.get(type(config.model))(config, save_cfg_dir)
@@ -191,7 +235,13 @@ def run(config: Config):
     train_dataset, eval_dataset = pipeline.return_dataset()
     data_collator = pipeline.return_collator()
     processor = pipeline.return_processor()
-    processor.save_pretrained(processor_dir)
+    monitor = create_monitor()
+    record_pretrain(output_dir, config, model, train_dataset)
+    run_on_rank0(
+        processor.save_pretrained,
+        processor_dir,
+        label="processor.save_pretrained",
+    )
 
     # deepspeed config
     if config.training.num_gpus > 1 and not config.training.use_ddp:
@@ -240,7 +290,8 @@ def run(config: Config):
     )
 
     # Create trainer
-    trainer = Gr00tTrainer(
+    trainer_class = CleanroomEvidenceTrainer if monitor is not None else Gr00tTrainer
+    trainer = trainer_class(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -248,6 +299,9 @@ def run(config: Config):
         data_collator=data_collator,
         multiprocessing_context=config.data.multiprocessing_context,
     )
+    if monitor is not None:
+        monitor.bind_trainer(trainer)
+        trainer.add_callback(monitor)
 
     trainer.add_callback(
         CheckpointFormatCallback(
@@ -267,11 +321,11 @@ def run(config: Config):
         )
 
     if hasattr(train_dataset, "get_initial_actions"):
-        initial_actions = train_dataset.get_initial_actions()
-        if initial_actions:
-            initial_actions_path = save_cfg_dir / INITIAL_ACTIONS_FILENAME
-            save_initial_actions(initial_actions, initial_actions_path)
-            logging.info(f"Saved {len(initial_actions)} initial actions to {initial_actions_path}")
+        run_on_rank0(
+            save_initial_actions_artifact,
+            train_dataset,
+            save_cfg_dir,
+        )
 
     # Train
     logging.info("🚀 Starting training...")
@@ -305,6 +359,8 @@ def run(config: Config):
             trainer.train(resume_from_checkpoint=True)
     else:
         trainer.train(resume_from_checkpoint=True)
+
+    record_posttrain(output_dir, config, model, trainer, monitor)
 
     # Save final model
     trainer.save_model()

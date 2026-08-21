@@ -20,13 +20,9 @@ from gr00t.data.dataset.g1_id10_h50_adapter import (
     ACTION_GROUPS,
     ACTION_SLICES,
     ACTIVE_ACTION_DIM,
-    CANONICAL_INFO_SHA256,
-    CANONICAL_MODALITY_SHA256,
     FIXED_ACTION_DIMS,
     FIXED_STATE_DIMS,
-    LANGUAGE,
     PADDED_DIM,
-    RAW_LANGUAGE_SLUG,
     STATE_GROUPS,
     STATE_SLICES,
     G1Id10H50EpisodeLoader,
@@ -51,6 +47,10 @@ ADAPTER_KIND = "g1_id10_h40_native30_v1"
 BASELINE_ID = "ID10_INSPIRE6_TASK_BASELINE_H40_NATIVE30"
 EMBODIMENT_TAG = "new_embodiment"
 EMBODIMENT_ID = 10
+LANGUAGE = "insert the shaft into the housing"
+RAW_LANGUAGE_SLUG = LANGUAGE
+CANONICAL_INFO_SHA256 = "4574ae04f1e830147f87e70f1c30db05df899403c4e381bfa1fac323118abd04"
+CANONICAL_MODALITY_SHA256 = "d20c33542b42e3f114af54e9f3e7432d3528e38a64b4216a6c44d33bcdcba67d"
 TEMPORAL_OPTION = "CANONICAL_NATIVE_REPRESENTED_30HZ_ROW_GRID_V1"
 VIEW_SCHEMA_VERSION = "g1-id10-h40-native30-loader-view-v1"
 CONFIG_SCHEMA_VERSION = "g1-id10-h40-native30-adapter-config-v1"
@@ -225,6 +225,9 @@ def _validate_relative_stats(stats: dict[str, Any]) -> dict[str, Any]:
 
 class G1Id10H40Native30EpisodeLoader(G1Id10H50EpisodeLoader):
     """H40/native-row-grid loader; H50 temporal evidence is never accepted."""
+
+    raw_language_slug = RAW_LANGUAGE_SLUG
+    language = LANGUAGE
 
     def __init__(
         self,

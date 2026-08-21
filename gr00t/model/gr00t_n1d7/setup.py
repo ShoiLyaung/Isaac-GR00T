@@ -24,7 +24,7 @@ from transformers import AutoModel, AutoProcessor
 from gr00t.configs.base_config import Config
 from gr00t.configs.model.gr00t_n1d7 import Gr00tN1d7Config
 from gr00t.data.dataset.factory import DatasetFactory
-from gr00t.experiment.dist_utils import get_rank
+from gr00t.experiment.dist_utils import run_on_rank0
 from gr00t.model.base.model_pipeline import ModelPipeline
 from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7
 from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import Gr00tN1d7Processor
@@ -42,6 +42,16 @@ def convert_tensors_to_lists(obj):
         return [convert_tensors_to_lists(item) for item in obj]
     else:
         return obj
+
+
+def _save_json(path: Path, value) -> None:
+    with path.open("w", encoding="utf-8") as stream:
+        json.dump(value, stream, indent=2)
+
+
+def _save_text(path: Path, value: str) -> None:
+    with path.open("w", encoding="utf-8") as stream:
+        stream.write(value)
 
 
 class Gr00tN1d7Pipeline(ModelPipeline):
@@ -127,9 +137,12 @@ class Gr00tN1d7Pipeline(ModelPipeline):
             )
 
         logging.debug(f"Model Config: {model.config}")
-        if get_rank() == 0:
-            with open(self.save_cfg_dir / "final_model_config.json", "w") as f:
-                f.write(model.config.to_filtered_json())
+        run_on_rank0(
+            _save_text,
+            self.save_cfg_dir / "final_model_config.json",
+            model.config.to_filtered_json(),
+            label="gr00t_n1d7.final_model_config",
+        )
         # Print parameter statistics
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -211,9 +224,12 @@ class Gr00tN1d7Pipeline(ModelPipeline):
         logging.debug(
             f"Processor configs for training: {json.dumps({k: str(v) for k, v in vars(processor).items()}, indent=2)}"
         )
-        if get_rank() == 0:
-            with open(self.save_cfg_dir / "final_processor_config.json", "w") as f:
-                json.dump({k: str(v) for k, v in vars(processor).items()}, f, indent=2)
+        run_on_rank0(
+            _save_json,
+            self.save_cfg_dir / "final_processor_config.json",
+            {key: str(value) for key, value in vars(processor).items()},
+            label="gr00t_n1d7.final_processor_config",
+        )
 
         self.processor = processor
         dataset_factory = DatasetFactory(config=self.config)
@@ -222,9 +238,12 @@ class Gr00tN1d7Pipeline(ModelPipeline):
         # Save dataset statistics for inference
         stats = train_dataset.get_dataset_statistics()
         stats_dict = convert_tensors_to_lists(stats)
-        # Save statistics
-        with open(save_cfg_dir / "dataset_statistics.json", "w") as f:
-            json.dump(stats_dict, f, indent=2)
+        run_on_rank0(
+            _save_json,
+            save_cfg_dir / "dataset_statistics.json",
+            stats_dict,
+            label="gr00t_n1d7.dataset_statistics",
+        )
         logging.info("Saved dataset statistics for inference")
 
         return train_dataset, eval_dataset
