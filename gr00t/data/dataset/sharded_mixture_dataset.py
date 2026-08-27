@@ -198,6 +198,7 @@ class ShardedMixtureDataset(IterableDataset):
             self.world_size = 1
         self.worker_id = None
         self.num_workers = None
+        self._samples_yielded_by_dataset = [0 for _ in self.datasets]
 
         # Initialize shard caching system
         self.curr_shard = None
@@ -391,7 +392,9 @@ class ShardedMixtureDataset(IterableDataset):
             indices_in_shard = np.arange(len(self.curr_shard))
             rng.shuffle(indices_in_shard)
             for index in indices_in_shard:
-                yield self.curr_shard[index]
+                sample = self.curr_shard[index]
+                self._samples_yielded_by_dataset[dataset_index] += 1
+                yield sample
 
             # Clean up cached shard to free memory
             self.delete_cached_shard()
@@ -445,6 +448,39 @@ class ShardedMixtureDataset(IterableDataset):
         self.curr_shard_index = -1
         self.curr_shard = None
         self._cache_job = None
+        self._samples_yielded_by_dataset = [0 for _ in self.datasets]
+
+    def get_sampling_evidence(self) -> dict:
+        """Return rank-local sample counts accumulated by this iterator.
+
+        Counts are exact when the DataLoader iterates this object in the rank
+        process (``dataloader_num_workers=0``). Worker subprocesses own copies
+        of an IterableDataset, so their counters cannot be recovered from the
+        parent object without adding an inter-process reporting mechanism.
+        """
+        total_weight = sum(float(weight) for weight in self.weights)
+        datasets = []
+        for index, (dataset, weight, yielded) in enumerate(
+            zip(self.datasets, self.weights, self._samples_yielded_by_dataset)
+        ):
+            datasets.append(
+                {
+                    "dataset_index": index,
+                    "dataset_path": str(dataset.dataset_path),
+                    "sampling_weight": float(weight),
+                    "normalized_sampling_weight": float(weight) / total_weight,
+                    "samples_yielded": yielded,
+                }
+            )
+        return {
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "iterator_worker_id": self.worker_id,
+            "iterator_num_workers": self.num_workers,
+            "rank_local_counts_available": self.worker_id == 0 and self.num_workers == 1,
+            "total_samples_yielded": sum(self._samples_yielded_by_dataset),
+            "datasets": datasets,
+        }
 
     def print_dataset_statistics(self):
         """Print formatted dataset statistics for debugging and monitoring."""

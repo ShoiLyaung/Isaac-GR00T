@@ -24,11 +24,7 @@ import torch
 import torch.distributed as dist
 from transformers.trainer_callback import TrainerCallback
 
-from gr00t.experiment.dist_utils import (
-    get_collective_trace,
-    record_collective,
-    run_on_rank0,
-)
+from gr00t.experiment.dist_utils import get_collective_trace, record_collective, run_on_rank0
 
 
 def evidence_enabled() -> bool:
@@ -112,7 +108,13 @@ def _dataset_contract_summary(config: Any, train_dataset: Any) -> dict[str, Any]
         path = Path(spec.dataset_paths[0])
         info_path = path / "meta/info.json"
         info = json.loads(info_path.read_text(encoding="utf-8"))
-        view_path = path / "meta/g1_id10_h40_native30_view_manifest.json"
+        view_paths = sorted((path / "meta").glob("*_view_manifest.json"))
+        if len(view_paths) > 1:
+            raise ValueError(
+                f"dataset has multiple loader view manifests: "
+                f"{[view_path.name for view_path in view_paths]}"
+            )
+        view_path = view_paths[0] if view_paths else None
         adapter_path = Path(spec.adapter_config_path) if spec.adapter_config_path else None
         modality = config.data.modality_configs[spec.embodiment_tag]
         leaf = leaves[index] if index < len(leaves) else None
@@ -120,21 +122,15 @@ def _dataset_contract_summary(config: Any, train_dataset: Any) -> dict[str, Any]
             "dataset_path": str(path),
             "dataset_adapter": spec.dataset_adapter,
             "adapter_config_path": str(adapter_path) if adapter_path else None,
-            "adapter_config_sha256": (
-                _file_sha256(adapter_path) if adapter_path else None
-            ),
+            "adapter_config_sha256": (_file_sha256(adapter_path) if adapter_path else None),
             "embodiment_tag": spec.embodiment_tag,
             "info": {
                 "total_episodes": info.get("total_episodes"),
                 "total_frames": info.get("total_frames"),
                 "fps": info.get("fps"),
                 "splits": info.get("splits"),
-                "state_shape": info.get("features", {})
-                .get("observation.state", {})
-                .get("shape"),
-                "action_shape": info.get("features", {})
-                .get("action", {})
-                .get("shape"),
+                "state_shape": info.get("features", {}).get("observation.state", {}).get("shape"),
+                "action_shape": info.get("features", {}).get("action", {}).get("shape"),
             },
             "modality_config": _jsonable(modality),
             "leaf_dataset_class": (
@@ -142,15 +138,37 @@ def _dataset_contract_summary(config: Any, train_dataset: Any) -> dict[str, Any]
             ),
             "action_horizon": getattr(leaf, "action_horizon", None),
         }
-        if view_path.is_file():
-            entry["loader_view_manifest"] = json.loads(
-                view_path.read_text(encoding="utf-8")
-            )
+        if view_path is not None:
+            entry["loader_view_manifest_path"] = str(view_path)
+            entry["loader_view_manifest"] = json.loads(view_path.read_text(encoding="utf-8"))
             entry["loader_view_manifest_sha256"] = _file_sha256(view_path)
         datasets.append(entry)
     return {
         "datasets": datasets,
         "statistics_sha256": _digest(train_dataset.get_dataset_statistics()),
+    }
+
+
+def _dataset_sampling_summary(config: Any, trainer: Any) -> dict[str, Any]:
+    dataloader_num_workers = int(config.training.dataloader_num_workers)
+    train_dataset = getattr(trainer, "train_dataset", None)
+    get_sampling_evidence = getattr(train_dataset, "get_sampling_evidence", None)
+    if not callable(get_sampling_evidence):
+        return {
+            "available": False,
+            "dataloader_num_workers": dataloader_num_workers,
+            "rank_local_counts_exact": False,
+        }
+
+    evidence = _jsonable(get_sampling_evidence())
+    rank_local_counts_exact = bool(
+        dataloader_num_workers == 0 and evidence.get("rank_local_counts_available")
+    )
+    return {
+        "available": True,
+        "dataloader_num_workers": dataloader_num_workers,
+        "rank_local_counts_exact": rank_local_counts_exact,
+        "evidence": evidence,
     }
 
 
@@ -209,9 +227,7 @@ class FiniteTrainingMonitor(TrainerCallback):
                 "shape": list(value.shape),
                 "dtype": str(value.dtype),
                 "finite": (
-                    bool(torch.isfinite(value).all().item())
-                    if value.is_floating_point()
-                    else None
+                    bool(torch.isfinite(value).all().item()) if value.is_floating_point() else None
                 ),
             }
             if key == "action_mask":
@@ -236,9 +252,7 @@ class FiniteTrainingMonitor(TrainerCallback):
     ):
         del args, state, control
         wrapped_model = (
-            getattr(self._trainer, "model_wrapped", None)
-            if self._trainer is not None
-            else model
+            getattr(self._trainer, "model_wrapped", None) if self._trainer is not None else model
         )
         norm = getattr(wrapped_model, "get_global_grad_norm", lambda: None)()
         if norm is not None:
@@ -294,9 +308,7 @@ class FiniteTrainingMonitor(TrainerCallback):
             "finite_loss_count": sum(math.isfinite(value) for value in losses),
             "gradient_norm_count": len(grad_norms),
             "gradient_norms": grad_norms,
-            "finite_gradient_norm_count": sum(
-                math.isfinite(value) for value in grad_norms
-            ),
+            "finite_gradient_norm_count": sum(math.isfinite(value) for value in grad_norms),
             "optimizer_step_events": len(self._skipped),
             "skipped_optimizer_steps": sum(self._skipped),
             "overflow_events": sum(self._overflow),
@@ -304,6 +316,7 @@ class FiniteTrainingMonitor(TrainerCallback):
             "complete": complete,
             "error": error,
         }
+
 
 def create_monitor() -> FiniteTrainingMonitor | None:
     if not evidence_enabled():
@@ -332,9 +345,7 @@ def _rank_identity() -> dict[str, int]:
         "rank": dist.get_rank() if dist.is_initialized() else 0,
         "local_rank": int(os.environ.get("LOCAL_RANK", "0")),
         "world_size": dist.get_world_size() if dist.is_initialized() else 1,
-        "cuda_current_device": (
-            torch.cuda.current_device() if torch.cuda.is_available() else -1
-        ),
+        "cuda_current_device": (torch.cuda.current_device() if torch.cuda.is_available() else -1),
     }
 
 
@@ -368,11 +379,7 @@ def _nccl_flight_recorder_summary() -> dict[str, Any]:
         contiguous = bool(record_ids) and sorted(record_ids) == list(
             range(min(record_ids), max(record_ids) + 1)
         )
-        no_wrap = (
-            contiguous
-            and min(record_ids) == 0
-            and len(record_ids) <= buffer_size
-        )
+        no_wrap = contiguous and min(record_ids) == 0 and len(record_ids) <= buffer_size
         return {
             "required": True,
             "complete": bool(operations) and no_wrap,
@@ -515,6 +522,7 @@ def record_posttrain(
         "deepspeed_engine_class": engine_class,
         "trainer_global_step": int(trainer.state.global_step),
         "training_monitor": training_monitor,
+        "dataset_sampling": _dataset_sampling_summary(config, trainer),
         "application_collective_trace": get_collective_trace(),
         "nccl_flight_recorder": nccl_trace,
     }

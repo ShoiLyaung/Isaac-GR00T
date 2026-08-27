@@ -215,6 +215,58 @@ class TestShardedMixtureDataset:
             )
         processor.set_statistics.assert_called_once()
 
+    def test_sampling_evidence_counts_rank_local_yields(self):
+        datasets = [
+            MockShardedDataset("/fake/source_a", num_shards=1, shard_length=2),
+            MockShardedDataset("/fake/source_b", num_shards=1, shard_length=3),
+        ]
+        processor = MagicMock()
+        with patch("torch.distributed.is_initialized", return_value=False):
+            mixture = ShardedMixtureDataset(
+                datasets=datasets,
+                weights=[1.0, 3.0],
+                processor=processor,
+                training=False,
+            )
+
+        iterator = iter(mixture)
+        try:
+            for _ in range(5):
+                next(iterator)
+        finally:
+            iterator.close()
+            mixture._executor.shutdown(wait=True)
+
+        evidence = mixture.get_sampling_evidence()
+        assert evidence["rank"] == 0
+        assert evidence["world_size"] == 1
+        assert evidence["rank_local_counts_available"] is True
+        assert evidence["total_samples_yielded"] == 5
+        assert evidence["datasets"] == [
+            {
+                "dataset_index": 0,
+                "dataset_path": "/fake/source_a",
+                "sampling_weight": 1.0,
+                "normalized_sampling_weight": 0.25,
+                "samples_yielded": 2,
+            },
+            {
+                "dataset_index": 1,
+                "dataset_path": "/fake/source_b",
+                "sampling_weight": 3.0,
+                "normalized_sampling_weight": 0.75,
+                "samples_yielded": 3,
+            },
+        ]
+
+    def test_reset_seed_resets_sampling_counts(self):
+        mixture = self._make_mixture(training=False)
+        mixture._samples_yielded_by_dataset = [3, 7]
+
+        mixture.reset_seed(123)
+
+        assert mixture.get_sampling_evidence()["total_samples_yielded"] == 0
+
 
 # ---------------------------------------------------------------------------
 # ShardedSingleStepDataset tests (with mocked episode loader)

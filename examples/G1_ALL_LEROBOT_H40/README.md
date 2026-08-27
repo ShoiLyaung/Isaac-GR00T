@@ -35,3 +35,11 @@ The recipe uses natural H40-anchor weights. All five sources have non-zero
 probability, but a finite 20,000-step run does not guarantee a literal visit to
 every anchor. Exact shaft/housing geometry and formal single/dual-hand labels
 are not present in the metadata and remain provenance unknowns.
+
+`launch_joint_training.py` is the bounded external supervisor used for GPU
+execution. Its `plan` action is CPU-only. Its `profile` mode runs two optimizer
+steps; its `formal` mode freezes 20,000 steps, two physical GPUs, global batch
+32, H40, visual/projector/diffusion tuning, an eight-hour wall, a 128 GiB
+attempt limit, offline local inputs, and zero automatic retries. The supervisor
+owns a single isolated `torchrun` child and two cooperative GPU leases; it does
+not add service orchestration to the GR00T core.
