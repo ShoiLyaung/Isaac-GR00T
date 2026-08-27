@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -129,3 +130,11 @@ def test_posttrain_evidence_closes_finite_nccl_and_sampling_contract(tmp_path):
     assert result["complete"] is True
     assert result["actual_total_samples"] == 32
     assert result["source_sample_totals"] == {"a": 18, "b": 14}
+
+
+def test_proc_identity_rejects_pid_reuse_identity():
+    identity = supervisor.proc_identity(os.getpid())
+    assert identity is not None
+    assert supervisor.identity_matches(identity) is True
+    identity["start_time"] += 1
+    assert supervisor.identity_matches(identity) is False

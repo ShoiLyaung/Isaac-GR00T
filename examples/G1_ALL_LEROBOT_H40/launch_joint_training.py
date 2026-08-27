@@ -130,32 +130,72 @@ def directory_size(root: Path) -> int:
     )
 
 
-def descendant_pids(root_pid: int) -> set[int]:
-    """Return the current procfs descendants of one owned process."""
-    owned = {root_pid}
-    queue = [root_pid]
+def proc_identity(pid: int) -> dict[str, int] | None:
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+        tail = raw[raw.rfind(")") + 2 :].split()
+        return {"pid": pid, "ppid": int(tail[1]), "start_time": int(tail[19])}
+    except (
+        FileNotFoundError,
+        ProcessLookupError,
+        PermissionError,
+        ValueError,
+        IndexError,
+    ):
+        return None
+
+
+def identity_matches(identity: dict[str, int]) -> bool:
+    try:
+        raw = Path(f"/proc/{identity['pid']}/stat").read_text()
+        tail = raw[raw.rfind(")") + 2 :].split()
+    except (
+        FileNotFoundError,
+        ProcessLookupError,
+        PermissionError,
+        ValueError,
+        IndexError,
+    ):
+        return False
+    return tail[0] != "Z" and int(tail[19]) == identity["start_time"]
+
+
+def direct_children(pid: int) -> list[int]:
+    try:
+        raw = Path(f"/proc/{pid}/task/{pid}/children").read_text().strip()
+    except (FileNotFoundError, PermissionError):
+        return []
+    return [int(value) for value in raw.split()] if raw else []
+
+
+def discover_owned(
+    seeds: dict[int, dict[str, int]],
+) -> dict[int, dict[str, int]]:
+    owned = dict(seeds)
+    queue = [identity["pid"] for identity in owned.values() if identity_matches(identity)]
     while queue:
         parent = queue.pop()
-        try:
-            children = Path(f"/proc/{parent}/task/{parent}/children").read_text().split()
-        except (FileNotFoundError, PermissionError, ProcessLookupError):
-            continue
-        for raw in children:
-            child = int(raw)
-            if child not in owned:
-                owned.add(child)
+        for child in direct_children(parent):
+            identity = proc_identity(child)
+            if identity is not None and identity["ppid"] == parent and child not in owned:
+                owned[child] = identity
                 queue.append(child)
     return owned
 
 
-def process_group_exists(group_id: int) -> bool:
+def app_matches_attempt(pid: int, run_dir: Path, source_commit: str) -> bool:
+    """Recognize a rank process even if bwrap has already reparented it."""
     try:
-        os.killpg(group_id, 0)
-    except ProcessLookupError:
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        environment = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
         return False
-    except PermissionError:
-        return True
-    return True
+    command_text = b" ".join(command)
+    return (
+        b"launch_finetune.py" in command_text
+        and str(run_dir).encode() in command_text
+        and f"GROOT_COMMIT_HASH={source_commit}".encode() in environment
+    )
 
 
 def choose_port() -> int:
@@ -487,22 +527,33 @@ def child_environment(run_dir: Path, source_commit: str) -> dict[str, str]:
     return inherited
 
 
-def _terminate_group(process: subprocess.Popen[bytes]) -> str:
-    process.poll()
-    if not process_group_exists(process.pid):
-        return "already_exited"
+def terminate_owned(owned: dict[int, dict[str, int]], term_grace: float = 30.0) -> str:
+    owned.update(discover_owned(owned))
+
+    def depth(identity: dict[str, int]) -> int:
+        result = 0
+        parent = identity["ppid"]
+        seen: set[int] = set()
+        while parent in owned and parent not in seen:
+            seen.add(parent)
+            result += 1
+            parent = owned[parent]["ppid"]
+        return result
+
     for sig, label, grace in (
-        (signal.SIGTERM, "term", 15.0),
+        (signal.SIGTERM, "term", term_grace),
         (signal.SIGKILL, "kill", 5.0),
     ):
-        try:
-            os.killpg(process.pid, sig)
-        except ProcessLookupError:
-            return label
+        alive = [identity for identity in owned.values() if identity_matches(identity)]
+        for identity in sorted(alive, key=depth, reverse=True):
+            if identity_matches(identity):
+                try:
+                    os.kill(identity["pid"], sig)
+                except ProcessLookupError:
+                    pass
         deadline = time.monotonic() + grace
         while time.monotonic() < deadline:
-            process.poll()
-            if not process_group_exists(process.pid):
+            if not any(identity_matches(identity) for identity in owned.values()):
                 return label
             time.sleep(0.2)
     return "kill_wait_expired"
@@ -641,7 +692,7 @@ def run(args: argparse.Namespace) -> int:
         exit_code: int | None = None
         peak_used = {"0": 0, "1": 0}
         sample_count = 0
-        owned_pids: set[int] = set()
+        owned: dict[int, dict[str, int]] = {}
         last_storage_check = 0.0
         process: subprocess.Popen[bytes] | None = None
         environment = plan["environment"]
@@ -660,17 +711,28 @@ def run(args: argparse.Namespace) -> int:
                     stderr=stderr,
                     start_new_session=True,
                 )
+                root_identity = proc_identity(process.pid)
+                if root_identity is None:
+                    raise RuntimeError("owned root process identity vanished at spawn")
+                owned[process.pid] = root_identity
                 while process.poll() is None:
-                    owned_pids.update(descendant_pids(process.pid))
+                    owned.update(discover_owned(owned))
                     snapshot = gpu_snapshot()
+                    for app in snapshot["compute_apps"]:
+                        if app["pid"] not in owned and app_matches_attempt(
+                            app["pid"], args.run_dir, source["source_commit"]
+                        ):
+                            identity = proc_identity(app["pid"])
+                            if identity is not None:
+                                owned[app["pid"]] = identity
                     unknown_apps = [
-                        app for app in snapshot["compute_apps"] if app["pid"] not in owned_pids
+                        app for app in snapshot["compute_apps"] if app["pid"] not in owned
                     ]
                     if unknown_apps:
                         # Close a short fork/procfs observation race before failing closed.
-                        owned_pids.update(descendant_pids(process.pid))
+                        owned.update(discover_owned(owned))
                         unknown_apps = [
-                            app for app in snapshot["compute_apps"] if app["pid"] not in owned_pids
+                            app for app in snapshot["compute_apps"] if app["pid"] not in owned
                         ]
                     if unknown_apps:
                         stop_reason = "unrelated GPU compute process appeared: " + json.dumps(
@@ -693,16 +755,18 @@ def run(args: argparse.Namespace) -> int:
                         if directory_size(args.run_dir) > mode.storage_limit_bytes:
                             stop_reason = "attempt storage limit exceeded"
                     if stop_reason:
-                        cleanup = _terminate_group(process)
+                        cleanup = terminate_owned(owned)
                         break
-                    time.sleep(10)
+                    time.sleep(2)
                 exit_code = process.wait()
-                if process_group_exists(process.pid):
-                    cleanup = _terminate_group(process)
+                owned.update(discover_owned(owned))
+                if any(identity_matches(identity) for identity in owned.values()):
+                    cleanup = terminate_owned(owned)
             except BaseException as exc:
                 stop_reason = stop_reason or f"{type(exc).__name__}: {exc}"
+                if owned:
+                    cleanup = terminate_owned(owned)
                 if process is not None:
-                    cleanup = _terminate_group(process)
                     exit_code = process.poll()
 
         wall_seconds = time.monotonic() - start
@@ -738,6 +802,7 @@ def run(args: argparse.Namespace) -> int:
             "wall_seconds": wall_seconds,
             "peak_total_used_mib": peak_used,
             "resource_sample_count": sample_count,
+            "owned_processes": sorted(owned.values(), key=lambda item: item["pid"]),
             "attempt_bytes": directory_size(args.run_dir),
             "storage_limit_bytes": mode.storage_limit_bytes,
             "posttrain_evidence": posttrain,
