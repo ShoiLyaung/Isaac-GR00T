@@ -69,9 +69,7 @@ class DatasetFactory:
                         allow_padding=self.config.data.allow_padding,
                     )
                 elif dataset_spec.dataset_adapter == "g1_id25_h50_synthetic_zoh_v1":
-                    from gr00t.data.dataset.g1_id25_h50_adapter import (
-                        G1Id25H50SingleStepDataset,
-                    )
+                    from gr00t.data.dataset.g1_id25_h50_adapter import G1Id25H50SingleStepDataset
 
                     if dataset_spec.adapter_config_path is None:
                         raise ValueError("G1 ID25/H50 adapter requires adapter_config_path")
@@ -89,14 +87,14 @@ class DatasetFactory:
                         adapter_config_path=dataset_spec.adapter_config_path,
                     )
                 elif dataset_spec.dataset_adapter == "g1_id10_h50_synthetic_zoh_v1":
-                    from gr00t.data.dataset.g1_id10_h50_adapter import (
-                        G1Id10H50SingleStepDataset,
-                    )
+                    from gr00t.data.dataset.g1_id10_h50_adapter import G1Id10H50SingleStepDataset
 
                     if dataset_spec.adapter_config_path is None:
                         raise ValueError("G1 ID10/H50 adapter requires adapter_config_path")
                     if embodiment_tag != "new_embodiment":
-                        raise ValueError("G1 ID10/H50 adapter requires the official NEW_EMBODIMENT tag")
+                        raise ValueError(
+                            "G1 ID10/H50 adapter requires the official NEW_EMBODIMENT tag"
+                        )
                     dataset = G1Id10H50SingleStepDataset(
                         dataset_path=dataset_path,
                         embodiment_tag=EmbodimentTag(embodiment_tag),
@@ -114,10 +112,32 @@ class DatasetFactory:
                     )
 
                     if dataset_spec.adapter_config_path is None:
-                        raise ValueError("G1 ID10/H40/native30 adapter requires adapter_config_path")
+                        raise ValueError(
+                            "G1 ID10/H40/native30 adapter requires adapter_config_path"
+                        )
                     if embodiment_tag != "new_embodiment":
                         raise ValueError("G1 ID10/H40/native30 adapter requires NEW_EMBODIMENT")
                     dataset = G1Id10H40Native30SingleStepDataset(
+                        dataset_path=dataset_path,
+                        embodiment_tag=EmbodimentTag(embodiment_tag),
+                        modality_configs=self.config.data.modality_configs[embodiment_tag],
+                        video_backend=self.config.data.video_backend,
+                        shard_size=self.config.data.shard_size,
+                        episode_sampling_rate=self.config.data.episode_sampling_rate,
+                        seed=self.config.data.seed,
+                        allow_padding=self.config.data.allow_padding,
+                        adapter_config_path=dataset_spec.adapter_config_path,
+                    )
+                elif dataset_spec.dataset_adapter == "g1_all_lerobot_h40_v1":
+                    from gr00t.data.dataset.g1_all_lerobot_h40_adapter import (
+                        G1AllLerobotH40SingleStepDataset,
+                    )
+
+                    if dataset_spec.adapter_config_path is None:
+                        raise ValueError("G1 all-LeRobot H40 adapter requires adapter_config_path")
+                    if embodiment_tag != "new_embodiment":
+                        raise ValueError("G1 all-LeRobot H40 adapter requires NEW_EMBODIMENT")
+                    dataset = G1AllLerobotH40SingleStepDataset(
                         dataset_path=dataset_path,
                         embodiment_tag=EmbodimentTag(embodiment_tag),
                         modality_configs=self.config.data.modality_configs[embodiment_tag],

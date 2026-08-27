@@ -1,0 +1,68 @@
+{
+  "schema_version": "g1-all-lerobot-20k-recipe-v1",
+  "dataset_root": "/home/sl/groot_datasets/lerobot",
+  "training_language": "insert the shaft into the housing",
+  "camera_policy": "common_cam_left_high_only",
+  "sampling_policy": "h40_anchor_proportional",
+  "horizon": 40,
+  "total_episodes": 806,
+  "total_frames": 297340,
+  "total_h40_anchors": 265906,
+  "datasets": [
+    {
+      "source_id": "no_torque_100",
+      "relative_path": "100_episode_no_torque",
+      "raw_task_labels": ["100_notau"],
+      "expected_info_sha256": "41ddb6f3367f85e2b86da6986e86a45b90031fd36b55e834d9514037d0ec4a5a",
+      "expected_modality_sha256": "35bc54336adb4733a63e602c3813486d73244c7120097158ba17b368154b3e7f",
+      "episodes": 100,
+      "frames": 35449,
+      "h40_anchors": 31549,
+      "mix_ratio": 0.11864719111264883
+    },
+    {
+      "source_id": "aug1p2mm_220",
+      "relative_path": "aug1.2mm_insert the shaft into the housing",
+      "raw_task_labels": ["insert the shaft into the housing"],
+      "expected_info_sha256": "4574ae04f1e830147f87e70f1c30db05df899403c4e381bfa1fac323118abd04",
+      "expected_modality_sha256": "d20c33542b42e3f114af54e9f3e7432d3528e38a64b4216a6c44d33bcdcba67d",
+      "episodes": 220,
+      "frames": 105027,
+      "h40_anchors": 96447,
+      "mix_ratio": 0.3627108827931675
+    },
+    {
+      "source_id": "aug5p4mm_153",
+      "relative_path": "aug5.4mm_insert the shaft into the housing",
+      "raw_task_labels": ["insert the shaft into the housing"],
+      "expected_info_sha256": "212101bfca8d4910c09d0b26eadcb516db61b752d8b291cde9579db45efe2ce6",
+      "expected_modality_sha256": "d20c33542b42e3f114af54e9f3e7432d3528e38a64b4216a6c44d33bcdcba67d",
+      "episodes": 153,
+      "frames": 57353,
+      "h40_anchors": 51386,
+      "mix_ratio": 0.19324874203665957
+    },
+    {
+      "source_id": "plain_300",
+      "relative_path": "insert the shaft into the housing",
+      "raw_task_labels": ["insert the shaft into the housing"],
+      "expected_info_sha256": "41be055624d18836c3baec1b6af85bcceea98300589a418c6d0324d0df9b5c5b",
+      "expected_modality_sha256": "d20c33542b42e3f114af54e9f3e7432d3528e38a64b4216a6c44d33bcdcba67d",
+      "episodes": 300,
+      "frames": 87944,
+      "h40_anchors": 76244,
+      "mix_ratio": 0.2867329056132618
+    },
+    {
+      "source_id": "with_torque_33",
+      "relative_path": "insertion_shaft_with_torque",
+      "raw_task_labels": ["insertion_with_torque"],
+      "expected_info_sha256": "8b26b14df915e9f776dbb81b34ae2655ed163d58c83649f095d1be64fb237405",
+      "expected_modality_sha256": "35bc54336adb4733a63e602c3813486d73244c7120097158ba17b368154b3e7f",
+      "episodes": 33,
+      "frames": 11567,
+      "h40_anchors": 10280,
+      "mix_ratio": 0.03866027844426226
+    }
+  ]
+}
