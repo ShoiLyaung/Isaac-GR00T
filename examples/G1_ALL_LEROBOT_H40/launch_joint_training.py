@@ -324,9 +324,16 @@ class GpuLease:
 
     def __exit__(self, *_args: object) -> None:
         if self.handle is not None:
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-            self.handle.close()
+            handle = self.handle
             self.handle = None
+            try:
+                handle.seek(0)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                handle.close()
 
 
 def validate_source(expected_commit: str) -> dict[str, Any]:
