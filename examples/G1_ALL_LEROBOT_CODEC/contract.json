@@ -1,6 +1,6 @@
 {
   "schema_version": "g1-all-lerobot-codec-branch-contract-v1",
-  "status": "C2_FIXTURE_CANARY_ACCEPTED_NO_GPU_NO_TRAINING",
+  "status": "C3_PREPARATION_COMPLETE",
   "branch": "feat/groot-n17-all-lerobot-codec-r1",
   "baseline": {
     "branch": "feat/groot-n17-all-lerobot-20k-r1",
@@ -99,6 +99,45 @@
     "input_implementation_toolchain_unchanged": true,
     "training_eligible": false,
     "checkpoint_or_dataset_mutation": false,
+    "gpu_used": false,
+    "training_run": false,
+    "evaluator_run": false
+  },
+  "c3_preparation": {
+    "status": "COMPLETE",
+    "input_freeze_path": "examples/G1_ALL_LEROBOT_CODEC/c3_full_input_freeze.json",
+    "input_freeze_file_sha256": "f2e950071eb6187be7747658ae46598b8a3f741c37b710a6e2288c041ea7b9cd",
+    "input_freeze_content_sha256": "db9e78c8d7c6ada793f20ab3c41e1fb9e84550d2886646ea8b050f6c3f1de483",
+    "episode_freeze_core_sha256": "8d05f252b6ea388cb27a3155db8359ce7ea759436dfd9e9294c865fc47ea594a",
+    "plan_path": "examples/G1_ALL_LEROBOT_CODEC/c3_full_fixture_plan.json",
+    "sources": 5,
+    "episodes": 806,
+    "frames": 297340,
+    "h40_anchors": 265906,
+    "codec_gop30_anchors": 10291,
+    "maximum_episode_frames": 1163,
+    "focused_tests": 184,
+    "budget": {
+      "central_projected_persistent_bytes": 22955473233,
+      "conservative_projected_persistent_bytes": 28694341542,
+      "maximum_new_bytes": 30000000000,
+      "maximum_cumulative_wall_seconds": 10800,
+      "maximum_peak_rss_bytes": 16000000000,
+      "maximum_scratch_bytes": 256000000,
+      "max_workers": 1,
+      "automatic_retries": 0,
+      "resume": "EXPLICIT_MANUAL_ONLY"
+    },
+    "implementation": {
+      "content_addressed_objects": true,
+      "objects_non_overwritable": true,
+      "derivation_to_content_unique": true,
+      "manual_resume_requires_exact_prior_attempt_and_plan": true,
+      "automatic_resume": false,
+      "final_manifest_atomic_no_replace": true,
+      "full_materialization_executed": false
+    },
+    "candidate_warehouse_root_not_created": "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c3-full-r1",
     "gpu_used": false,
     "training_run": false,
     "evaluator_run": false

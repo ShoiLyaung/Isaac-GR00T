@@ -1,6 +1,6 @@
 # G1 all-LeRobot Codec branch contract
 
-Status: `C2_FIXTURE_CANARY_ACCEPTED_NO_GPU_NO_TRAINING`
+Status: `C3_PREPARATION_COMPLETE`
 
 This short-lived branch starts from
 `feat/groot-n17-all-lerobot-20k-r1@dd86aa8deb7c5ee314ca0cf082ab9468b0b61119`.
@@ -157,7 +157,9 @@ forbidden.
    ragged `M=0`, five-source DatasetFactory closure and exact-zero parity.
 3. **C2 — completed:** one bounded five-source causal fixture canary under the
    Human-supplied output, toolchain, time and storage contract.
-4. **C3:** separately authorized full 806-episode fixture coverage.
+4. **C3 — preparation completed:** all 806 inputs and a bounded budget are
+   frozen; immutable object storage, explicit manual resume and atomic final
+   manifest code are implemented. Full materialization is not authorized.
 5. **C4:** separately authorized GPU full-model parity.
 6. **C5:** separately authorized training and evaluator experiments.
 
@@ -234,6 +236,49 @@ Material evidence:
 
 This is a technically valid, non-training canary. It is not evidence of model
 quality and cannot be relabeled as full-dataset fixture coverage.
+
+## C3 full-fixture preparation
+
+The authoritative read-only freeze is
+`examples/G1_ALL_LEROBOT_CODEC/c3_full_input_freeze.json` (file SHA-256
+`f2e950071eb6187be7747658ae46598b8a3f741c37b710a6e2288c041ea7b9cd`,
+content SHA-256
+`db9e78c8d7c6ada793f20ab3c41e1fb9e84550d2886646ea8b050f6c3f1de483`).
+Its independent episode core digest is
+`8d05f252b6ea388cb27a3155db8359ce7ea759436dfd9e9294c865fc47ea594a`.
+
+The freeze proves 806 unique episodes across all five sources: 297,340 frames,
+265,906 H40 anchors and 10,291 Codec GOP30 anchors. All 806 Parquet files have
+complete row/episode/task/validity semantics; all 806 `cam_left_high` MP4 files
+have matching metadata/decode counts and the frozen H.264 source signature.
+The maximum complete episode is 1,163 frames. All 806 timestamp columns use a
+float32 30 Hz representation; four long episodes exceeded the old fixed
+`1e-6` tolerance despite matching that grid exactly. Validation now accepts
+only the exact ideal-float64 or exact stored-float32 grid.
+
+The budget is an empirical C2 projection, not execution authority:
+
+- central object storage: 22,955,473,233 bytes;
+- conservative storage: 28,694,341,542 bytes;
+- proposed fail-closed maximum: 30,000,000,000 bytes;
+- central wall time: 7,192.17 seconds; proposed maximum: 10,800 seconds;
+- proposed peak RSS: 16,000,000,000 bytes;
+- proposed scratch: 256,000,000 bytes; one CPU worker;
+- automatic retry/resume: zero; resume is explicit and manual only.
+
+`gr00t.data.codec_evidence.warehouse` wraps the current strict episode bundle
+format in content-addressed, non-overwritable objects. It binds one derivation
+digest to one content digest, fully verifies objects before reuse, never scans
+for a “latest” attempt, and publishes the final exact-coverage manifest with
+an atomic hard-link create that cannot replace an existing file. The frozen
+execution packet is `c3_full_fixture_plan.json`; its candidate warehouse root
+has not been created.
+
+Five earlier complete scans remain locally under gitignored `preliminary`
+filenames as superseded receipts; they are not part of the reproducible Git
+contract. Only tracked `c3_full_input_freeze.json` is authoritative.
+The combined C0–C3 preparation focused suite reports 184 passed with one
+existing Transformers cache deprecation warning.
 
 ## Recommended comparison matrix
 

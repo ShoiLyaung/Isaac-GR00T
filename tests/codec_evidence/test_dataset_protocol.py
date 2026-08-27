@@ -11,6 +11,7 @@ import sys
 
 from gr00t.data.codec_evidence import schemas as codec_schemas
 from gr00t.data.codec_evidence.codec_contract import (
+    PRODUCTION_FIXTURE_MODE,
     SYNTHETIC_FIXTURE_MODE,
     codec_contract_sha256,
     make_codec_contract,
@@ -451,6 +452,7 @@ def test_branch_owned_schemas_are_local_json_documents():
         "codec-evidence-global-contract-v1.schema.json",
         "codec-evidence-episode-bundle-v1.schema.json",
         "codec-evidence-episode-bundle-index-v1.schema.json",
+        "codec-evidence-full-fixture-manifest-v1.schema.json",
     )
     package_schema_dir = Path(codec_schemas.__file__).resolve().parent
     for name in names:
@@ -560,6 +562,67 @@ def test_bundle_schema_closes_accepted_bitstream_and_exact_raw_mv_fields(tmp_pat
         tmp_path,
         schemas,
         [("codec-evidence-episode-bundle-v1.schema.json", missing_production_audit)],
+    )
+    assert invalid.returncode != 0
+
+
+def test_full_fixture_schema_validates_instance_and_rejects_synthetic_contract(tmp_path):
+    contract = make_codec_contract(
+        fixture_mode=PRODUCTION_FIXTURE_MODE,
+        source_kind=SOURCE_KIND_NATIVE_CANONICAL,
+    )
+    uid = "a" * 64
+    payload = {
+        "schema_version": "codec-evidence-full-fixture-manifest-v1",
+        "fixture_id": "full-r1",
+        "complete": True,
+        "coverage_kind": "FULL_EPISODE_SET",
+        "camera_id": "cam_left_high",
+        "source_kind": SOURCE_KIND_NATIVE_CANONICAL,
+        "expected_episode_count": 1,
+        "covered_episode_count": 1,
+        "covered_episode_uids": [uid],
+        "covered_episode_uid_digest": "b" * 64,
+        "input_snapshot_sha256": "c" * 64,
+        "budget_sha256": "d" * 64,
+        "codec_contract": contract,
+        "codec_contract_sha256": codec_contract_sha256(contract),
+        "objects": [
+            {
+                "episode_uid": uid,
+                "camera_id": "cam_left_high",
+                "source_kind": SOURCE_KIND_NATIVE_CANONICAL,
+                "num_frames": 40,
+                "derivation_sha256": "e" * 64,
+                "object_content_sha256": "f" * 64,
+                "bundle_manifest_sha256": "1" * 64,
+                "bundle_manifest_bytes": 1,
+            }
+        ],
+        "producer_identity": {"implementation": "focused"},
+    }
+    names = (
+        "codec-evidence-global-contract-v1.schema.json",
+        "codec-evidence-full-fixture-manifest-v1.schema.json",
+    )
+    schemas = {name: json.loads(schema_path(name).read_text()) for name in names}
+    valid = _validate_jsonschema_cases(
+        tmp_path,
+        schemas,
+        [("codec-evidence-full-fixture-manifest-v1.schema.json", payload)],
+    )
+    assert valid.returncode == 0, valid.stderr
+
+    synthetic = make_codec_contract(
+        fixture_mode=SYNTHETIC_FIXTURE_MODE,
+        source_kind=SOURCE_KIND_NATIVE_CANONICAL,
+    )
+    payload["codec_contract"] = synthetic
+    payload["codec_contract_sha256"] = codec_contract_sha256(synthetic)
+    invalid = _validate_jsonschema_cases(
+        tmp_path,
+        schemas,
+        [("codec-evidence-full-fixture-manifest-v1.schema.json", payload)],
     )
     assert invalid.returncode != 0
 

@@ -29,6 +29,7 @@ from gr00t.data.codec_evidence.production import (
     toolchain_identity,
     trace_h264_headers,
     validate_canonical_parquet,
+    validate_represented_30hz_timestamps,
     verify_canonical_input_identity,
 )
 import numpy as np
@@ -223,3 +224,18 @@ def test_legal_intra_coded_p_picture_may_have_empty_mv_csr(tmp_path):
     arrays = build_episode_arrays(extracted, packets, headers)
     assert arrays["mv_cell_features"].shape == (5, 2, 2, 11)
     assert np.isfinite(arrays["mv_cell_features"]).all()
+
+
+def test_long_episode_accepts_exact_float32_or_float64_row_grid_only():
+    rows = np.arange(1163, dtype=np.float64)
+    ideal = rows / 30.0
+    stored_float32 = ideal.astype(np.float32)
+    assert np.array_equal(validate_represented_30hz_timestamps(ideal, 1163), ideal)
+    assert np.array_equal(
+        validate_represented_30hz_timestamps(stored_float32, 1163),
+        stored_float32.astype(np.float64),
+    )
+    drifted = stored_float32.copy()
+    drifted[-1] = np.nextafter(drifted[-1], np.float32(np.inf))
+    with pytest.raises(ValueError, match="exact float64/float32"):
+        validate_represented_30hz_timestamps(drifted, 1163)

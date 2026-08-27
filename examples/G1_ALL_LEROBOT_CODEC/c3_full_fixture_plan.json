@@ -1,0 +1,54 @@
+{
+  "schema_version": "g1-all-lerobot-c3-full-fixture-plan-v1",
+  "status": "C3_PREPARATION",
+  "branch": "feat/groot-n17-all-lerobot-codec-r1",
+  "baseline_commit": "dd86aa8deb7c5ee314ca0cf082ab9468b0b61119",
+  "c2_evidence": {
+    "root": "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c2-r1",
+    "terminal_sha256": "b79f2e72e3812759f381e10b18955eecac37ba55f10ee5010646cb72589d2aca",
+    "summary_sha256": "ee7fa65e7ed9aa9f3ee2ed0ad080002043f1dcaed8e446aec2ca5f28bf50a65b",
+    "fixture_manifest_sha256": "23ff5969dc150c8f809870e82679a296f1a81206140b49c4ede0a6e43d8d78c6"
+  },
+  "input_freeze": {
+    "path": "examples/G1_ALL_LEROBOT_CODEC/c3_full_input_freeze.json",
+    "file_sha256": "f2e950071eb6187be7747658ae46598b8a3f741c37b710a6e2288c041ea7b9cd",
+    "content_sha256": "db9e78c8d7c6ada793f20ab3c41e1fb9e84550d2886646ea8b050f6c3f1de483",
+    "episode_freeze_core_sha256": "8d05f252b6ea388cb27a3155db8359ce7ea759436dfd9e9294c865fc47ea594a",
+    "budget_sha256": "5f24fb31ea766941b3861247478b97b38b62de42ae9c34b64fe56d5dc762644b"
+  },
+  "coverage": {
+    "sources": 5,
+    "episodes": 806,
+    "frames": 297340,
+    "h40_anchors": 265906,
+    "codec_gop30_anchors": 10291,
+    "maximum_episode_frames": 1163,
+    "camera_id": "cam_left_high",
+    "source_kind": "NATIVE_CANONICAL_DECODED_DERIVED"
+  },
+  "budget": {
+    "central_projected_persistent_bytes": 22955473233,
+    "conservative_projected_persistent_bytes": 28694341542,
+    "maximum_new_bytes": 30000000000,
+    "central_projected_wall_seconds": 7192.171713566983,
+    "maximum_cumulative_wall_seconds": 10800,
+    "maximum_peak_rss_bytes": 16000000000,
+    "maximum_scratch_bytes": 256000000,
+    "max_workers": 1,
+    "automatic_retries": 0,
+    "raw_mv_mathematical_bound_bytes_not_budget": 182685696000
+  },
+  "warehouse": {
+    "candidate_root_not_created": "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c3-full-r1",
+    "object_schema_version": "codec-evidence-warehouse-object-v1",
+    "object_commit_schema_version": "codec-evidence-warehouse-object-commit-v1",
+    "derivation_binding_schema_version": "codec-evidence-derivation-binding-v1",
+    "final_manifest_schema_version": "codec-evidence-full-fixture-manifest-v1",
+    "object_policy": "CONTENT_ADDRESSED_NO_OVERWRITE_FULL_BUNDLE_CLOSURE",
+    "derivation_policy": "ONE_DERIVATION_DIGEST_MUST_MAP_TO_ONE_CONTENT_DIGEST",
+    "resume_policy": "EXPLICIT_MANUAL_ATTEMPT_ID_AND_RESUME_FROM_ATTEMPT_ID_EXACT_PLAN_ONLY",
+    "automatic_resume": false,
+    "final_manifest_policy": "HARDLINK_ATOMIC_CREATE_NO_REPLACE_AFTER_EXACT_806_OBJECT_VERIFICATION"
+  },
+  "preparation_scope": "INPUT_FREEZE_BUDGET_AND_WAREHOUSE_IMPLEMENTATION_ONLY"
+}

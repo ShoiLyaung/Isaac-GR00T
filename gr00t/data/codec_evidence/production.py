@@ -182,6 +182,23 @@ def raster_sha256(frame: np.ndarray) -> str:
     return sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
 
 
+def validate_represented_30hz_timestamps(value: Any, num_frames: int) -> np.ndarray:
+    """Accept only the exact ideal-float64 or stored-float32 30 Hz row grid."""
+
+    timestamps = np.asarray(value)
+    if timestamps.shape != (num_frames,) or not np.issubdtype(timestamps.dtype, np.floating):
+        raise ValueError("Represented timestamps must be floating [N]")
+    observed = timestamps.astype(np.float64)
+    if not np.isfinite(observed).all():
+        raise ValueError("Represented timestamps must be finite")
+    rows = np.arange(num_frames, dtype=np.float64)
+    ideal = rows / FPS
+    stored_float32 = ideal.astype(np.float32).astype(np.float64)
+    if not np.array_equal(observed, ideal) and not np.array_equal(observed, stored_float32):
+        raise ValueError("Timestamp differs from exact float64/float32 30 Hz row grid")
+    return observed
+
+
 def _encode_once(frames: np.ndarray, output: Path, *, ffmpeg: Path) -> None:
     frames = validate_rgb_sequence(frames)
     if output.exists() or output.is_symlink():
@@ -847,10 +864,7 @@ def validate_canonical_parquet(episode: CanonicalEpisodeInput) -> np.ndarray:
         raise ValueError("Canonical task_index must be zero")
     if np.any(table["annotation.human.validity"].to_numpy(dtype=np.int64) != 1):
         raise ValueError("Canonical episode contains invalid rows")
-    timestamps = table["timestamp"].to_numpy(dtype=np.float64)
-    if not np.allclose(timestamps, rows / FPS, rtol=0.0, atol=1e-6):
-        raise ValueError("Synthetic 30 Hz row-grid timestamp mismatch")
-    return timestamps
+    return validate_represented_30hz_timestamps(table["timestamp"].to_numpy(), episode.num_frames)
 
 
 def decode_canonical_pyav(
@@ -891,9 +905,11 @@ def decode_canonical_pyav(
     if len(frames) != episode.num_frames:
         raise ValueError("Canonical MP4 decode count differs from complete episode")
     rgb = validate_rgb_sequence(np.stack(frames))
+    validate_represented_30hz_timestamps(timestamps, episode.num_frames)
     decoded_seconds = np.asarray(seconds, dtype=np.float64)
-    if not np.allclose(decoded_seconds, timestamps, rtol=0.0, atol=1e-6):
-        raise ValueError("Canonical MP4 PTS differs from represented row-grid timestamps")
+    expected_seconds = np.arange(episode.num_frames, dtype=np.float64) / FPS
+    if not np.allclose(decoded_seconds, expected_seconds, rtol=0.0, atol=1e-12):
+        raise ValueError("Canonical MP4 PTS differs from the exact 30 Hz row grid")
     return rgb, {
         "source_file_sha256": episode.canonical_video_sha256,
         "stream": identity,
@@ -1214,6 +1230,7 @@ __all__ = [
     "toolchain_identity",
     "trace_h264_headers",
     "validate_canonical_parquet",
+    "validate_represented_30hz_timestamps",
     "validate_rgb_sequence",
     "verify_canonical_input_identity",
 ]

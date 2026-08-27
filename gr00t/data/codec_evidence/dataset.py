@@ -72,7 +72,7 @@ def episode_bundle_store_from_index_manifest(
     fixture_manifest_sha256: str,
     camera_id: str,
     source_kind: str,
-) -> EpisodeBundleStore:
+) -> Any:
     """Open a hash-pinned bundle index without generating any fixture data."""
 
     if not isinstance(fixture_manifest_sha256, str) or not SHA256_RE.fullmatch(
@@ -92,6 +92,21 @@ def episode_bundle_store_from_index_manifest(
         raise ValueError("Episode-bundle index SHA-256 mismatch")
     with manifest_path.open("r", encoding="utf-8") as stream:
         manifest = json.load(stream, object_pairs_hook=_reject_duplicate_pairs)
+    from .warehouse import FULL_FIXTURE_MANIFEST_SCHEMA_VERSION
+
+    if (
+        isinstance(manifest, dict)
+        and manifest.get("schema_version") == FULL_FIXTURE_MANIFEST_SCHEMA_VERSION
+    ):
+        from .warehouse import WarehouseEpisodeBundleStore
+
+        store = WarehouseEpisodeBundleStore(
+            root_path,
+            fixture_manifest_sha256=fixture_manifest_sha256,
+        )
+        if store.manifest["camera_id"] != camera_id or store.manifest["source_kind"] != source_kind:
+            raise ValueError("Full fixture manifest identity differs from adapter config")
+        return store
     required = {
         "schema_version",
         "complete",
@@ -155,6 +170,8 @@ def episode_bundle_store_from_index_manifest(
             raise ValueError("Episode-bundle manifest SHA-256 mismatch")
         pins[key] = entry["sha256"]
     store = EpisodeBundleStore(root_path, manifest_sha256_by_key=pins)
+    store.coverage_kind = "LEGACY_SUBSET_NONTRAINING"
+    store.fixture_manifest_schema_version = EPISODE_BUNDLE_INDEX_SCHEMA_VERSION
     for key in store.keys:
         bundle_identity = store.identity(key)
         if (
