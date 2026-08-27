@@ -3,8 +3,8 @@
 
 This file is deliberately outside the GR00T training core.  It owns one
 ``bwrap``/``torchrun`` process, two cooperative local GPU leases, and bounded
-resource evidence for either a two-step engineering profile or the frozen
-20,000-step training attempt.
+resource evidence for a two-step engineering profile, the frozen 20,000-step
+attempt, or an explicitly resumed 20,000-to-40,000-step continuation.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ GPU_QUERY = (
 
 @dataclass(frozen=True)
 class Mode:
+    resume_step: int
     max_steps: int
     save_steps: int
     save_total_limit: int
@@ -68,6 +69,7 @@ class Mode:
 
 MODES = {
     "profile": Mode(
+        resume_step=0,
         max_steps=2,
         save_steps=2,
         save_total_limit=1,
@@ -76,6 +78,7 @@ MODES = {
         storage_limit_bytes=64 * 1024**3,
     ),
     "formal": Mode(
+        resume_step=0,
         max_steps=20000,
         save_steps=1000,
         save_total_limit=2,
@@ -83,7 +86,38 @@ MODES = {
         timeout_seconds=28200,
         storage_limit_bytes=128 * 1024**3,
     ),
+    "continue_40k": Mode(
+        resume_step=20000,
+        max_steps=40000,
+        save_steps=1000,
+        save_total_limit=2,
+        save_only_model=False,
+        timeout_seconds=28200,
+        storage_limit_bytes=128 * 1024**3,
+    ),
 }
+
+
+class SupervisorSignals:
+    """Latch TERM/INT so the owned child and terminal evidence can be closed."""
+
+    def __init__(self) -> None:
+        self.signum: int | None = None
+        self._previous: dict[int, Any] = {}
+
+    def _handle(self, signum: int, _frame: Any) -> None:
+        if self.signum is None:
+            self.signum = signum
+
+    def __enter__(self) -> "SupervisorSignals":
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            self._previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, self._handle)
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        for signum, previous in self._previous.items():
+            signal.signal(signum, previous)
 
 
 def now() -> str:
@@ -409,8 +443,143 @@ def validate_materials(preparation_root: Path) -> dict[str, Any]:
     }
 
 
+def validate_resume_checkpoint(
+    checkpoint: Path, expected_step: int, target_step: int, contract_path: Path
+) -> dict[str, Any]:
+    if checkpoint.is_symlink():
+        raise RuntimeError("resume checkpoint root must not be a symlink")
+    checkpoint = checkpoint.resolve(strict=True)
+    if not checkpoint.is_dir() or checkpoint.name != f"checkpoint-{expected_step}":
+        raise RuntimeError(f"resume checkpoint must be checkpoint-{expected_step}: {checkpoint}")
+    if contract_path.is_symlink():
+        raise RuntimeError("resume contract must not be a symlink")
+    contract_path = contract_path.resolve(strict=True)
+    contract = load_json(contract_path)
+    if contract.get("schema_version") != "g1-all-lerobot-h40-resume-contract-v1":
+        raise RuntimeError("unsupported resume contract schema")
+    if contract.get("checkpoint_path") != str(checkpoint):
+        raise RuntimeError("resume contract checkpoint path mismatch")
+    if contract.get("resume_global_step") != expected_step:
+        raise RuntimeError("resume contract global step mismatch")
+    if contract.get("target_global_step") != target_step:
+        raise RuntimeError("resume contract target step mismatch")
+    continuation_training = contract.get("continuation_training")
+    if not isinstance(continuation_training, dict) or set(continuation_training) != {
+        "dataset_manifest_sha256",
+        "preparation_summary_sha256",
+        "cpu_mixture_closure_sha256",
+        "zero2_config_sha256",
+        "global_batch_size",
+        "action_horizon",
+    }:
+        raise RuntimeError("resume contract continuation training identity is invalid")
+
+    analysis_contract = contract.get("checkpoint_analysis")
+    if not isinstance(analysis_contract, dict):
+        raise RuntimeError("resume contract checkpoint_analysis is missing")
+    analysis_path = Path(str(analysis_contract.get("path", "")))
+    expected_analysis_sha256 = analysis_contract.get("sha256")
+    if (
+        not analysis_path.is_absolute()
+        or analysis_path.is_symlink()
+        or not isinstance(expected_analysis_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_analysis_sha256) is None
+    ):
+        raise RuntimeError("resume checkpoint analysis identity is invalid")
+    analysis_path = analysis_path.resolve(strict=True)
+    if sha256_file(analysis_path) != expected_analysis_sha256:
+        raise RuntimeError("resume checkpoint analysis hash mismatch")
+    analysis = load_json(analysis_path)
+    analyzed_checkpoint = analysis.get("checkpoint")
+    if (
+        analysis.get("analysis_succeeded") is not True
+        or not isinstance(analyzed_checkpoint, dict)
+        or analyzed_checkpoint.get("complete") is not True
+        or analyzed_checkpoint.get("global_step") != expected_step
+        or analyzed_checkpoint.get("path") != str(checkpoint)
+    ):
+        raise RuntimeError("resume checkpoint analysis does not bind this completed checkpoint")
+
+    trainer_state_path = checkpoint / "trainer_state.json"
+    trainer_state = load_json(trainer_state_path)
+    if trainer_state.get("global_step") != expected_step:
+        raise RuntimeError("resume checkpoint global_step mismatch")
+    if trainer_state.get("max_steps") != expected_step:
+        raise RuntimeError("resume checkpoint original max_steps mismatch")
+    latest = (checkpoint / "latest").read_text(encoding="utf-8").strip()
+    if latest != f"global_step{expected_step}":
+        raise RuntimeError("resume checkpoint DeepSpeed latest pointer mismatch")
+
+    model_index = load_json(checkpoint / "model.safetensors.index.json")
+    weight_map = model_index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise RuntimeError("resume checkpoint model index has no weight_map")
+    shard_names = sorted(set(weight_map.values()))
+    if not all(isinstance(name, str) for name in shard_names):
+        raise RuntimeError("resume checkpoint model shard is missing")
+
+    expected_files = contract.get("files")
+    if not isinstance(expected_files, dict) or not expected_files:
+        raise RuntimeError("resume contract files are missing")
+    required_names = {
+        "config.json",
+        "embodiment_id.json",
+        "latest",
+        "model.safetensors.index.json",
+        "processor_config.json",
+        "rng_state_0.pth",
+        "rng_state_1.pth",
+        "scheduler.pt",
+        "statistics.json",
+        "trainer_state.json",
+        "training_args.bin",
+        f"global_step{expected_step}/bf16_zero_pp_rank_0_mp_rank_00_optim_states.pt",
+        f"global_step{expected_step}/bf16_zero_pp_rank_1_mp_rank_00_optim_states.pt",
+        f"global_step{expected_step}/mp_rank_00_model_states.pt",
+        *shard_names,
+    }
+    if set(expected_files) != required_names:
+        raise RuntimeError("resume contract file set does not exactly cover full-state checkpoint")
+    verified_files: dict[str, dict[str, Any]] = {}
+    for relative, expected_sha256 in sorted(expected_files.items()):
+        relative_path = Path(relative)
+        if (
+            relative_path.is_absolute()
+            or ".." in relative_path.parts
+            or not isinstance(expected_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+        ):
+            raise RuntimeError(f"invalid resume contract file identity: {relative}")
+        path = checkpoint / relative_path
+        if path.is_symlink() or not path.is_file() or path.resolve(strict=True) != path:
+            raise RuntimeError(f"resume checkpoint file must be regular and contained: {relative}")
+        actual_sha256 = sha256_file(path)
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(f"resume checkpoint hash mismatch: {relative}")
+        verified_files[relative] = {"sha256": actual_sha256, "bytes": path.stat().st_size}
+
+    return {
+        "path": str(checkpoint),
+        "global_step": expected_step,
+        "original_max_steps": trainer_state["max_steps"],
+        "logical_bytes": directory_size(checkpoint),
+        "contract_path": str(contract_path),
+        "contract_sha256": sha256_file(contract_path),
+        "checkpoint_analysis_path": str(analysis_path),
+        "checkpoint_analysis_sha256": expected_analysis_sha256,
+        "continuation_training": continuation_training,
+        "verified_files": verified_files,
+        "model_shards": shard_names,
+    }
+
+
 def build_train_command(
-    *, mode: Mode, dataset_manifest: Path, train_output: Path, master_port: int
+    *,
+    mode: Mode,
+    dataset_manifest: Path,
+    train_output: Path,
+    master_port: int,
+    resume_checkpoint: Path | None = None,
 ) -> list[str]:
     command = [
         "uv",
@@ -460,11 +629,31 @@ def build_train_command(
         "--tune-visual",
         "--save-only-model" if mode.save_only_model else "--no-save-only-model",
     ]
+    if resume_checkpoint is not None:
+        command.extend(["--resume-from-checkpoint", str(resume_checkpoint)])
     return command
 
 
-def isolation_command(command: list[str], run_dir: Path) -> list[str]:
-    return [
+def validate_disjoint_output(run_dir: Path, resume_checkpoint: Path | None) -> None:
+    if resume_checkpoint is None:
+        return
+    resolved_run = run_dir.resolve(strict=False)
+    resolved_checkpoint = resume_checkpoint.resolve(strict=True)
+    for child, parent in (
+        (resolved_run, resolved_checkpoint),
+        (resolved_checkpoint, resolved_run),
+    ):
+        try:
+            child.relative_to(parent)
+        except ValueError:
+            continue
+        raise RuntimeError("run-dir and resume checkpoint must be disjoint")
+
+
+def isolation_command(
+    command: list[str], run_dir: Path, resume_checkpoint: Path | None = None
+) -> list[str]:
+    isolated = [
         "bwrap",
         "--die-with-parent",
         "--new-session",
@@ -481,12 +670,19 @@ def isolation_command(command: list[str], run_dir: Path) -> list[str]:
         "--bind",
         str(run_dir),
         str(run_dir),
-        "--unshare-net",
-        "--chdir",
-        str(SOURCE_ROOT),
-        "--",
-        *command,
     ]
+    if resume_checkpoint is not None:
+        isolated.extend(["--ro-bind", str(resume_checkpoint), str(resume_checkpoint)])
+    isolated.extend(
+        [
+            "--unshare-net",
+            "--chdir",
+            str(SOURCE_ROOT),
+            "--",
+            *command,
+        ]
+    )
+    return isolated
 
 
 def child_environment(run_dir: Path, source_commit: str) -> dict[str, str]:
@@ -567,7 +763,11 @@ def terminate_owned(owned: dict[int, dict[str, int]], term_grace: float = 30.0) 
 
 
 def _posttrain_evidence(
-    train_output: Path, expected_steps: int, source_ids: list[str]
+    train_output: Path,
+    *,
+    final_global_step: int,
+    steps_this_attempt: int,
+    source_ids: list[str],
 ) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "rank_files": [],
@@ -587,10 +787,10 @@ def _posttrain_evidence(
         monitor = value.get("training_monitor", {})
         evidence["training_monitors_complete"].append(
             monitor.get("complete") is True
-            and monitor.get("raw_loss_count") == expected_steps
-            and monitor.get("finite_loss_count") == expected_steps
-            and monitor.get("gradient_norm_count") == expected_steps
-            and monitor.get("finite_gradient_norm_count") == expected_steps
+            and monitor.get("raw_loss_count") == steps_this_attempt
+            and monitor.get("finite_loss_count") == steps_this_attempt
+            and monitor.get("gradient_norm_count") == steps_this_attempt
+            and monitor.get("finite_gradient_norm_count") == steps_this_attempt
             and monitor.get("skipped_optimizer_steps") == 0
             and monitor.get("overflow_events") == 0
         )
@@ -607,14 +807,16 @@ def _posttrain_evidence(
         if sampling.get("rank_local_counts_exact") is True and len(datasets) == len(source_ids):
             for source_id, dataset in zip(source_ids, datasets):
                 evidence["source_sample_totals"][source_id] += int(dataset["samples_yielded"])
-    expected_samples = expected_steps * 32
+    expected_samples = steps_this_attempt * 32
+    evidence["final_global_step"] = final_global_step
+    evidence["steps_this_attempt"] = steps_this_attempt
     evidence["expected_total_samples"] = expected_samples
     evidence["actual_total_samples"] = sum(
         value for value in evidence["rank_sample_totals"] if isinstance(value, int)
     )
     evidence["complete"] = (
         len(evidence["rank_files"]) == 2
-        and evidence["global_steps"] == [expected_steps, expected_steps]
+        and evidence["global_steps"] == [final_global_step, final_global_step]
         and evidence["training_monitors_complete"] == [True, True]
         and evidence["nccl_complete"] == [True, True]
         and evidence["nccl_no_wrap"] == [True, True]
@@ -625,11 +827,74 @@ def _posttrain_evidence(
     return evidence
 
 
-def run(args: argparse.Namespace) -> int:
+def collect_terminal_evidence(
+    train_output: Path, mode: Mode, source_ids: list[str]
+) -> tuple[dict[str, Any], bool, str | None]:
+    """Fail closed without losing the supervisor summary on malformed evidence."""
+
+    try:
+        posttrain = _posttrain_evidence(
+            train_output,
+            final_global_step=mode.max_steps,
+            steps_this_attempt=mode.max_steps - mode.resume_step,
+            source_ids=source_ids,
+        )
+        optimizer_state_complete = True
+        if not mode.save_only_model:
+            optimizer_root = (
+                train_output / f"checkpoint-{mode.max_steps}/global_step{mode.max_steps}"
+            )
+            optimizer_states = sorted(
+                optimizer_root.glob("bf16_zero_pp_rank_*_mp_rank_00_optim_states.pt")
+            )
+            optimizer_state_complete = [path.name for path in optimizer_states] == [
+                "bf16_zero_pp_rank_0_mp_rank_00_optim_states.pt",
+                "bf16_zero_pp_rank_1_mp_rank_00_optim_states.pt",
+            ] and all(
+                not path.is_symlink() and path.is_file() and path.stat().st_size > 0
+                for path in optimizer_states
+            )
+        return posttrain, optimizer_state_complete, None
+    except Exception as exc:
+        return (
+            {
+                "complete": False,
+                "final_global_step": mode.max_steps,
+                "steps_this_attempt": mode.max_steps - mode.resume_step,
+                "collection_error": f"{type(exc).__name__}: {exc}",
+            },
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
+
+
+def run(args: argparse.Namespace, controller_signals: SupervisorSignals | None = None) -> int:
+    if controller_signals is None:
+        with SupervisorSignals() as installed_signals:
+            return run(args, installed_signals)
     mode = MODES[args.mode]
     preparation_root = args.preparation_root.resolve(strict=True)
     source = validate_source(args.expected_source_commit)
     materials = validate_materials(preparation_root)
+    resume_identity: dict[str, Any] | None = None
+    if mode.resume_step:
+        resume_identity = validate_resume_checkpoint(
+            args.resume_checkpoint, mode.resume_step, mode.max_steps, args.resume_contract
+        )
+        continuation_identity = {
+            "dataset_manifest_sha256": materials["dataset_manifest_sha256"],
+            "preparation_summary_sha256": materials["preparation_summary_sha256"],
+            "cpu_mixture_closure_sha256": materials["cpu_mixture_closure_sha256"],
+            "zero2_config_sha256": sha256_file(
+                SOURCE_ROOT / "gr00t/configs/deepspeed/zero2_config.json"
+            ),
+            "global_batch_size": 32,
+            "action_horizon": 40,
+        }
+        if continuation_identity != resume_identity["continuation_training"]:
+            raise RuntimeError("continuation training identity differs from the resume contract")
+    resume_checkpoint = Path(resume_identity["path"]) if resume_identity is not None else None
+    validate_disjoint_output(args.run_dir, resume_checkpoint)
     train_output = args.run_dir / "train"
     port = choose_port()
     train_command = build_train_command(
@@ -637,16 +902,23 @@ def run(args: argparse.Namespace) -> int:
         dataset_manifest=Path(materials["dataset_manifest"]),
         train_output=train_output,
         master_port=port,
+        resume_checkpoint=resume_checkpoint,
     )
-    executed_command = isolation_command(train_command, args.run_dir)
+    executed_command = isolation_command(train_command, args.run_dir, resume_checkpoint)
     plan = {
-        "schema_version": "g1-all-lerobot-h40-training-plan-v1",
+        "schema_version": (
+            "g1-all-lerobot-h40-training-plan-v2"
+            if resume_identity is not None
+            else "g1-all-lerobot-h40-training-plan-v1"
+        ),
         "mode": args.mode,
         "run_dir": str(args.run_dir),
         "source": source,
         "materials": materials,
         "training": {
+            "start_global_step": mode.resume_step,
             "max_steps": mode.max_steps,
+            "additional_optimizer_steps": mode.max_steps - mode.resume_step,
             "global_batch_size": 32,
             "seed": 42,
             "action_horizon": 40,
@@ -655,6 +927,33 @@ def run(args: argparse.Namespace) -> int:
             "storage_limit_bytes": mode.storage_limit_bytes,
             "automatic_retries": 0,
         },
+        "resume": (
+            {
+                "source_checkpoint": resume_identity,
+                "checkpoint_access": (
+                    "explicit absolute resume path; read-only through bwrap while output-dir is new"
+                ),
+                "optimizer_scheduler_rng": "full-state restore",
+                "scheduler_semantics": {
+                    "checkpoint_last_lr": 0.0,
+                    "first_resumed_optimizer_update_lr": 0.0,
+                    "lr_after_first_resumed_scheduler_step": 5.412484770356089e-05,
+                    "disclosure": (
+                        "The original 20k cosine schedule ended near zero. Loading its state into "
+                        "a newly constructed 40k schedule raises LR after the first resumed update; "
+                        "this is not an uninterrupted-from-step-zero 40k schedule."
+                    ),
+                },
+                "data_resume_semantics": {
+                    "ignore_data_skip": True,
+                    "base_seed": 42,
+                    "resumed_iterable_seed": 42 + mode.resume_step,
+                    "disclosure": "The resumed iterable stream is not an uninterrupted 40k sample sequence.",
+                },
+            }
+            if resume_identity is not None
+            else None
+        ),
         "official_command": train_command,
         "executed_command": executed_command,
         "environment": child_environment(args.run_dir, source["source_commit"]),
@@ -674,6 +973,41 @@ def run(args: argparse.Namespace) -> int:
         < mode.storage_limit_bytes
     ):
         raise RuntimeError("insufficient free disk for bounded attempt")
+    if controller_signals.signum is not None:
+        args.run_dir.mkdir()
+        for name in ("home", "cache", "matplotlib", "uv-cache"):
+            (args.run_dir / name).mkdir()
+        for name in ("training.stdout.log", "training.stderr.log", "RESOURCE_SAMPLES.jsonl"):
+            (args.run_dir / name).open("x").close()
+        signal_name = signal.Signals(controller_signals.signum).name
+        plan["created_at"] = now()
+        plan["prelaunch_signal"] = signal_name
+        atomic_json(args.run_dir / "ATTEMPT.json", plan)
+        summary = {
+            "schema_version": "g1-all-lerobot-h40-training-summary-v2",
+            "mode": args.mode,
+            "run_id": args.run_dir.name,
+            "finished_at": now(),
+            "exit_code": None,
+            "stop_reason": f"controller signal {signal_name} received before GPU gate",
+            "controller_signal": {
+                "number": controller_signals.signum,
+                "name": signal_name,
+            },
+            "cleanup": "not_needed",
+            "cleanup_complete": True,
+            "owned_processes_gone": True,
+            "terminal_gpu_snapshot": None,
+            "terminal_gpu_clear": None,
+            "terminal_collection_error": "training child was not started",
+            "technical_valid": False,
+            "source_commit": source["source_commit"],
+            "dataset_manifest_sha256": materials["dataset_manifest_sha256"],
+            "model_output": str(train_output),
+        }
+        atomic_json(args.run_dir / "SUPERVISOR_SUMMARY.json", summary)
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 128 + controller_signals.signum
 
     gate_snapshot = gpu_snapshot()
     gate_gpus(gate_snapshot, args.minimum_free_mib)
@@ -709,6 +1043,12 @@ def run(args: argparse.Namespace) -> int:
             (args.run_dir / "RESOURCE_SAMPLES.jsonl").open("x", encoding="utf-8") as samples,
         ):
             try:
+                if controller_signals.signum is not None:
+                    stop_reason = (
+                        f"controller signal {signal.Signals(controller_signals.signum).name} "
+                        "received before child spawn"
+                    )
+                    raise RuntimeError(stop_reason)
                 process = subprocess.Popen(
                     executed_command,
                     cwd=SOURCE_ROOT,
@@ -755,11 +1095,18 @@ def run(args: argparse.Namespace) -> int:
                     samples.flush()
                     sample_count += 1
                     elapsed = time.monotonic() - start
-                    if elapsed >= mode.timeout_seconds:
+                    if controller_signals.signum is not None:
+                        stop_reason = (
+                            f"controller signal {signal.Signals(controller_signals.signum).name}"
+                        )
+                    if elapsed >= mode.timeout_seconds and stop_reason is None:
                         stop_reason = "hard wall exceeded"
                     if elapsed - last_storage_check >= 30:
                         last_storage_check = elapsed
-                        if directory_size(args.run_dir) > mode.storage_limit_bytes:
+                        if (
+                            directory_size(args.run_dir) > mode.storage_limit_bytes
+                            and stop_reason is None
+                        ):
                             stop_reason = "attempt storage limit exceeded"
                     if stop_reason:
                         cleanup = terminate_owned(owned)
@@ -777,41 +1124,78 @@ def run(args: argparse.Namespace) -> int:
                     exit_code = process.poll()
 
         wall_seconds = time.monotonic() - start
-        posttrain = _posttrain_evidence(train_output, mode.max_steps, materials["source_ids"])
-        optimizer_state_complete = True
-        if args.mode == "formal":
-            optimizer_root = (
-                train_output / f"checkpoint-{mode.max_steps}/global_step{mode.max_steps}"
-            )
-            optimizer_state_complete = (
-                len(list(optimizer_root.glob("bf16_zero_pp_rank_*_mp_rank_00_optim_states.pt")))
-                == 2
-            )
+        if controller_signals.signum is not None and stop_reason is None:
+            stop_reason = f"controller signal {signal.Signals(controller_signals.signum).name}"
+        owned_processes_gone = not any(identity_matches(identity) for identity in owned.values())
+        cleanup_complete = owned_processes_gone and cleanup != "kill_wait_expired"
+        terminal_gpu_snapshot: dict[str, Any] | None = None
+        terminal_gpu_clear = False
+        terminal_gpu_error: str | None = None
+        try:
+            terminal_gpu_snapshot = gpu_snapshot()
+            terminal_gpu_clear = terminal_gpu_snapshot["compute_apps"] == []
+        except Exception as exc:
+            terminal_gpu_error = f"{type(exc).__name__}: {exc}"
+        posttrain, optimizer_state_complete, terminal_collection_error = collect_terminal_evidence(
+            train_output, mode, materials["source_ids"]
+        )
+        source_sample_totals = posttrain.get("source_sample_totals")
+        all_sources_nonzero = mode.save_only_model or (
+            isinstance(source_sample_totals, dict)
+            and all(value > 0 for value in source_sample_totals.values())
+        )
         technical_valid = (
             exit_code == 0
             and stop_reason is None
-            and posttrain["complete"]
+            and posttrain.get("complete") is True
+            and terminal_collection_error is None
             and (train_output / "model.safetensors.index.json").is_file()
+            and not (train_output / "model.safetensors.index.json").is_symlink()
             and optimizer_state_complete
-            and (
-                args.mode != "formal"
-                or all(value > 0 for value in posttrain["source_sample_totals"].values())
-            )
+            and all_sources_nonzero
+            and cleanup_complete
+            and terminal_gpu_clear
+            and terminal_gpu_error is None
         )
         summary = {
-            "schema_version": "g1-all-lerobot-h40-training-summary-v1",
+            "schema_version": (
+                "g1-all-lerobot-h40-training-summary-v2"
+                if resume_identity is not None
+                else "g1-all-lerobot-h40-training-summary-v1"
+            ),
             "mode": args.mode,
             "run_id": run_id,
             "finished_at": now(),
             "exit_code": exit_code,
             "stop_reason": stop_reason,
             "cleanup": cleanup,
+            "cleanup_complete": cleanup_complete,
+            "owned_processes_gone": owned_processes_gone,
+            "terminal_gpu_snapshot": terminal_gpu_snapshot,
+            "terminal_gpu_clear": terminal_gpu_clear,
+            "terminal_gpu_error": terminal_gpu_error,
+            "terminal_collection_error": terminal_collection_error,
+            "controller_signal": (
+                {
+                    "number": controller_signals.signum,
+                    "name": signal.Signals(controller_signals.signum).name,
+                }
+                if controller_signals.signum is not None
+                else None
+            ),
             "wall_seconds": wall_seconds,
             "peak_total_used_mib": peak_used,
             "resource_sample_count": sample_count,
             "owned_processes": sorted(owned.values(), key=lambda item: item["pid"]),
             "attempt_bytes": directory_size(args.run_dir),
             "storage_limit_bytes": mode.storage_limit_bytes,
+            "resume": {
+                "source_checkpoint": resume_identity,
+                "checkpoint_access": "external read-only absolute path",
+                "start_global_step": mode.resume_step,
+                "target_global_step": mode.max_steps,
+                "additional_optimizer_steps": mode.max_steps - mode.resume_step,
+            },
             "posttrain_evidence": posttrain,
             "optimizer_state_complete": optimizer_state_complete,
             "technical_valid": technical_valid,
@@ -824,6 +1208,8 @@ def run(args: argparse.Namespace) -> int:
         }
         atomic_json(args.run_dir / "SUPERVISOR_SUMMARY.json", summary)
         print(json.dumps(summary, indent=2, sort_keys=True))
+        if controller_signals.signum is not None:
+            return 128 + controller_signals.signum
         return 0 if technical_valid else 1
 
 
@@ -834,11 +1220,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--preparation-root", type=Path, required=True)
     parser.add_argument("--expected-source-commit", required=True)
+    parser.add_argument("--resume-checkpoint", type=Path)
+    parser.add_argument("--resume-contract", type=Path)
     parser.add_argument("--lease-root", type=Path, default=Path("/tmp/research-control-gpu-leases"))
     parser.add_argument("--minimum-free-mib", type=int, default=40000)
     args = parser.parse_args(argv)
     if not args.run_dir.is_absolute() or not args.preparation_root.is_absolute():
         parser.error("run-dir and preparation-root must be absolute")
+    mode = MODES[args.mode]
+    if mode.resume_step:
+        if (
+            args.resume_checkpoint is None
+            or not args.resume_checkpoint.is_absolute()
+            or args.resume_contract is None
+            or not args.resume_contract.is_absolute()
+        ):
+            parser.error(
+                "continuation mode requires absolute --resume-checkpoint and --resume-contract"
+            )
+    elif args.resume_checkpoint is not None or args.resume_contract is not None:
+        parser.error("resume arguments are only valid for a continuation mode")
     if args.minimum_free_mib < 0:
         parser.error("minimum-free-mib must be non-negative")
     return args

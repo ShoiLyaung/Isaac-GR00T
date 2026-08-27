@@ -189,6 +189,7 @@ if __name__ == "__main__":
     config.training.num_gpus = ft_config.num_gpus
     config.training.use_wandb = ft_config.use_wandb
     config.training.max_steps = ft_config.max_steps
+    config.training.resume_from_checkpoint = ft_config.resume_from_checkpoint
     config.training.weight_decay = ft_config.weight_decay
     config.training.warmup_ratio = ft_config.warmup_ratio
     config.training.wandb_project = ft_config.wandb_project

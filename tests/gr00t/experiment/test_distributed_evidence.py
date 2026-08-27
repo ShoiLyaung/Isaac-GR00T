@@ -131,6 +131,62 @@ def test_posttrain_rank_evidence_contains_actual_dataset_sampling():
         "rank_local_counts_exact": True,
         "evidence": sampling_evidence,
     }
+    monitor.summary.assert_called_once_with(2)
+    assert gathered["step_contract"] == {
+        "start_global_step": 0,
+        "target_global_step": 2,
+        "optimizer_steps_this_attempt": 2,
+    }
+
+
+def test_posttrain_resume_monitor_uses_delta_but_trainer_closes_at_target():
+    trainer = SimpleNamespace(
+        deepspeed=None,
+        model_wrapped=None,
+        state=SimpleNamespace(global_step=40000),
+        train_dataset=SimpleNamespace(),
+    )
+    config = SimpleNamespace(
+        training=SimpleNamespace(
+            num_gpus=1,
+            use_ddp=False,
+            max_steps=40000,
+            resume_global_step=20000,
+            dataloader_num_workers=0,
+        )
+    )
+    monitor = MagicMock()
+    monitor.summary.return_value = {"complete": True}
+    gathered = {}
+
+    with (
+        patch("gr00t.experiment.distributed_evidence.evidence_enabled", return_value=True),
+        patch(
+            "gr00t.experiment.distributed_evidence._gather_verify_write",
+            side_effect=lambda output_dir, phase, local_summary, equal_fields: gathered.update(
+                local_summary
+            ),
+        ),
+        patch(
+            "gr00t.experiment.distributed_evidence._nccl_flight_recorder_summary",
+            return_value={"required": False, "complete": None},
+        ),
+    ):
+        record_posttrain(
+            output_dir=MagicMock(),
+            config=config,
+            model=torch.nn.Linear(2, 1),
+            trainer=trainer,
+            monitor=monitor,
+        )
+
+    monitor.summary.assert_called_once_with(20000)
+    assert gathered["trainer_global_step"] == 40000
+    assert gathered["step_contract"] == {
+        "start_global_step": 20000,
+        "target_global_step": 40000,
+        "optimizer_steps_this_attempt": 20000,
+    }
 
 
 def test_posttrain_uses_pretrain_cached_zero_stage_when_config_file_disappears(tmp_path):

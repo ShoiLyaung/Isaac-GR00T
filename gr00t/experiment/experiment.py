@@ -174,6 +174,40 @@ def save_initial_actions_artifact(train_dataset, save_cfg_dir: Path) -> None:
     logging.info(f"Saved {len(initial_actions)} initial actions to {initial_actions_path}")
 
 
+def resolve_resume_from_checkpoint(value: str | None, output_dir: Path | None = None) -> bool | str:
+    """Require explicit full-state resume and reject ambiguous existing outputs."""
+
+    if value is None:
+        if output_dir is not None and any(output_dir.glob("checkpoint-*")):
+            raise ValueError("existing checkpoints require explicit resume_from_checkpoint")
+        return False
+    resume_path = Path(value)
+    if not resume_path.is_absolute() or not resume_path.is_dir():
+        raise ValueError("resume_from_checkpoint must be an existing absolute directory")
+    return str(resume_path.resolve())
+
+
+def resolve_resume_global_step(resume_from_checkpoint: bool | str, target_step: int) -> int:
+    """Read the absolute optimizer-step origin of one explicit resume checkpoint."""
+
+    if isinstance(resume_from_checkpoint, bool):
+        return 0
+    state_path = Path(resume_from_checkpoint) / "trainer_state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid resume trainer state: {state_path}") from exc
+    resume_step = state.get("global_step") if isinstance(state, dict) else None
+    if (
+        isinstance(resume_step, bool)
+        or not isinstance(resume_step, int)
+        or resume_step <= 0
+        or resume_step >= target_step
+    ):
+        raise ValueError(f"resume global_step must satisfy 0 < step < max_steps ({target_step})")
+    return resume_step
+
+
 def run(config: Config):
     warn_configs(config)
 
@@ -196,6 +230,13 @@ def run(config: Config):
     else:
         output_dir = Path(config.training.output_dir) / config.training.experiment_name
         experiment_name = config.training.experiment_name
+
+    resume_from_checkpoint = resolve_resume_from_checkpoint(
+        config.training.resume_from_checkpoint, output_dir
+    )
+    config.training.resume_global_step = resolve_resume_global_step(
+        resume_from_checkpoint, config.training.max_steps
+    )
 
     run_on_rank0(
         output_dir.mkdir,
@@ -356,9 +397,9 @@ def run(config: Config):
             on_trace_ready=partial(on_trace_ready_handler, trainer, profile_dir),
         ) as prof:
             trainer.add_callback(ProfCallback(prof=prof))
-            trainer.train(resume_from_checkpoint=True)
+            trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     else:
-        trainer.train(resume_from_checkpoint=True)
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     record_posttrain(output_dir, config, model, trainer, monitor)
 

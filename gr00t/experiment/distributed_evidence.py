@@ -529,7 +529,19 @@ def record_posttrain(
         return
     declared_stage = _declared_zero_stage(config)
     actual_stage, engine_class = _actual_zero_stage(trainer)
-    training_monitor = monitor.summary(config.training.max_steps) if monitor else None
+    resume_step = int(getattr(config.training, "resume_global_step", 0))
+    target_step = int(config.training.max_steps)
+    steps_this_attempt = target_step - resume_step
+    if resume_step < 0 or steps_this_attempt <= 0:
+        raise RuntimeError(
+            f"invalid resume step contract: start={resume_step}, target={target_step}"
+        )
+    step_contract = {
+        "start_global_step": resume_step,
+        "target_global_step": target_step,
+        "optimizer_steps_this_attempt": steps_this_attempt,
+    }
+    training_monitor = monitor.summary(steps_this_attempt) if monitor else None
     nccl_trace = _nccl_flight_recorder_summary()
     summary = {
         "phase": "posttrain",
@@ -540,6 +552,7 @@ def record_posttrain(
         "actual_deepspeed_zero_stage": actual_stage,
         "deepspeed_engine_class": engine_class,
         "trainer_global_step": int(trainer.state.global_step),
+        "step_contract": step_contract,
         "training_monitor": training_monitor,
         "dataset_sampling": _dataset_sampling_summary(config, trainer),
         "application_collective_trace": get_collective_trace(),
@@ -559,6 +572,7 @@ def record_posttrain(
             "actual_deepspeed_zero_stage",
             "deepspeed_engine_class",
             "trainer_global_step",
+            "step_contract",
             "application_collective_trace",
             "nccl_flight_recorder",
         ],
@@ -567,10 +581,9 @@ def record_posttrain(
         raise RuntimeError(
             f"DeepSpeed ZeRO stage mismatch: declared={declared_stage}, actual={actual_stage}"
         )
-    if trainer.state.global_step != config.training.max_steps:
+    if trainer.state.global_step != target_step:
         raise RuntimeError(
-            f"optimizer-step mismatch: expected={config.training.max_steps}, "
-            f"actual={trainer.state.global_step}"
+            f"optimizer-step mismatch: expected={target_step}, actual={trainer.state.global_step}"
         )
     if not training_monitor or not training_monitor["complete"]:
         raise RuntimeError("loss/gradient/optimizer-step finite monitor did not close")

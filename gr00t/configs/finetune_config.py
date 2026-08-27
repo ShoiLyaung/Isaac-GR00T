@@ -151,6 +151,9 @@ class FinetuneConfig:
     max_steps: int = 10000
     """Total number of training steps to run before stopping."""
 
+    resume_from_checkpoint: str | None = None
+    """Optional explicit checkpoint directory for full trainer/optimizer/scheduler/RNG resume."""
+
     weight_decay: float = 1e-5
     """Weight decay coefficient for optimizer (L2 regularization)."""
 

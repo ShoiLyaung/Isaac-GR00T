@@ -43,3 +43,17 @@ steps; its `formal` mode freezes 20,000 steps, two physical GPUs, global batch
 attempt limit, offline local inputs, and zero automatic retries. The supervisor
 owns a single isolated `torchrun` child and two cooperative GPU leases; it does
 not add service orchestration to the GR00T core.
+
+`continue_40k` is an isolated full-state continuation profile. It requires an
+absolute `--resume-checkpoint` at global step 20,000, keeps that parent
+checkpoint read-only, writes a new output directory, and stops at absolute
+global step 40,000. The final checkpoint closes at 40,000 while finite-monitor
+and sampling evidence cover only the 20,000 optimizer steps performed by the
+continuation Run (640,000 samples at global batch 32).
+
+The original 20k cosine schedule has already reached zero. Restoring its
+scheduler state into a newly constructed 40k schedule makes the first resumed
+optimizer update use zero learning rate and then raises the scheduler to about
+`5.41248e-5`; this is not the same trajectory as an uninterrupted 40k plan.
+The iterable dataset is also reseeded from 42 to 20042 rather than skipping the
+first 20,000 steps. Both differences are recorded in the attempt contract.
