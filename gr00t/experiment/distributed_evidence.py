@@ -172,11 +172,28 @@ def _dataset_sampling_summary(config: Any, trainer: Any) -> dict[str, Any]:
     }
 
 
-def _declared_zero_stage(config: Any) -> int | None:
+_DECLARED_ZERO_STAGE_CACHE_ATTR = "_cleanroom_declared_deepspeed_zero_stage"
+
+
+def _resolve_declared_zero_stage(config: Any) -> int | None:
     if config.training.num_gpus <= 1 or config.training.use_ddp:
         return None
     ds_config = config.get_deepspeed_config()
     return int(ds_config["zero_optimization"]["stage"])
+
+
+def _cache_declared_zero_stage(config: Any) -> int | None:
+    """Resolve and cache the declared stage while source config files exist."""
+    stage = _resolve_declared_zero_stage(config)
+    setattr(config, _DECLARED_ZERO_STAGE_CACHE_ATTR, stage)
+    return stage
+
+
+def _declared_zero_stage(config: Any) -> int | None:
+    """Return the pretrain-cached stage, resolving it for standalone callers."""
+    if hasattr(config, _DECLARED_ZERO_STAGE_CACHE_ATTR):
+        return getattr(config, _DECLARED_ZERO_STAGE_CACHE_ATTR)
+    return _cache_declared_zero_stage(config)
 
 
 def _actual_zero_stage(trainer: Any) -> tuple[int | None, str | None]:
@@ -472,6 +489,7 @@ def record_pretrain(
 ) -> None:
     if not evidence_enabled():
         return
+    declared_stage = _cache_declared_zero_stage(config)
     summary = {
         "phase": "pretrain",
         **_rank_identity(),
@@ -479,7 +497,7 @@ def record_pretrain(
         "resolved_config_sha256": _digest(config),
         **_parameter_summary(model),
         "dataset_contract": _dataset_contract_summary(config, train_dataset),
-        "declared_deepspeed_zero_stage": _declared_zero_stage(config),
+        "declared_deepspeed_zero_stage": declared_stage,
         "application_collective_trace": get_collective_trace(),
     }
     _gather_verify_write(
@@ -509,6 +527,7 @@ def record_posttrain(
 ) -> None:
     if not evidence_enabled():
         return
+    declared_stage = _declared_zero_stage(config)
     actual_stage, engine_class = _actual_zero_stage(trainer)
     training_monitor = monitor.summary(config.training.max_steps) if monitor else None
     nccl_trace = _nccl_flight_recorder_summary()
@@ -517,7 +536,7 @@ def record_posttrain(
         **_rank_identity(),
         "resolved_config_sha256": _digest(config),
         **_parameter_summary(model),
-        "declared_deepspeed_zero_stage": _declared_zero_stage(config),
+        "declared_deepspeed_zero_stage": declared_stage,
         "actual_deepspeed_zero_stage": actual_stage,
         "deepspeed_engine_class": engine_class,
         "trainer_global_step": int(trainer.state.global_step),
@@ -544,10 +563,9 @@ def record_posttrain(
             "nccl_flight_recorder",
         ],
     )
-    if actual_stage != _declared_zero_stage(config):
+    if actual_stage != declared_stage:
         raise RuntimeError(
-            f"DeepSpeed ZeRO stage mismatch: declared={_declared_zero_stage(config)}, "
-            f"actual={actual_stage}"
+            f"DeepSpeed ZeRO stage mismatch: declared={declared_stage}, actual={actual_stage}"
         )
     if trainer.state.global_step != config.training.max_steps:
         raise RuntimeError(

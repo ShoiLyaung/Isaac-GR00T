@@ -1,7 +1,11 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from gr00t.experiment.distributed_evidence import _dataset_contract_summary, record_posttrain
+from gr00t.experiment.distributed_evidence import (
+    _dataset_contract_summary,
+    record_posttrain,
+    record_pretrain,
+)
 import pytest
 import torch
 
@@ -127,3 +131,55 @@ def test_posttrain_rank_evidence_contains_actual_dataset_sampling():
         "rank_local_counts_exact": True,
         "evidence": sampling_evidence,
     }
+
+
+def test_posttrain_uses_pretrain_cached_zero_stage_when_config_file_disappears(tmp_path):
+    deepspeed_config = tmp_path / "zero2_config.json"
+    deepspeed_config.write_text('{"zero_optimization": {"stage": 2}}', encoding="utf-8")
+    config = SimpleNamespace(
+        training=SimpleNamespace(
+            num_gpus=2,
+            use_ddp=False,
+            max_steps=2,
+            dataloader_num_workers=0,
+        ),
+        get_deepspeed_config=MagicMock(
+            side_effect=lambda: __import__("json").loads(
+                deepspeed_config.read_text(encoding="utf-8")
+            )
+        ),
+    )
+    trainer = SimpleNamespace(
+        deepspeed=SimpleNamespace(zero_optimization_stage=lambda: 2),
+        model_wrapped=None,
+        state=SimpleNamespace(global_step=2),
+        train_dataset=SimpleNamespace(),
+    )
+    monitor = MagicMock()
+    monitor.summary.return_value = {"complete": True}
+    summaries = []
+
+    with (
+        patch("gr00t.experiment.distributed_evidence.evidence_enabled", return_value=True),
+        patch(
+            "gr00t.experiment.distributed_evidence._dataset_contract_summary",
+            return_value={},
+        ),
+        patch(
+            "gr00t.experiment.distributed_evidence._gather_verify_write",
+            side_effect=lambda output_dir, phase, local_summary, equal_fields: summaries.append(
+                local_summary
+            ),
+        ),
+        patch(
+            "gr00t.experiment.distributed_evidence._nccl_flight_recorder_summary",
+            return_value={"required": False, "complete": None},
+        ),
+    ):
+        model = torch.nn.Linear(2, 1)
+        record_pretrain(tmp_path, config, model, SimpleNamespace())
+        deepspeed_config.unlink()
+        record_posttrain(tmp_path, config, model, trainer, monitor)
+
+    assert config.get_deepspeed_config.call_count == 1
+    assert [summary["declared_deepspeed_zero_stage"] for summary in summaries] == [2, 2]
