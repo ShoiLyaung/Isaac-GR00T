@@ -1,6 +1,6 @@
 {
   "schema_version": "g1-all-lerobot-codec-branch-contract-v1",
-  "status": "C2_FIXTURE_CANARY_AUTHORIZED_IMPLEMENTED_NOT_YET_EXECUTED",
+  "status": "C2_FIXTURE_CANARY_ACCEPTED_NO_GPU_NO_TRAINING",
   "branch": "feat/groot-n17-all-lerobot-codec-r1",
   "baseline": {
     "branch": "feat/groot-n17-all-lerobot-20k-r1",
@@ -69,7 +69,8 @@
     "color_tags": "unknown_pending_separate_decision"
   },
   "c2_fixture_canary": {
-    "status": "AUTHORIZED_IMPLEMENTED_NOT_YET_EXECUTED",
+    "status": "ACCEPTED_TECHNICAL_CANARY_NOT_TRAINING_COVERAGE",
+    "implementation_commit": "cbe9296be28687974b7cb73e51ccbad8f71c1e17",
     "output_root": "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c2-r1",
     "attempts": 1,
     "automatic_retries": 0,
@@ -81,21 +82,36 @@
     "episode_indices": [0, 0, 0, 0, 0],
     "episode_lengths": [374, 439, 355, 284, 351],
     "total_frames": 1803,
+    "total_anchors": 62,
+    "raw_mv_count": 2508407,
+    "accepted_bitstream_bytes": 8706614,
     "pre_execution_focused_tests": 169,
+    "wall_seconds": 43.6116418899619,
+    "peak_rss_bytes": 4982816768,
+    "final_regular_file_bytes": 139202588,
+    "terminal_sha256": "b79f2e72e3812759f381e10b18955eecac37ba55f10ee5010646cb72589d2aca",
+    "summary_sha256": "ee7fa65e7ed9aa9f3ee2ed0ad080002043f1dcaed8e446aec2ca5f28bf50a65b",
+    "fixture_manifest_sha256": "23ff5969dc150c8f809870e82679a296f1a81206140b49c4ede0a6e43d8d78c6",
+    "codec_contract_sha256": "6fe9b1364713c6f6234e15ae55c04c9ea3da9e403d0625362a4264d5ed7bc9ef",
+    "toolchain_identity_sha256": "e1a78efd5bafdb609aa6b5106fb99790475f167f3343ef980111081fac09df3c",
+    "torchcodec_pyav_exact_rows": 1803,
+    "runtime_and_schema_validation": true,
+    "input_implementation_toolchain_unchanged": true,
     "training_eligible": false,
-    "checkpoint_or_dataset_mutation": false
+    "checkpoint_or_dataset_mutation": false,
+    "gpu_used": false,
+    "training_run": false,
+    "evaluator_run": false
   },
   "stages_requiring_separate_human_authorization": [
-    "real causal fixture generation",
-    "full five-source fixture materialization",
+    "full 806-episode fixture materialization",
     "GPU exact parity",
     "Codec training",
     "evaluator or robot execution"
   ],
   "human_decisions": [
-    "fixture coverage, absolute output root and resource budget",
+    "full 806-episode fixture coverage, output root and resource budget",
     "checkpoint-20000 continuation versus original-base retraining",
-    "Codec-only versus broader native module trainability",
-    "exact encoder, probe and MV extractor identities and hashes"
+    "Codec-only versus broader native module trainability"
   ]
 }

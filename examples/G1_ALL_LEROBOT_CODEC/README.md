@@ -1,12 +1,13 @@
 # G1 all-LeRobot Codec branch contract
 
-Status: `C2_FIXTURE_CANARY_AUTHORIZED_IMPLEMENTED_NOT_YET_EXECUTED`
+Status: `C2_FIXTURE_CANARY_ACCEPTED_NO_GPU_NO_TRAINING`
 
 This short-lived branch starts from
 `feat/groot-n17-all-lerobot-20k-r1@dd86aa8deb7c5ee314ca0cf082ab9468b0b61119`.
-It preserves the five-source training baseline and does not inherit authority
-to generate a real codec fixture, use a GPU, train a Codec model, or run an
-evaluator.
+It preserves the five-source training baseline. The initial branch did not
+inherit execution authority; the later bounded C2 fixture canary was separately
+authorized and completed. GPU use, training and evaluator execution remain
+unauthorized.
 
 ## Native contract that must not change
 
@@ -154,9 +155,9 @@ forbidden.
    strict PAD/causality/identity negatives, all-invalid online fallback,
    enabled-training fail-closed behavior, no-read/no-import disabled identity,
    ragged `M=0`, five-source DatasetFactory closure and exact-zero parity.
-3. **C2:** one real bounded causal capability fixture after Human supplies the
-   output root, binary identities and storage/time budget.
-4. **C3:** separately authorized five-source fixture coverage.
+3. **C2 — completed:** one bounded five-source causal fixture canary under the
+   Human-supplied output, toolchain, time and storage contract.
+4. **C3:** separately authorized full 806-episode fixture coverage.
 5. **C4:** separately authorized GPU full-model parity.
 6. **C5:** separately authorized training and evaluator experiments.
 
@@ -205,6 +206,35 @@ examples/G1_ALL_LEROBOT_CODEC/build_c2_fixture_canary.py --execute
 The combined C0/C1/C2 pre-execution focused suite currently reports 169 passed
 with one existing Transformers cache deprecation warning.
 
+The one authorized attempt completed with terminal status `ACCEPTED` using
+implementation commit `cbe9296be28687974b7cb73e51ccbad8f71c1e17`:
+
+- 5/5 sources, 5 episodes, 1,803 frames and 62 GOP30 anchors;
+- PyAV/TorchCodec exact equality on all 1,803 decoded RGB rows;
+- byte-identical double encodes for all five bundles;
+- 2,508,407 untruncated raw MV records with the exact 11-field schema;
+- runtime full bundle/index load and Draft 2020-12 Schema validation passed;
+- input, implementation and toolchain closures remained unchanged;
+- wall time 43.612 seconds, peak RSS 4,982,816,768 bytes;
+- 139,202,588 regular-file bytes after terminal receipts, below the 5 GB cap;
+- no GPU, network, checkpoint mutation, dataset mutation, training or evaluator.
+
+Material evidence:
+
+- terminal SHA-256:
+  `b79f2e72e3812759f381e10b18955eecac37ba55f10ee5010646cb72589d2aca`
+- summary SHA-256:
+  `ee7fa65e7ed9aa9f3ee2ed0ad080002043f1dcaed8e446aec2ca5f28bf50a65b`
+- fixture manifest SHA-256:
+  `23ff5969dc150c8f809870e82679a296f1a81206140b49c4ede0a6e43d8d78c6`
+- codec contract SHA-256:
+  `6fe9b1364713c6f6234e15ae55c04c9ea3da9e403d0625362a4264d5ed7bc9ef`
+- toolchain identity SHA-256:
+  `e1a78efd5bafdb609aa6b5106fb99790475f167f3343ef980111081fac09df3c`
+
+This is a technically valid, non-training canary. It is not evidence of model
+quality and cannot be relabeled as full-dataset fixture coverage.
+
 ## Recommended comparison matrix
 
 - F0: native RGB reference
@@ -218,30 +248,24 @@ F8 single-token fusion is currently unmatched cost and excluded.
 
 ## Decisions still required
 
-1. C2 fixture materialization uses `episode-bundle-v1`; `record-v2` remains a
-   bounded transport/online conformance surface and is rejected for enabled
-   five-source training.
-2. Fixture coverage and absolute output root: small five-source canary first,
-   then separately authorize all 806 episodes.
-3. Initialization: continue all arms from the retained checkpoint-20000, or
+1. Full fixture coverage and a new storage/time budget for all 806 episodes.
+2. Initialization: continue all arms from the retained checkpoint-20000, or
    retrain native and Codec arms from the original N1.7 base. A code baseline
    does not decide model initialization.
-4. Trainability: Codec-only is recommended for the first attribution study;
+3. Trainability: Codec-only is recommended for the first attribution study;
    every control must use the same native trainability and optimizer contract.
-5. Exact `ffmpeg`/`ffprobe`/libx264/MV extractor identities and hashes, plus
-   attempt, time and storage budgets.
 
-Until those decisions are supplied, this branch may contain only C0/C1
-CPU-safe code and tests. It must not materialize real fixtures or start GPU
-work.
+Until those decisions are supplied, this branch and the accepted C2 canary
+must not be expanded into full fixture generation, GPU work, training or an
+evaluator.
 
 Before C2/C5, move the hash-only index/identity preflight ahead of 3B model
 allocation. The current C0/C1 factory validates the index before dataset batch
 construction but is invoked after model construction; that ordering is a
 future resource-efficiency prerequisite, not evidence of a real fixture.
-Also tighten the bundle JSON Schema descriptions for the raw-MV 11-field audit
-and accepted-bitstream dtype/shape; runtime validation is already strict. Model
-checkpoints intentionally retain only fixture-free Codec semantics, so every
+The C2 change tightened both runtime and JSON Schema requirements for the raw-MV
+11-field audit and accepted bitstream. Model checkpoints intentionally retain
+only fixture-free Codec semantics, so every
 C5 Run must separately record and compare the adapter, fixture index and global
 codec-contract identities rather than claiming the checkpoint is a data closure.
 
