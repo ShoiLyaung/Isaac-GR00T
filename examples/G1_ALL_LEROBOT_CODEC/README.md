@@ -1,6 +1,6 @@
 # G1 all-LeRobot Codec branch contract
 
-Status: `C0_C1_IMPLEMENTED_CPU_VALIDATED_NO_REAL_FIXTURE_NO_GPU_NO_TRAINING`
+Status: `C2_FIXTURE_CANARY_AUTHORIZED_IMPLEMENTED_NOT_YET_EXECUTED`
 
 This short-lived branch starts from
 `feat/groot-n17-all-lerobot-20k-r1@dd86aa8deb7c5ee314ca0cf082ab9468b0b61119`.
@@ -161,6 +161,49 @@ forbidden.
 6. **C5:** separately authorized training and evaluator experiments.
 
 No stage automatically authorizes the next one.
+
+## Authorized C2 fixture canary
+
+The Human authorized one CPU-only, offline materialization attempt at
+`/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c2-r1`. It selects the
+minimum complete episode index with length at least 40 from each frozen source;
+the current read-only resolution is episode 0 with lengths
+`374/439/355/284/351` (1,803 frames total). This is a five-episode technical
+canary and is explicitly not full 806-episode training coverage.
+
+The producer first resolves and hashes the committed implementation,
+`/usr/bin/ffmpeg`, `/usr/bin/ffprobe`, the loaded system libx264, PyAV
+`export_mvs`, TorchCodec, all selected payloads, and the existing five-source
+loader preparation. Only a clean committed worktree may execute. It writes a
+durable attempt receipt before derivation, uses no retry, preserves the exact
+11 raw MV fields and accepted bitstream, and publishes `fixture_manifest.json`
+only after all five bundles pass runtime round-trip checks.
+
+Read-only preflight:
+
+```bash
+PYTHONPATH=. NO_ALBUMENTATIONS_UPDATE=1 HF_HUB_OFFLINE=1 \
+TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' \
+/home/sl/miniconda3/envs/gr00t_n1d7/bin/python \
+examples/G1_ALL_LEROBOT_CODEC/build_c2_fixture_canary.py --preflight
+```
+
+The authorized execute command adds an outer 7,200-second timeout and uses the
+same offline environment. Its output root is no-clobber, storage is capped at
+5,000,000,000 bytes, and canonical Parquet/MP4 plus metadata hashes are checked
+before and after generation. No checkpoint is opened or produced.
+
+```bash
+C2_OUTER_TIMEOUT_SECONDS=7200 \
+/usr/bin/timeout --signal=TERM --kill-after=30s 7200s \
+/usr/bin/env PYTHONPATH=. NO_ALBUMENTATIONS_UPDATE=1 HF_HUB_OFFLINE=1 \
+TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' \
+/home/sl/miniconda3/envs/gr00t_n1d7/bin/python \
+examples/G1_ALL_LEROBOT_CODEC/build_c2_fixture_canary.py --execute
+```
+
+The combined C0/C1/C2 pre-execution focused suite currently reports 169 passed
+with one existing Transformers cache deprecation warning.
 
 ## Recommended comparison matrix
 

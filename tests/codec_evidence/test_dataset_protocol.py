@@ -16,7 +16,7 @@ from gr00t.data.codec_evidence.codec_contract import (
     make_codec_contract,
 )
 from gr00t.data.codec_evidence.config import parse_codec_evidence_config
-from gr00t.data.codec_evidence.contract import REASON_CODES
+from gr00t.data.codec_evidence.contract import MV_FIELD_DTYPES, REASON_CODES
 from gr00t.data.codec_evidence.dataset import (
     EPISODE_BUNDLE_INDEX_SCHEMA_VERSION,
     CodecEvidenceAugmentedDataset,
@@ -51,6 +51,52 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(
         json.dumps(value, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
+    )
+
+
+def _validate_jsonschema_cases(
+    tmp_path: Path,
+    schemas: dict[str, object],
+    cases: list[tuple[str, object]],
+) -> subprocess.CompletedProcess[str]:
+    validation_input = tmp_path / f"schema-validation-{len(list(tmp_path.iterdir()))}.json"
+    _write_json(validation_input, {"schemas": schemas, "cases": cases})
+    candidate_interpreters = tuple(
+        dict.fromkeys(
+            candidate
+            for candidate in (os.environ.get("CONDA_PYTHON_EXE"), sys.executable)
+            if candidate
+        )
+    )
+    jsonschema_python = None
+    for candidate in candidate_interpreters:
+        probe = subprocess.run(
+            [candidate, "-c", "import jsonschema"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode == 0:
+            jsonschema_python = candidate
+            break
+    if jsonschema_python is None:
+        pytest.fail("No local Python interpreter provides jsonschema")
+    script = """
+import json
+import sys
+import jsonschema
+value = json.load(open(sys.argv[1], encoding='utf-8'))
+store = {schema['$id']: schema for schema in value['schemas'].values()}
+for name, payload in value['cases']:
+    schema = value['schemas'][name]
+    resolver = jsonschema.RefResolver.from_schema(schema, store=store)
+    jsonschema.Draft202012Validator(schema, resolver=resolver).validate(payload)
+"""
+    return subprocess.run(
+        [jsonschema_python, "-c", script, str(validation_input)],
+        check=False,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -447,47 +493,75 @@ def test_synthetic_bundle_and_index_validate_against_branch_owned_schemas(tmp_pa
         ("codec-evidence-episode-bundle-v1.schema.json", bundle_payload),
         ("codec-evidence-episode-bundle-index-v1.schema.json", index_payload),
     ]
-    validation_input = tmp_path / "schema-validation-input.json"
-    _write_json(validation_input, {"schemas": schemas, "cases": cases})
-    candidate_interpreters = tuple(
-        dict.fromkeys(
-            candidate
-            for candidate in (os.environ.get("CONDA_PYTHON_EXE"), sys.executable)
-            if candidate
-        )
-    )
-    jsonschema_python = None
-    for candidate in candidate_interpreters:
-        probe = subprocess.run(
-            [candidate, "-c", "import jsonschema"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if probe.returncode == 0:
-            jsonschema_python = candidate
-            break
-    if jsonschema_python is None:
-        pytest.fail("No local Python interpreter provides jsonschema")
-    script = """
-import json
-import sys
-import jsonschema
-value = json.load(open(sys.argv[1], encoding='utf-8'))
-store = {schema['$id']: schema for schema in value['schemas'].values()}
-for name, payload in value['cases']:
-    print('VALIDATING', name, file=sys.stderr)
-    schema = value['schemas'][name]
-    resolver = jsonschema.RefResolver.from_schema(schema, store=store)
-    jsonschema.Draft202012Validator(schema, resolver=resolver).validate(payload)
-"""
-    completed = subprocess.run(
-        [jsonschema_python, "-c", script, str(validation_input)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = _validate_jsonschema_cases(tmp_path, schemas, cases)
     assert completed.returncode == 0, completed.stderr
+
+
+def test_bundle_schema_closes_accepted_bitstream_and_exact_raw_mv_fields(tmp_path):
+    bundle = make_synthetic_episode_bundle(num_frames=8)
+    offsets = np.arange(9, dtype=np.int64)
+    fields = {name: np.zeros((8,), dtype=dtype) for name, dtype in MV_FIELD_DTYPES.items()}
+    fields["block_width"][:] = 16
+    fields["block_height"][:] = 16
+    fields["motion_scale"][:] = 1
+    bitstream = tmp_path / "accepted.mp4"
+    bitstream.write_bytes(b"non-empty-production-shape-probe")
+    manifest_path = write_episode_bundle(
+        tmp_path / "bundles",
+        episode_uid=bundle.key.episode_uid,
+        camera_id=bundle.key.camera_id,
+        source_kind=bundle.key.source_kind,
+        metadata=bundle.metadata_dict(),
+        arrays=bundle.arrays_dict(),
+        raw_mv_offsets=offsets,
+        raw_mv_fields=fields,
+        accepted_bitstream=bitstream,
+    )
+    names = (
+        "codec-evidence-episode-identity-v1.schema.json",
+        "codec-evidence-global-contract-v1.schema.json",
+        "codec-evidence-episode-bundle-v1.schema.json",
+    )
+    schemas = {name: json.loads(schema_path(name).read_text(encoding="utf-8")) for name in names}
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    valid = _validate_jsonschema_cases(
+        tmp_path,
+        schemas,
+        [("codec-evidence-episode-bundle-v1.schema.json", payload)],
+    )
+    assert valid.returncode == 0, valid.stderr
+
+    missing_field = json.loads(json.dumps(payload))
+    missing_field["raw_motion_vector_audit"]["fields"].pop("motion_scale")
+    invalid = _validate_jsonschema_cases(
+        tmp_path,
+        schemas,
+        [("codec-evidence-episode-bundle-v1.schema.json", missing_field)],
+    )
+    assert invalid.returncode != 0
+
+    wrong_bitstream = json.loads(json.dumps(payload))
+    wrong_bitstream["accepted_bitstream"]["dtype"] = "uint8"
+    invalid = _validate_jsonschema_cases(
+        tmp_path,
+        schemas,
+        [("codec-evidence-episode-bundle-v1.schema.json", wrong_bitstream)],
+    )
+    assert invalid.returncode != 0
+
+    missing_production_audit = json.loads(json.dumps(payload))
+    missing_production_audit["codec_contract"]["fixture_mode"] = "PRODUCTION_NATIVE_CANONICAL"
+    missing_production_audit["codec_contract"]["frame_type_rule"] = (
+        "IDR_IFF_ROW_MOD_30_ZERO_ELSE_P_REF_ROW_MINUS_1"
+    )
+    missing_production_audit["accepted_bitstream"] = None
+    missing_production_audit["raw_motion_vector_audit"] = None
+    invalid = _validate_jsonschema_cases(
+        tmp_path,
+        schemas,
+        [("codec-evidence-episode-bundle-v1.schema.json", missing_production_audit)],
+    )
+    assert invalid.returncode != 0
 
 
 def test_episode_bundle_config_is_global_and_hash_pinned():

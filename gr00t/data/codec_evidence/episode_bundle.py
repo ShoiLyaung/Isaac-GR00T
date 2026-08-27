@@ -1272,6 +1272,10 @@ def write_episode_bundle(
         if raw_mv_offsets is None
         else RawMotionVectorAudit(raw_mv_offsets, raw_mv_fields or {})
     )
+    if bundle.codec_contract["fixture_mode"] == PRODUCTION_FIXTURE_MODE and (
+        raw_audit is None or accepted_bitstream is None
+    ):
+        raise ValueError("Production episode bundles require raw MV audit and accepted bitstream")
     if raw_audit is not None and raw_audit.offsets.shape != (bundle.num_frames + 1,):
         raise ValueError("Raw MV offsets must have shape [N+1]")
 
@@ -1513,6 +1517,12 @@ class EpisodeBundleStore:
             or codec_contract["source_kind"] != key.source_kind
         ):
             raise ValueError("Episode bundle codec_contract differs from its key")
+        if codec_contract["fixture_mode"] == PRODUCTION_FIXTURE_MODE and (
+            manifest["accepted_bitstream"] is None or manifest["raw_motion_vector_audit"] is None
+        ):
+            raise ValueError(
+                "Production episode bundle is missing raw MV audit or accepted bitstream"
+            )
         return bundle_dir, manifest
 
     def identity(self, key: EpisodeBundleKey) -> Mapping[str, Any]:

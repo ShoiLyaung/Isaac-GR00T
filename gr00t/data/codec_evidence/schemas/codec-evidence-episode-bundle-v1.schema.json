@@ -29,9 +29,68 @@
         "anchor_index_per_frame": {"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, "anchor_frame_index": {"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, "anchor_appearance": {"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}
       }
     },
-    "accepted_bitstream": {"oneOf": [{"type": "null"}, {"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}]},
-    "raw_motion_vector_audit": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["offsets", "fields"], "properties": {"offsets": {"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, "fields": {"type": "object"}}}]}
+    "accepted_bitstream": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "allOf": [
+            {"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"},
+            {"properties": {"relative_path": {"const": "artifacts/accepted_bitstream.bin"}, "bytes": {"type": "integer", "minimum": 1}, "dtype": {"const": "bytes"}, "shape": {"const": []}}}
+          ]
+        }
+      ]
+    },
+    "raw_motion_vector_audit": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["offsets", "fields"],
+          "properties": {
+            "offsets": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_offsets.npy"}, "dtype": {"const": "int64"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "block_width", "block_height", "source_x", "source_y", "destination_x", "destination_y", "flags", "motion_x", "motion_y", "motion_scale"],
+              "properties": {
+                "source": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_source.npy"}, "dtype": {"const": "int32"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]},
+                "block_width": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_block_width.npy"}, "dtype": {"const": "uint8"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]},
+                "block_height": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_block_height.npy"}, "dtype": {"const": "uint8"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]},
+                "source_x": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_source_x.npy"}, "dtype": {"const": "int16"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]},
+                "source_y": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_source_y.npy"}, "dtype": {"const": "int16"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]},
+                "destination_x": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_destination_x.npy"}, "dtype": {"const": "int16"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]},
+                "destination_y": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_destination_y.npy"}, "dtype": {"const": "int16"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]},
+                "flags": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_flags.npy"}, "dtype": {"const": "uint64"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]},
+                "motion_x": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_motion_x.npy"}, "dtype": {"const": "int32"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]},
+                "motion_y": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_motion_y.npy"}, "dtype": {"const": "int32"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]},
+                "motion_scale": {"allOf": [{"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/descriptor"}, {"properties": {"relative_path": {"const": "audit/raw_mv_motion_scale.npy"}, "dtype": {"const": "uint16"}, "shape": {"type": "array", "minItems": 1, "maxItems": 1}}}]}
+              }
+            }
+          }
+        }
+      ]
+    }
   },
+  "allOf": [
+    {
+      "if": {
+        "required": ["codec_contract"],
+        "properties": {
+          "codec_contract": {
+            "required": ["fixture_mode"],
+            "properties": {"fixture_mode": {"const": "PRODUCTION_NATIVE_CANONICAL"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "accepted_bitstream": {"type": "object"},
+          "raw_motion_vector_audit": {"type": "object"}
+        }
+      }
+    }
+  ],
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "hashArray": {"type": "array", "minItems": 1, "items": {"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/sha256"}},

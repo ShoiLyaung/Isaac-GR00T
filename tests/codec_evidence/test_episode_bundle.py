@@ -391,6 +391,30 @@ def test_production_contract_rejects_early_idr_intra_and_non_gop30():
         replace(production, gop_id=gop_id)
 
 
+def test_production_writer_requires_raw_mv_audit_and_accepted_bitstream(tmp_path):
+    synthetic = make_synthetic_episode_bundle(num_frames=40)
+    identity = dict(synthetic.tool_identity)
+    contract = make_codec_contract(
+        fixture_mode=PRODUCTION_FIXTURE_MODE,
+        source_kind=SOURCE_KIND_NATIVE_CANONICAL,
+        identity=identity,
+    )
+    production = replace(
+        synthetic,
+        codec_contract=contract,
+        codec_contract_sha256=codec_contract_sha256(contract),
+    )
+    with pytest.raises(ValueError, match="require raw MV audit and accepted bitstream"):
+        write_episode_bundle(
+            tmp_path,
+            episode_uid=production.key.episode_uid,
+            camera_id=production.key.camera_id,
+            source_kind=production.key.source_kind,
+            metadata=production.metadata_dict(),
+            arrays=production.arrays_dict(),
+        )
+
+
 def test_non_gop30_is_only_allowed_in_explicit_synthetic_mode():
     bundle = make_synthetic_episode_bundle(num_frames=8, gop_size=3)
     assert bundle.codec_contract["fixture_mode"] == SYNTHETIC_FIXTURE_MODE

@@ -1,6 +1,6 @@
 {
   "schema_version": "g1-all-lerobot-codec-branch-contract-v1",
-  "status": "C0_C1_IMPLEMENTED_CPU_VALIDATED_NO_REAL_FIXTURE_NO_GPU_NO_TRAINING",
+  "status": "C2_FIXTURE_CANARY_AUTHORIZED_IMPLEMENTED_NOT_YET_EXECUTED",
   "branch": "feat/groot-n17-all-lerobot-codec-r1",
   "baseline": {
     "branch": "feat/groot-n17-all-lerobot-20k-r1",
@@ -67,6 +67,23 @@
     "time_base": "1/30000",
     "timestamp_formula": "PTS=DTS=row*1000",
     "color_tags": "unknown_pending_separate_decision"
+  },
+  "c2_fixture_canary": {
+    "status": "AUTHORIZED_IMPLEMENTED_NOT_YET_EXECUTED",
+    "output_root": "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c2-r1",
+    "attempts": 1,
+    "automatic_retries": 0,
+    "cpu_only": true,
+    "network": "offline_no_download",
+    "max_wall_seconds": 7200,
+    "max_new_bytes": 5000000000,
+    "source_count": 5,
+    "episode_indices": [0, 0, 0, 0, 0],
+    "episode_lengths": [374, 439, 355, 284, 351],
+    "total_frames": 1803,
+    "pre_execution_focused_tests": 169,
+    "training_eligible": false,
+    "checkpoint_or_dataset_mutation": false
   },
   "stages_requiring_separate_human_authorization": [
     "real causal fixture generation",
