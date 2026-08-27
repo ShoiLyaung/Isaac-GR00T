@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://groot.local/schemas/codec-evidence-global-contract-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fixture_mode", "camera_id", "source_kind", "width", "height", "container", "codec", "encoder", "pixel_format", "preset", "crf", "frame_rate", "time_base", "gop_size", "keyint", "min_keyint", "bframes", "reference_frames", "scene_cut", "open_gop", "threads", "lookahead_threads", "sliced_threads", "sync_lookahead", "pts_step", "audio", "metadata", "pts_dts_rule", "frame_type_rule", "tool_identity", "encoder_identity", "decoder_identity", "extractor_identity"],
+  "properties": {
+    "schema_version": {"const": "codec-evidence-global-contract-v1"},
+    "fixture_mode": {"enum": ["PRODUCTION_NATIVE_CANONICAL", "SYNTHETIC_CONFORMANCE"]},
+    "camera_id": {"const": "cam_left_high"},
+    "source_kind": {"enum": ["RAW_JPEG_DERIVED", "NATIVE_CANONICAL_DECODED_DERIVED"]},
+    "width": {"const": 640}, "height": {"const": 480},
+    "container": {"const": "mp4"}, "codec": {"const": "h264"}, "encoder": {"const": "libx264"},
+    "pixel_format": {"const": "yuv420p"}, "preset": {"const": "medium"}, "crf": {"const": 18},
+    "frame_rate": {"const": {"numerator": 30, "denominator": 1}},
+    "time_base": {"const": {"numerator": 1, "denominator": 30000}},
+    "gop_size": {"type": "integer", "minimum": 1},
+    "keyint": {"type": "integer", "minimum": 1}, "min_keyint": {"type": "integer", "minimum": 1},
+    "bframes": {"const": 0}, "reference_frames": {"const": 1}, "scene_cut": {"const": 0}, "open_gop": {"const": 0},
+    "threads": {"const": 1}, "lookahead_threads": {"const": 1}, "sliced_threads": {"const": 0}, "sync_lookahead": {"const": 0},
+    "pts_step": {"const": 1000}, "audio": {"const": false}, "metadata": {"const": false},
+    "pts_dts_rule": {"const": "PTS_EQUALS_DTS_EQUALS_FRAME_INDEX_TIMES_1000"},
+    "frame_type_rule": {"enum": ["IDR_IFF_ROW_MOD_30_ZERO_ELSE_P_REF_ROW_MINUS_1", "SYNTHETIC_CAUSAL_GOP"]},
+    "tool_identity": {"$ref": "https://groot.local/schemas/codec-evidence-global-contract-v1.schema.json#/$defs/identity"}, "encoder_identity": {"$ref": "https://groot.local/schemas/codec-evidence-global-contract-v1.schema.json#/$defs/identity"},
+    "decoder_identity": {"$ref": "https://groot.local/schemas/codec-evidence-global-contract-v1.schema.json#/$defs/identity"}, "extractor_identity": {"$ref": "https://groot.local/schemas/codec-evidence-global-contract-v1.schema.json#/$defs/identity"}
+  },
+  "allOf": [
+    {"if": {"properties": {"fixture_mode": {"const": "PRODUCTION_NATIVE_CANONICAL"}}}, "then": {"properties": {"source_kind": {"const": "NATIVE_CANONICAL_DECODED_DERIVED"}, "gop_size": {"const": 30}, "keyint": {"const": 30}, "min_keyint": {"const": 30}, "frame_type_rule": {"const": "IDR_IFF_ROW_MOD_30_ZERO_ELSE_P_REF_ROW_MINUS_1"}}}},
+    {"if": {"properties": {"fixture_mode": {"const": "SYNTHETIC_CONFORMANCE"}}}, "then": {"properties": {"frame_type_rule": {"const": "SYNTHETIC_CAUSAL_GOP"}}}}
+  ],
+  "$defs": {
+    "identity": {"type": "object", "additionalProperties": false, "required": ["name", "version", "sha256"], "properties": {"name": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
+  }
+}

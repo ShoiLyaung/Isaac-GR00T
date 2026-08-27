@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://icra27.local/schemas/codec-evidence-fixture-manifest-v1.schema.json",
+  "title": "Codec evidence fixture manifest v1",
+  "description": "Immutable causal I/P fixture index with a non-circular identity binding. The adapter pins the complete manifest file SHA-256; this manifest pins each record SHA-256; records carry fixture_binding_sha256, the canonical identity-block hash.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fixture_id", "identity", "fixture_binding_sha256", "record_schema", "records"],
+  "properties": {
+    "schema_version": {"const": "codec-evidence-fixture-manifest-v1"},
+    "fixture_id": {"type": "string", "minLength": 1},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_schema_sha256", "encoder_extractor_identity"],
+      "properties": {
+        "record_schema_sha256": {"$ref": "#/$defs/sha256"},
+        "encoder_extractor_identity": {"$ref": "#/$defs/encoder"}
+      }
+    },
+    "fixture_binding_sha256": {
+      "$ref": "#/$defs/sha256",
+      "description": "SHA-256 of canonical JSON {fixture_id,record_schema_sha256,encoder_extractor_identity}; this is the value carried by legacy-named CodecEvidenceRecord.fixture_manifest_sha256."
+    },
+    "record_schema": {"$ref": "#/$defs/json_artifact"},
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["episode_uid", "observation_row", "camera_id", "record"],
+        "properties": {
+          "episode_uid": {"$ref": "#/$defs/sha256"},
+          "observation_row": {"type": "integer", "minimum": 0},
+          "camera_id": {"const": "cam_left_high"},
+          "record": {"$ref": "#/$defs/json_artifact"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "relative_path": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+"},
+    "json_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "sha256", "bytes", "dtype", "shape"],
+      "properties": {
+        "relative_path": {"$ref": "#/$defs/relative_path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 0},
+        "dtype": {"const": "json"},
+        "shape": {"const": []}
+      }
+    },
+    "encoder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container", "codec", "encoder", "encoder_binary_sha256", "encoder_build_identity", "extractor_identity", "extractor_sha256", "bframes", "references", "gop", "scene_cut", "open_gop", "time_base_num", "time_base_den"],
+      "properties": {
+        "container": {"const": "mp4"},
+        "codec": {"const": "h264"},
+        "encoder": {"const": "libx264"},
+        "encoder_binary_sha256": {"$ref": "#/$defs/sha256"},
+        "encoder_build_identity": {"type": "string", "minLength": 1},
+        "extractor_identity": {"type": "string", "minLength": 1},
+        "extractor_sha256": {"$ref": "#/$defs/sha256"},
+        "bframes": {"const": 0},
+        "references": {"const": 1},
+        "gop": {"const": 30},
+        "scene_cut": {"const": 0},
+        "open_gop": {"const": 0},
+        "time_base_num": {"const": 1},
+        "time_base_den": {"const": 30000}
+      }
+    }
+  }
+}

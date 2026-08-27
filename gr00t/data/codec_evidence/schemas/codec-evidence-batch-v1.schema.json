@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://icra27.local/schemas/codec-evidence-batch-v1.schema.json",
+  "title": "CodecEvidenceBatch v1 tensor transport descriptor",
+  "description": "Processor/collator/action_input tensor contract. Runtime tensors are represented here by exact dtype and symbolic shape descriptors.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "action_input_key",
+    "batch_size",
+    "history",
+    "m_batch",
+    "observation_row",
+    "time_and_reference",
+    "frame_type",
+    "frame_validity",
+    "frame_reason_code",
+    "motion_vector_fields",
+    "mv_mask",
+    "mv_count",
+    "rpe",
+    "rpe_mask",
+    "i_frame_appearance",
+    "i_frame_mask",
+    "i_frame_index",
+    "camera_motion_summary",
+    "camera_motion_mask",
+    "sample_valid",
+    "sample_reason_code",
+    "batching_policy"
+  ],
+  "properties": {
+    "schema_version": {"const": "codec-evidence-batch-v1"},
+    "action_input_key": {"const": "codec_evidence"},
+    "batch_size": {"type": "integer", "minimum": 1},
+    "history": {"const": 8},
+    "m_batch": {"type": "integer", "minimum": 0, "maximum": 19200},
+    "observation_row": {"$ref": "#/$defs/b_int64"},
+    "time_and_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame_index", "pts", "dts", "gop_id", "gop_position", "reference_index"],
+      "properties": {
+        "frame_index": {"$ref": "#/$defs/bt_int64"},
+        "pts": {"$ref": "#/$defs/bt_int64"},
+        "dts": {"$ref": "#/$defs/bt_int64"},
+        "gop_id": {"$ref": "#/$defs/bt_int64"},
+        "gop_position": {"$ref": "#/$defs/bt_int64"},
+        "reference_index": {"$ref": "#/$defs/bt_int64"}
+      }
+    },
+    "frame_type": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "uint8"}, "shape": {"const": ["B", 8]}}}]},
+    "frame_validity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame_valid", "packet_valid", "reference_valid", "dependency_valid", "alignment_valid", "mv_valid", "rpe_valid"],
+      "properties": {
+        "frame_valid": {"$ref": "#/$defs/bt_bool"},
+        "packet_valid": {"$ref": "#/$defs/bt_bool"},
+        "reference_valid": {"$ref": "#/$defs/bt_bool"},
+        "dependency_valid": {"$ref": "#/$defs/bt_bool"},
+        "alignment_valid": {"$ref": "#/$defs/bt_bool"},
+        "mv_valid": {"$ref": "#/$defs/bt_bool"},
+        "rpe_valid": {"$ref": "#/$defs/bt_bool"}
+      }
+    },
+    "frame_reason_code": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "int16"}, "shape": {"const": ["B", 8]}}}]},
+    "motion_vector_fields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "block_width", "block_height", "source_x", "source_y", "destination_x", "destination_y", "flags", "motion_x", "motion_y", "motion_scale"],
+      "properties": {
+        "source": {"$ref": "#/$defs/btm_int32"},
+        "block_width": {"$ref": "#/$defs/btm_uint8"},
+        "block_height": {"$ref": "#/$defs/btm_uint8"},
+        "source_x": {"$ref": "#/$defs/btm_int16"},
+        "source_y": {"$ref": "#/$defs/btm_int16"},
+        "destination_x": {"$ref": "#/$defs/btm_int16"},
+        "destination_y": {"$ref": "#/$defs/btm_int16"},
+        "flags": {"$ref": "#/$defs/btm_uint64"},
+        "motion_x": {"$ref": "#/$defs/btm_int32"},
+        "motion_y": {"$ref": "#/$defs/btm_int32"},
+        "motion_scale": {"$ref": "#/$defs/btm_uint16"}
+      }
+    },
+    "mv_mask": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "bool"}, "shape": {"const": ["B", 8, "M_batch"]}}}]},
+    "mv_count": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "int32"}, "shape": {"const": ["B", 8]}}}]},
+    "rpe": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "float32"}, "shape": {"const": ["B", 8, 2, 2, 4]}, "channels": {"const": ["signed_mean", "mean_absolute", "rms", "valid_fraction"]}}}], "required": ["channels"]},
+    "rpe_mask": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "bool"}, "shape": {"const": ["B", 8, 2, 2]}}}]},
+    "i_frame_appearance": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "float32"}, "shape": {"const": ["B", 3, 256, 256]}}}]},
+    "i_frame_mask": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "bool"}, "shape": {"const": ["B"]}}}]},
+    "i_frame_index": {"$ref": "#/$defs/b_int64"},
+    "camera_motion_summary": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "float32"}, "shape": {"const": ["B", 8, 4]}}}]},
+    "camera_motion_mask": {"$ref": "#/$defs/bt_bool"},
+    "sample_valid": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "bool"}, "shape": {"const": ["B"]}}}]},
+    "sample_reason_code": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "int16"}, "shape": {"const": ["B"]}}}]},
+    "batching_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["padding", "truncate", "silent_drop", "pickle_allowed", "rng_allowed"],
+      "properties": {
+        "padding": {"const": "COLLATOR_ONLY_NUMERIC_ZERO_WITH_EXPLICIT_MASK"},
+        "truncate": {"const": false},
+        "silent_drop": {"const": false},
+        "pickle_allowed": {"const": false},
+        "rng_allowed": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "tensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dtype", "shape"],
+      "properties": {
+        "dtype": {"type": "string"},
+        "shape": {"type": "array", "items": {"type": ["integer", "string"]}},
+        "channels": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "b_int64": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "int64"}, "shape": {"const": ["B"]}}}]},
+    "bt_int64": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "int64"}, "shape": {"const": ["B", 8]}}}]},
+    "bt_bool": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "bool"}, "shape": {"const": ["B", 8]}}}]},
+    "btm_int32": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "int32"}, "shape": {"const": ["B", 8, "M_batch"]}}}]},
+    "btm_uint8": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "uint8"}, "shape": {"const": ["B", 8, "M_batch"]}}}]},
+    "btm_int16": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "int16"}, "shape": {"const": ["B", 8, "M_batch"]}}}]},
+    "btm_uint64": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "uint64"}, "shape": {"const": ["B", 8, "M_batch"]}}}]},
+    "btm_uint16": {"allOf": [{"$ref": "#/$defs/tensor"}, {"properties": {"dtype": {"const": "uint16"}, "shape": {"const": ["B", 8, "M_batch"]}}}]}
+  }
+}

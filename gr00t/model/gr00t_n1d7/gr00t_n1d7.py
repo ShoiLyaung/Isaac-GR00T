@@ -33,6 +33,24 @@ from gr00t.model.modules.embodiment_conditioned_mlp import (
 
 
 logger = logging.getLogger(__name__)
+_UNRESOLVED_CODEC_CONFIG = object()
+
+
+def _parse_optional_codec_model_config(value: Any) -> dict[str, Any] | None:
+    """Validate a direct model config while preserving the absent fast path."""
+
+    if value is None:
+        return None
+    if type(value) is not dict:
+        raise TypeError("codec_evidence must be a dict or None")
+    enabled = value.get("enabled", False)
+    if type(enabled) is not bool:
+        raise TypeError("codec_evidence.enabled must be boolean")
+    if not enabled:
+        return None
+    from gr00t.data.codec_evidence.config import parse_codec_model_config
+
+    return parse_codec_model_config(value)
 
 
 class Gr00tN1d7ActionHead(nn.Module):
@@ -40,7 +58,12 @@ class Gr00tN1d7ActionHead(nn.Module):
 
     supports_gradient_checkpointing = True
 
-    def __init__(self, config: Gr00tN1d7Config):
+    def __init__(
+        self,
+        config: Gr00tN1d7Config,
+        *,
+        codec_config: dict[str, Any] | None | object = _UNRESOLVED_CODEC_CONFIG,
+    ):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -100,6 +123,27 @@ class Gr00tN1d7ActionHead(nn.Module):
 
         self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
         self.num_timestep_buckets = config.num_timestep_buckets
+
+        # Construct optional modules only after every native module. The absent path
+        # imports no Codec code; canonical disabled config performs pure validation.
+        # Neither path allocates Codec tensors or consumes module-initialization RNG.
+        self.codec_evidence_enabled = False
+        self.codec_conditioning = None
+        if codec_config is _UNRESOLVED_CODEC_CONFIG:
+            codec_config = _parse_optional_codec_model_config(
+                getattr(config, "codec_evidence", None)
+            )
+        if codec_config is not None:
+            self.codec_evidence_enabled = True
+            from .codec_dynamics import Gr00tCodecConditioningStack
+
+            self.codec_conditioning = Gr00tCodecConditioningStack(
+                action_width=self.input_embedding_dim,
+                d_codec=codec_config["d_codec"],
+                conditioner_heads=codec_config["conditioner_heads"],
+                gate_init=codec_config["gate_init"],
+                modalities=tuple(codec_config["modalities"]),
+            )
         self.set_trainable_parameters(
             config.tune_projector, config.tune_diffusion_model, config.tune_vlln
         )
@@ -165,6 +209,29 @@ class Gr00tN1d7ActionHead(nn.Module):
         backbone_output["backbone_features"] = backbone_features
         return backbone_output
 
+    def _encode_codec_context(
+        self, action_input: BatchFeature
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if not self.codec_evidence_enabled:
+            return None
+        if self.codec_conditioning is None:
+            raise RuntimeError("Enabled codec evidence has no conditioning module")
+        if "codec_evidence" not in action_input:
+            raise KeyError("Enabled codec evidence requires action_input['codec_evidence']")
+        return self.codec_conditioning.encode(action_input["codec_evidence"])
+
+    def _condition_action_features(
+        self,
+        action_features: torch.Tensor,
+        codec_context: tuple[torch.Tensor, torch.Tensor] | None,
+    ) -> torch.Tensor:
+        if not self.codec_evidence_enabled:
+            return action_features
+        if self.codec_conditioning is None or codec_context is None:
+            raise RuntimeError("Enabled codec evidence requires encoded context")
+        context, context_mask = codec_context
+        return self.codec_conditioning.condition(action_features, context, context_mask)
+
     def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
         """
         Forward pass through the action head.
@@ -229,6 +296,12 @@ class Gr00tN1d7ActionHead(nn.Module):
             pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
             pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
             action_features = action_features + pos_embs
+
+        # Codec evidence only conditions native H40 action features. It never enters
+        # or lengthens the vision-language backbone sequence.
+        if self.codec_evidence_enabled:
+            codec_context = self._encode_codec_context(action_input)
+            action_features = self._condition_action_features(action_features, codec_context)
 
         # Join vision, language, state and action embedding along sequence dimension.
         sa_embs = torch.cat((state_features, action_features), dim=1)
@@ -379,6 +452,12 @@ class Gr00tN1d7ActionHead(nn.Module):
                 :,
             ] = ramp[None, :, None].to(device)
 
+        # Encode the observation-side Codec context once, then reuse it for every
+        # native Euler evaluation.
+        codec_context = None
+        if self.codec_evidence_enabled:
+            codec_context = self._encode_codec_context(action_input)
+
         # Run denoising steps.
         for t in range(self.num_inference_timesteps):
             t_cont = t / float(self.num_inference_timesteps)  # e.g. goes 0, 1/N, 2/N, ...
@@ -394,6 +473,9 @@ class Gr00tN1d7ActionHead(nn.Module):
                 pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
                 pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
                 action_features = action_features + pos_embs
+
+            if self.codec_evidence_enabled:
+                action_features = self._condition_action_features(action_features, codec_context)
 
             # Join vision, language, state and action embedding along sequence dimension.
             sa_embs = torch.cat((state_features, action_features), dim=1)
@@ -509,6 +591,8 @@ class Gr00tN1d7(PreTrainedModel):
         Note: During training, transformers parameters are passed from training config.
               During inference (e.g., from_pretrained), defaults are used.
         """
+        codec_config = _parse_optional_codec_model_config(getattr(config, "codec_evidence", None))
+        config.codec_evidence = codec_config
         super().__init__(config)
         self.config = config
 
@@ -527,14 +611,22 @@ class Gr00tN1d7(PreTrainedModel):
         )
 
         # Initialize action head
-        self.action_head = Gr00tN1d7ActionHead(config)
+        self.action_head = Gr00tN1d7ActionHead(config, codec_config=codec_config)
         from .processing_gr00t_n1d7 import Gr00tN1d7DataCollator
 
-        self.collator = Gr00tN1d7DataCollator(
-            model_name=config.model_name,
-            model_type=config.backbone_model_type,
-            transformers_loading_kwargs=transformers_loading_kwargs,
-        )
+        if self.action_head.codec_evidence_enabled:
+            self.collator = Gr00tN1d7DataCollator(
+                model_name=config.model_name,
+                model_type=config.backbone_model_type,
+                transformers_loading_kwargs=transformers_loading_kwargs,
+                codec_evidence_enabled=True,
+            )
+        else:
+            self.collator = Gr00tN1d7DataCollator(
+                model_name=config.model_name,
+                model_type=config.backbone_model_type,
+                transformers_loading_kwargs=transformers_loading_kwargs,
+            )
 
     def prepare_input(self, inputs: dict) -> Tuple[BatchFeature, BatchFeature]:
         """Prepare inputs for backbone and action head."""
@@ -553,7 +645,16 @@ class Gr00tN1d7(PreTrainedModel):
             inputs.pop("vlm_content")
             inputs.update(prep)
 
-        backbone_inputs = self.backbone.prepare_input(inputs)
+        if self.action_head.codec_evidence_enabled:
+            if "codec_evidence" not in inputs:
+                raise KeyError("Enabled codec evidence requires inputs['codec_evidence']")
+            backbone_source = {
+                key: value for key, value in inputs.items() if key != "codec_evidence"
+            }
+        else:
+            backbone_source = inputs
+
+        backbone_inputs = self.backbone.prepare_input(backbone_source)
         action_inputs = self.action_head.prepare_input(inputs)
 
         # Move to device and dtype

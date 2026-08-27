@@ -1,6 +1,6 @@
 {
   "schema_version": "g1-all-lerobot-codec-branch-contract-v1",
-  "status": "HUMAN_DECISION_REQUIRED_CPU_ONLY_NO_FIXTURE_NO_TRAINING",
+  "status": "C0_C1_IMPLEMENTED_CPU_VALIDATED_NO_REAL_FIXTURE_NO_GPU_NO_TRAINING",
   "branch": "feat/groot-n17-all-lerobot-codec-r1",
   "baseline": {
     "branch": "feat/groot-n17-all-lerobot-20k-r1",
@@ -36,6 +36,23 @@
     "missing_online_evidence": "reason-coded exact-zero native fallback",
     "missing_enabled_training_evidence": "fail_closed"
   },
+  "c0_c1_result": {
+    "status": "PASS",
+    "focused_tests": 157,
+    "enabled_training_fixture_schema": "codec-evidence-episode-bundle-v1",
+    "enabled_training_fixture_mode": "PRODUCTION_NATIVE_CANONICAL",
+    "five_source_store_policy": "one verified store with exact episode UID and identity coverage",
+    "invalid_training_evidence": "fail_closed",
+    "invalid_online_evidence": "reason_coded_exact_zero_native_fallback",
+    "c2_preflight_prerequisite": "validate index hash and identity before 3B model allocation",
+    "codec_parameters": 9571649,
+    "encode_flops_batch1": 7487488,
+    "policy_query_four_euler_flops_batch1": 2741125120,
+    "real_fixture_generated": false,
+    "gpu_used": false,
+    "training_run": false,
+    "evaluator_run": false
+  },
   "canonical_encoder_candidate": {
     "input": "decoded RGB uint8 640x480 at represented 30 CFR",
     "codec": "H.264/libx264",
@@ -59,7 +76,6 @@
     "evaluator or robot execution"
   ],
   "human_decisions": [
-    "record-v2 versus episode-bundle fixture format",
     "fixture coverage, absolute output root and resource budget",
     "checkpoint-20000 continuation versus original-base retraining",
     "Codec-only versus broader native module trainability",

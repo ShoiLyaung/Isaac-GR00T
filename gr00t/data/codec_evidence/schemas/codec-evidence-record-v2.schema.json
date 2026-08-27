@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://icra27.local/schemas/codec-evidence-record-v2.schema.json",
+  "title": "CodecEvidenceRecord v2 disk and fixture identity",
+  "description": "One causal T8 episode-row-camera record. It contains fixture facts and ragged artifact descriptors, never batch padding or model outputs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "synthetic_only",
+    "fixture_manifest_sha256",
+    "fixture_schema_sha256",
+    "encoder_extractor_identity",
+    "episode",
+    "camera_id",
+    "view_claim",
+    "observation_row",
+    "history",
+    "i_frame",
+    "mv_storage",
+    "rpe",
+    "camera_motion_summary",
+    "sample_valid",
+    "sample_reason_code",
+    "terminology"
+  ],
+  "properties": {
+    "schema_version": {"const": "codec-evidence-record-v2"},
+    "synthetic_only": {"type": "boolean"},
+    "fixture_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "fixture_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "encoder_extractor_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "container",
+        "codec",
+        "encoder",
+        "encoder_binary_sha256",
+        "encoder_build_identity",
+        "extractor_identity",
+        "extractor_sha256",
+        "bframes",
+        "references",
+        "gop",
+        "scene_cut",
+        "open_gop",
+        "time_base_num",
+        "time_base_den"
+      ],
+      "properties": {
+        "container": {"const": "mp4"},
+        "codec": {"const": "h264"},
+        "encoder": {"const": "libx264"},
+        "encoder_binary_sha256": {"$ref": "#/$defs/sha256"},
+        "encoder_build_identity": {"type": "string", "minLength": 1},
+        "extractor_identity": {"type": "string", "minLength": 1},
+        "extractor_sha256": {"$ref": "#/$defs/sha256"},
+        "bframes": {"const": 0},
+        "references": {"const": 1},
+        "gop": {"const": 30},
+        "scene_cut": {"const": 0},
+        "open_gop": {"const": 0},
+        "time_base_num": {"const": 1},
+        "time_base_den": {"const": 30000}
+      }
+    },
+    "episode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["episode_uid", "dataset_name", "cohort_id", "source_episode_index"],
+      "properties": {
+        "episode_uid": {"$ref": "#/$defs/sha256"},
+        "dataset_name": {"type": "string", "minLength": 1},
+        "cohort_id": {"type": "string", "minLength": 1},
+        "source_episode_index": {"type": "integer", "minimum": 0}
+      }
+    },
+    "camera_id": {"const": "cam_left_high"},
+    "view_claim": {"const": "HEAD_FRONT_EGOCENTRIC_CANDIDATE_VIEW_NOT_CALIBRATION_PROVEN"},
+    "observation_row": {"type": "integer", "minimum": 0},
+    "history": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["length", "padding", "frames"],
+      "properties": {
+        "length": {"const": 8},
+        "padding": {"const": "LEFT_ZERO_NEGATIVE_ONE_TEMPORAL_IDS_ALL_VALIDITY_FALSE_NO_REPEAT"},
+        "frames": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "items": {"$ref": "#/$defs/frame"}
+        }
+      }
+    },
+    "i_frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame_index", "selection", "source_sha256", "decoded_sha256", "appearance"],
+      "properties": {
+        "frame_index": {"type": "integer", "minimum": -1},
+        "selection": {"const": "NEAREST_VERIFIED_PAST_IDR_AT_OR_BEFORE_OBSERVATION"},
+        "source_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "decoded_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "appearance": {
+          "allOf": [
+            {"$ref": "#/$defs/artifact"},
+            {"properties": {"dtype": {"const": "uint8"}, "shape": {"const": [480, 640, 3]}}}
+          ]
+        }
+      }
+    },
+    "mv_storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layout", "pickle_allowed", "max_per_frame", "offsets", "fields"],
+      "properties": {
+        "layout": {"const": "CSR_RAGGED_PER_FRAME_NO_TRUNCATION"},
+        "pickle_allowed": {"const": false},
+        "max_per_frame": {"const": 19200},
+        "offsets": {
+          "allOf": [
+            {"$ref": "#/$defs/artifact"},
+            {"properties": {"dtype": {"const": "int64"}, "shape": {"const": [9]}}}
+          ]
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "block_width", "block_height", "source_x", "source_y", "destination_x", "destination_y", "flags", "motion_x", "motion_y", "motion_scale"],
+          "properties": {
+            "source": {"$ref": "#/$defs/mv_int32"},
+            "block_width": {"$ref": "#/$defs/mv_uint8"},
+            "block_height": {"$ref": "#/$defs/mv_uint8"},
+            "source_x": {"$ref": "#/$defs/mv_int16"},
+            "source_y": {"$ref": "#/$defs/mv_int16"},
+            "destination_x": {"$ref": "#/$defs/mv_int16"},
+            "destination_y": {"$ref": "#/$defs/mv_int16"},
+            "flags": {"$ref": "#/$defs/mv_uint64"},
+            "motion_x": {"$ref": "#/$defs/mv_int32"},
+            "motion_y": {"$ref": "#/$defs/mv_int32"},
+            "motion_scale": {"$ref": "#/$defs/mv_uint16"}
+          }
+        }
+      }
+    },
+    "rpe": {
+      "allOf": [
+        {"$ref": "#/$defs/artifact"},
+        {"properties": {"dtype": {"const": "float32"}, "shape": {"const": [8, 2, 2, 4]}}}
+      ]
+    },
+    "camera_motion_summary": {
+      "allOf": [
+        {"$ref": "#/$defs/artifact"},
+        {"properties": {"dtype": {"const": "float32"}, "shape": {"const": [8, 4]}}}
+      ]
+    },
+    "sample_valid": {"type": "boolean"},
+    "sample_reason_code": {"$ref": "#/$defs/reason"},
+    "terminology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["motion_vectors", "rpe", "row_grid"],
+      "properties": {
+        "motion_vectors": {"const": "CODEC_ENCODER_DECISIONS_NOT_OPTICAL_FLOW"},
+        "rpe": {"const": "DECODED_LUMA_MV_WARP_PROXY_NOT_BITSTREAM_RESIDUAL"},
+        "row_grid": {"const": "SYNTHETIC_30_HZ_REPRESENTATION_NOT_PROVEN_HARDWARE_CAPTURE_CLOCK"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "relative_path": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "sha256", "bytes", "dtype", "shape"],
+      "properties": {
+        "relative_path": {"$ref": "#/$defs/relative_path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 0},
+        "dtype": {"type": "string", "minLength": 1},
+        "shape": {"type": "array", "items": {"type": ["integer", "string"]}}
+      }
+    },
+    "mv_int32": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"dtype": {"const": "int32"}, "shape": {"const": ["N_total"]}}}]},
+    "mv_uint8": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"dtype": {"const": "uint8"}, "shape": {"const": ["N_total"]}}}]},
+    "mv_int16": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"dtype": {"const": "int16"}, "shape": {"const": ["N_total"]}}}]},
+    "mv_uint64": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"dtype": {"const": "uint64"}, "shape": {"const": ["N_total"]}}}]},
+    "mv_uint16": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"dtype": {"const": "uint16"}, "shape": {"const": ["N_total"]}}}]},
+    "reason": {
+      "enum": ["NONE", "LEFT_PAD", "PACKET_INVALID", "FRAME_INVALID", "REFERENCE_INVALID", "REFERENCE_CHAIN_INVALID", "ALIGNMENT_INVALID", "MV_OVERFLOW", "RPE_INVALID", "I_FRAME_UNAVAILABLE", "MISSING_RECORD", "SCHEMA_INVALID", "HASH_MISMATCH"]
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot", "frame_index", "pts", "dts", "frame_type", "gop_id", "gop_position", "reference_index", "source_sha256", "decoded_sha256", "validity", "reason_code", "mv_offset_begin", "mv_offset_end", "mv_count"],
+      "properties": {
+        "slot": {"type": "integer", "minimum": 0, "maximum": 7},
+        "frame_index": {"type": "integer", "minimum": -1},
+        "pts": {"type": "integer", "minimum": -1},
+        "dts": {"type": "integer", "minimum": -1},
+        "frame_type": {"enum": ["PAD", "I", "P"]},
+        "gop_id": {"type": "integer", "minimum": -1},
+        "gop_position": {"type": "integer", "minimum": -1, "maximum": 29},
+        "reference_index": {"type": "integer", "minimum": -1},
+        "source_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "decoded_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "validity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["packet", "frame", "reference", "dependency", "alignment", "mv", "rpe"],
+          "properties": {
+            "packet": {"type": "boolean"},
+            "frame": {"type": "boolean"},
+            "reference": {"type": "boolean"},
+            "dependency": {"type": "boolean"},
+            "alignment": {"type": "boolean"},
+            "mv": {"type": "boolean"},
+            "rpe": {"type": "boolean"}
+          }
+        },
+        "reason_code": {"$ref": "#/$defs/reason"},
+        "mv_offset_begin": {"type": "integer", "minimum": 0},
+        "mv_offset_end": {"type": "integer", "minimum": 0},
+        "mv_count": {"type": "integer", "minimum": 0, "maximum": 19200}
+      }
+    }
+  }
+}

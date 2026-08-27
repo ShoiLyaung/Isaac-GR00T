@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://groot.local/schemas/codec-evidence-episode-identity-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_id", "canonical_dataset_identity", "episode_index", "episode_length", "camera_id", "parquet", "video"],
+  "properties": {
+    "schema_version": {"const": "codec-evidence-episode-identity-v1"},
+    "source_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
+    "canonical_dataset_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["info_sha256", "modality_sha256"],
+      "properties": {
+        "info_sha256": {"$ref": "https://groot.local/schemas/codec-evidence-episode-identity-v1.schema.json#/$defs/sha256"},
+        "modality_sha256": {"$ref": "https://groot.local/schemas/codec-evidence-episode-identity-v1.schema.json#/$defs/sha256"}
+      }
+    },
+    "episode_index": {"type": "integer", "minimum": 0},
+    "episode_length": {"type": "integer", "minimum": 1},
+    "camera_id": {"const": "cam_left_high"},
+    "parquet": {"$ref": "https://groot.local/schemas/codec-evidence-episode-identity-v1.schema.json#/$defs/artifact"},
+    "video": {"$ref": "https://groot.local/schemas/codec-evidence-episode-identity-v1.schema.json#/$defs/artifact"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "bytes", "sha256"],
+      "properties": {
+        "relative_path": {"type": "string", "minLength": 1},
+        "bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "https://groot.local/schemas/codec-evidence-episode-identity-v1.schema.json#/$defs/sha256"}
+      }
+    }
+  }
+}

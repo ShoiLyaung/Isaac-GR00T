@@ -81,12 +81,30 @@ def build_processor(model_name: str, transformers_loading_kwargs: dict) -> Qwen3
     return Qwen3VLProcessor.from_pretrained(model_name, **transformers_loading_kwargs)
 
 
+def _parse_optional_codec_model_config(value: Any) -> dict[str, Any] | None:
+    """Validate a direct processor config while preserving the absent fast path."""
+
+    if value is None:
+        return None
+    if type(value) is not dict:
+        raise TypeError("codec_evidence must be a dict or None")
+    enabled = value.get("enabled", False)
+    if type(enabled) is not bool:
+        raise TypeError("codec_evidence.enabled must be boolean")
+    if not enabled:
+        return None
+    from gr00t.data.codec_evidence.config import parse_codec_model_config
+
+    return parse_codec_model_config(value)
+
+
 class Gr00tN1d7DataCollator:
     def __init__(
         self,
         model_name: str,
         model_type: str = "qwen",
         transformers_loading_kwargs: dict = {},
+        codec_evidence_enabled: bool = False,
     ):
         ### We need to use the same processor for padding input ids and concat
         self.processor = build_processor(model_name, transformers_loading_kwargs)
@@ -94,6 +112,11 @@ class Gr00tN1d7DataCollator:
         self.processor.tokenizer.padding_side = "left"
         self.model_type = model_type
         self.model_name = model_name
+        if codec_evidence_enabled:
+            from gr00t.data.codec_evidence.torch_backend import TorchCodecEvidenceCollator
+
+            self.codec_evidence_enabled = True
+            self.codec_evidence_collator = TorchCodecEvidenceCollator()
 
     def __call__(self, features: list[Dict[str, Any]]) -> BatchFeature:
         batch = {}
@@ -120,6 +143,17 @@ class Gr00tN1d7DataCollator:
                 )
                 for k, v in vlm_inputs.items():
                     batch[k] = v
+            elif key == "codec_evidence_sample":
+                if (
+                    not getattr(self, "codec_evidence_enabled", False)
+                    or getattr(self, "codec_evidence_collator", None) is None
+                ):
+                    raise ValueError("Codec evidence was emitted while the collator is disabled")
+                if len(values) != len(features):
+                    raise ValueError("Codec evidence is missing from one or more batch elements")
+                batch["codec_evidence"] = self.codec_evidence_collator(values)
+            elif key == "codec_evidence":
+                raise ValueError("Only codec_evidence_sample may enter the collator")
             elif key in (
                 "pixel_values",
                 "image_grid_thw",
@@ -168,6 +202,7 @@ class Gr00tN1d7Processor(BaseProcessor):
         state_dropout_prob: float = 0.0,
         # Normalization
         use_mean_std: bool = False,
+        codec_evidence: dict[str, Any] | None = None,
         # Backward-compat params (stored but not actively used)
         letter_box_transform: bool = False,
     ):
@@ -186,6 +221,11 @@ class Gr00tN1d7Processor(BaseProcessor):
         # Save state action processor settings
         self.use_percentiles = use_percentiles
         self.use_mean_std = use_mean_std
+        codec_evidence = _parse_optional_codec_model_config(codec_evidence)
+        codec_evidence_enabled = codec_evidence is not None
+        if codec_evidence_enabled:
+            self.codec_evidence = codec_evidence
+            self.codec_evidence_enabled = True
         self.clip_outliers = clip_outliers
         self.apply_sincos_state_encoding = apply_sincos_state_encoding
         self.use_relative_action = use_relative_action
@@ -246,11 +286,19 @@ class Gr00tN1d7Processor(BaseProcessor):
                 random_rotation_angle,
                 color_jitter_params,
             )
-        self._collator = self.data_collator_class(
-            model_name=model_name,
-            model_type=model_type,
-            transformers_loading_kwargs=transformers_loading_kwargs,
-        )
+        if codec_evidence_enabled:
+            self._collator = self.data_collator_class(
+                model_name=model_name,
+                model_type=model_type,
+                transformers_loading_kwargs=transformers_loading_kwargs,
+                codec_evidence_enabled=True,
+            )
+        else:
+            self._collator = self.data_collator_class(
+                model_name=model_name,
+                model_type=model_type,
+                transformers_loading_kwargs=transformers_loading_kwargs,
+            )
         self.train()
 
     @property
@@ -351,6 +399,48 @@ class Gr00tN1d7Processor(BaseProcessor):
         )
         return {f"action.{key}": value for key, value in result.items()}
 
+    def _collate_codec_evidence_observation(
+        self, observation: dict[str, Any], batch_size: int
+    ) -> dict[str, Any]:
+        samples = observation.get("codec_evidence_sample")
+        if samples is None:
+            raise KeyError("Enabled codec evidence requires observation['codec_evidence_sample']")
+        if not isinstance(samples, list):
+            samples = [samples]
+        if len(samples) != batch_size:
+            raise ValueError("codec_evidence_sample count must equal the observation batch size")
+        from gr00t.data.codec_evidence.contract import CodecEvidenceSample
+        from gr00t.data.codec_evidence.episode_bundle import EpisodeT8View
+
+        schema_version = self.codec_evidence.get("schema_version")
+        camera_id = self.codec_evidence.get("camera_id")
+        if schema_version == "codec-evidence-record-v2":
+            expected_type = CodecEvidenceSample
+        elif schema_version == "codec-evidence-episode-bundle-v1":
+            expected_type = EpisodeT8View
+        else:
+            raise ValueError(f"Unsupported processor codec schema: {schema_version!r}")
+        for sample in samples:
+            if not isinstance(sample, expected_type):
+                raise TypeError(
+                    f"{schema_version} requires {expected_type.__name__}, "
+                    f"got {type(sample).__name__}"
+                )
+            if sample.key.camera_id != camera_id:
+                raise ValueError(
+                    "Online Codec evidence camera_id differs from the saved processor config"
+                )
+            if isinstance(
+                sample, EpisodeT8View
+            ) and sample.key.source_kind != self.codec_evidence.get("source_kind"):
+                raise ValueError(
+                    "Online Codec evidence source_kind differs from the saved processor config"
+                )
+        codec_collator = getattr(self._collator, "codec_evidence_collator", None)
+        if codec_collator is None:
+            raise RuntimeError("Enabled codec evidence has no Torch collator")
+        return codec_collator(samples)
+
     def process_observation(self, observation: dict[str, Any], embodiment_tag: EmbodimentTag):
         """Process batched observation tensors for inference.
 
@@ -444,6 +534,10 @@ class Gr00tN1d7Processor(BaseProcessor):
         if action_horizon > 0:
             action_mask[:, :action_horizon] = 1.0
         transformed_observation["action_mask"] = action_mask
+        if getattr(self, "codec_evidence_enabled", False):
+            transformed_observation["codec_evidence"] = self._collate_codec_evidence_observation(
+                observation, B
+            )
 
         return BatchFeature(transformed_observation)
 
@@ -660,37 +754,40 @@ class Gr00tN1d7Processor(BaseProcessor):
         statistics_file = save_directory / "statistics.json"
         embodiment_id_file = save_directory / "embodiment_id.json"
 
+        processor_kwargs = {
+            "modality_configs": to_json_serializable(self.modality_configs),
+            # Image processing settings
+            "image_crop_size": self.image_crop_size,
+            "image_target_size": self.image_target_size,
+            "use_albumentations": self.use_albumentations,
+            "random_rotation_angle": self.random_rotation_angle,
+            "color_jitter_params": self.color_jitter_params,
+            "shortest_image_edge": self.shortest_image_edge,
+            "crop_fraction": self.crop_fraction,
+            "letter_box_transform": self.letter_box_transform,
+            # VLM settings
+            "model_name": self.model_name,
+            "model_type": self.model_type,
+            "formalize_language": self.formalize_language,
+            # State action dimensions
+            "max_state_dim": self.max_state_dim,
+            "max_action_dim": self.max_action_dim,
+            "max_action_horizon": self.max_action_horizon,
+            # StateActionProcessor settings
+            "use_percentiles": self.use_percentiles,
+            "use_mean_std": self.use_mean_std,
+            "clip_outliers": self.clip_outliers,
+            "apply_sincos_state_encoding": self.apply_sincos_state_encoding,
+            "use_relative_action": self.use_relative_action,
+            # State augmentation
+            "exclude_state": self.exclude_state,
+            "state_dropout_prob": self.state_dropout_prob,
+        }
+        if getattr(self, "codec_evidence_enabled", False):
+            processor_kwargs["codec_evidence"] = dict(self.codec_evidence)
         config = {
             "processor_class": self.__class__.__name__,
-            "processor_kwargs": {
-                "modality_configs": to_json_serializable(self.modality_configs),
-                # Image processing settings
-                "image_crop_size": self.image_crop_size,
-                "image_target_size": self.image_target_size,
-                "use_albumentations": self.use_albumentations,
-                "random_rotation_angle": self.random_rotation_angle,
-                "color_jitter_params": self.color_jitter_params,
-                "shortest_image_edge": self.shortest_image_edge,
-                "crop_fraction": self.crop_fraction,
-                "letter_box_transform": self.letter_box_transform,
-                # VLM settings
-                "model_name": self.model_name,
-                "model_type": self.model_type,
-                "formalize_language": self.formalize_language,
-                # State action dimensions
-                "max_state_dim": self.max_state_dim,
-                "max_action_dim": self.max_action_dim,
-                "max_action_horizon": self.max_action_horizon,
-                # StateActionProcessor settings
-                "use_percentiles": self.use_percentiles,
-                "use_mean_std": self.use_mean_std,
-                "clip_outliers": self.clip_outliers,
-                "apply_sincos_state_encoding": self.apply_sincos_state_encoding,
-                "use_relative_action": self.use_relative_action,
-                # State augmentation
-                "exclude_state": self.exclude_state,
-                "state_dropout_prob": self.state_dropout_prob,
-            },
+            "processor_kwargs": processor_kwargs,
         }
         with open(main_config_file, "w") as f:
             json.dump(config, f, indent=2)
@@ -759,6 +856,7 @@ class Gr00tN1d7Processor(BaseProcessor):
                 "model_name",
                 "model_type",
                 "max_action_horizon",
+                "codec_evidence",
             ]
             for key in override_keys:
                 if key in kwargs:

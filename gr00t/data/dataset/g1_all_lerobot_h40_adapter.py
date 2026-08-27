@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -30,7 +31,6 @@ from gr00t.data.dataset.g1_id10_h50_adapter import (
     _constant_stats,
     _format_episode_path,
     _json_dump_new,
-    _json_load,
     _sha256,
     _slice_stats,
     _stack_float32_rows,
@@ -44,7 +44,29 @@ ADAPTER_KIND = "g1_all_lerobot_h40_v1"
 BASELINE_ID = "G1_ALL_LEROBOT_26D_H40"
 CONFIG_SCHEMA_VERSION = "g1-all-lerobot-h40-adapter-config-v1"
 VIEW_SCHEMA_VERSION = "g1-all-lerobot-h40-loader-view-v1"
+# Kept local so absent/disabled adapters never import the optional Codec package.
+CODEC_EPISODE_UID_SCHEMA_VERSION = "codec-evidence-episode-identity-v1"
+CODEC_CAMERA_ID = "cam_left_high"
+CODEC_VIDEO_KEY = "observation.images.cam_left_high"
 SOURCE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _json_load(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as stream:
+        value = json.load(stream, object_pairs_hook=_reject_duplicate_pairs)
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected one JSON object in {path}")
+    return value
 
 
 def _read_tasks(path: Path) -> list[str]:
@@ -177,7 +199,7 @@ def build_metadata_loader_view(
 
 def load_adapter_config(path: str | Path) -> dict[str, Any]:
     cfg = _json_load(Path(path))
-    allowed = {
+    required = {
         "schema_version",
         "adapter_kind",
         "baseline_id",
@@ -202,9 +224,11 @@ def load_adapter_config(path: str | Path) -> dict[str, Any]:
         "fixed_action",
         "derived_relative_stats_path",
     }
-    if not isinstance(cfg, dict) or set(cfg) != allowed:
+    optional = {"codec_evidence"}
+    if not isinstance(cfg, dict) or not required <= set(cfg) <= required | optional:
         actual = set(cfg) if isinstance(cfg, dict) else set()
-        raise ValueError(f"Adapter config schema mismatch: {sorted(actual ^ allowed)}")
+        mismatch = (required - actual) | (actual - required - optional)
+        raise ValueError(f"Adapter config schema mismatch: {sorted(mismatch)}")
     exact = {
         "schema_version": CONFIG_SCHEMA_VERSION,
         "adapter_kind": ADAPTER_KIND,
@@ -246,7 +270,107 @@ def load_adapter_config(path: str | Path) -> dict[str, Any]:
         values = np.asarray(cfg.get("fixed_action", {}).get(key), dtype=np.float32)
         if values.shape != (dim,) or not np.isfinite(values).all():
             raise ValueError(f"fixed_action.{key} must be finite shape {(dim,)}")
+    if "codec_evidence" in cfg:
+        parse_adapter_codec_evidence_config(cfg)
     return cfg
+
+
+def parse_adapter_codec_evidence_config(adapter_config: dict[str, Any]):
+    """Parse the optional block without resolving or reading a fixture root."""
+
+    value = adapter_config.get("codec_evidence")
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("codec_evidence must be an object")
+    enabled = value.get("enabled", False)
+    if type(enabled) is not bool:
+        raise TypeError("codec_evidence.enabled must be boolean")
+    if not enabled:
+        return None
+
+    from gr00t.data.codec_evidence.config import parse_codec_evidence_config
+
+    parsed = parse_codec_evidence_config(value)
+    if parsed.camera_id != CODEC_CAMERA_ID:
+        raise ValueError(f"G1 all-LeRobot codec evidence requires {CODEC_CAMERA_ID}")
+    return parsed
+
+
+def _payload_file_identity(canonical_root: Path, relative_path: str) -> dict[str, Any]:
+    relative = Path(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"Canonical payload path is not relative and contained: {relative_path}")
+    resolved = (canonical_root / relative).resolve(strict=True)
+    if canonical_root != resolved and canonical_root not in resolved.parents:
+        raise ValueError(f"Canonical payload escapes its dataset root: {relative_path}")
+    if not resolved.is_file():
+        raise FileNotFoundError(resolved)
+    return {
+        "relative_path": relative.as_posix(),
+        "bytes": resolved.stat().st_size,
+        "sha256": _sha256(resolved),
+    }
+
+
+def build_codec_episode_identity(
+    *,
+    source_id: str,
+    canonical_root: str | Path,
+    canonical_info_sha256: str,
+    canonical_modality_sha256: str,
+    data_path_pattern: str,
+    video_path_pattern: str,
+    chunk_size: int,
+    episode_index: int,
+    episode_length: int,
+) -> dict[str, Any]:
+    """Bind one stable UID to source, dataset and exact Parquet/head-video bytes."""
+
+    from gr00t.data.codec_evidence.identity import episode_identity_with_uid
+
+    if not SOURCE_ID_RE.fullmatch(source_id):
+        raise ValueError("Codec episode identity source_id is invalid")
+    for name, value in (
+        ("canonical_info_sha256", canonical_info_sha256),
+        ("canonical_modality_sha256", canonical_modality_sha256),
+    ):
+        if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+            raise ValueError(f"Codec episode identity {name} must be a lowercase SHA256")
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1:
+        raise ValueError("Codec episode identity chunk_size must be positive")
+    if isinstance(episode_index, bool) or not isinstance(episode_index, int) or episode_index < 0:
+        raise ValueError("Codec episode identity episode_index must be non-negative")
+    if (
+        isinstance(episode_length, bool)
+        or not isinstance(episode_length, int)
+        or episode_length < 1
+    ):
+        raise ValueError("Codec episode identity episode_length must be positive")
+    canonical = Path(canonical_root).resolve(strict=True)
+    if not canonical.is_dir():
+        raise ValueError("Codec canonical_root must be a directory")
+    data_relative = _format_episode_path(data_path_pattern, episode_index, chunk_size)
+    video_relative = _format_episode_path(
+        video_path_pattern,
+        episode_index,
+        chunk_size,
+        video_key=CODEC_VIDEO_KEY,
+    )
+    payload = {
+        "schema_version": CODEC_EPISODE_UID_SCHEMA_VERSION,
+        "source_id": source_id,
+        "canonical_dataset_identity": {
+            "info_sha256": canonical_info_sha256,
+            "modality_sha256": canonical_modality_sha256,
+        },
+        "episode_index": episode_index,
+        "episode_length": episode_length,
+        "camera_id": CODEC_CAMERA_ID,
+        "parquet": _payload_file_identity(canonical, data_relative),
+        "video": _payload_file_identity(canonical, video_relative),
+    }
+    return episode_identity_with_uid(payload)
 
 
 class G1AllLerobotH40EpisodeLoader(LeRobotEpisodeLoader):
@@ -283,6 +407,142 @@ class G1AllLerobotH40EpisodeLoader(LeRobotEpisodeLoader):
         for key, expected in matched.items():
             if manifest.get(key) != expected:
                 raise ValueError(f"Loader view {key} does not match adapter config")
+        if "codec_evidence" in self.adapter_config:
+            codec_config = parse_adapter_codec_evidence_config(self.adapter_config)
+            if codec_config is not None:
+                self._validate_codec_loader_view_transport(manifest)
+                self._initialize_codec_episode_identities()
+
+    def _validate_codec_loader_view_transport(self, manifest: dict[str, Any]) -> None:
+        """Bind the loader's actual view paths and metadata to the UID source."""
+
+        canonical_root = Path(self.adapter_config["canonical_root"]).resolve(strict=True)
+        for name in ("data", "videos"):
+            view_payload = self.dataset_path / name
+            canonical_payload = (canonical_root / name).resolve(strict=True)
+            if not view_payload.is_symlink():
+                raise ValueError(f"Enabled Codec loader view {name} must be a symlink")
+            if view_payload.resolve(strict=True) != canonical_payload:
+                raise ValueError(
+                    f"Enabled Codec loader view {name} target differs from canonical payload"
+                )
+
+        for name in ("episodes.jsonl", "stats.json"):
+            canonical_meta = canonical_root / "meta" / name
+            view_meta = self.dataset_path / "meta" / name
+            if not view_meta.is_file() or view_meta.is_symlink():
+                raise ValueError(f"Enabled Codec loader view {name} must be a regular file")
+            if _sha256(view_meta) != _sha256(canonical_meta):
+                raise ValueError(
+                    f"Enabled Codec loader view {name} differs from canonical metadata"
+                )
+
+        expected_tasks = [self.adapter_config["training_language"]] * len(
+            self.adapter_config["raw_task_labels"]
+        )
+        if _read_tasks(self.dataset_path / "meta/tasks.jsonl") != expected_tasks:
+            raise ValueError("Enabled Codec loader view tasks.jsonl differs from normalization")
+
+        expected_manifest = {
+            "schema_version": VIEW_SCHEMA_VERSION,
+            "baseline_id": BASELINE_ID,
+            "source_id": self.adapter_config["source_id"],
+            "canonical_root": str(canonical_root),
+            "canonical_info_sha256": self.adapter_config["canonical_info_sha256"],
+            "canonical_modality_sha256": self.adapter_config["canonical_modality_sha256"],
+            "canonical_tasks_sha256": _sha256(canonical_root / "meta/tasks.jsonl"),
+            "raw_task_labels": self.adapter_config["raw_task_labels"],
+            "training_language": self.adapter_config["training_language"],
+            "language_policy": "explicit_manifest_normalization",
+            "camera_mapping": {
+                "model_key": "ego_view",
+                "canonical_key": CODEC_CAMERA_ID,
+                "original_key": CODEC_VIDEO_KEY,
+            },
+            "horizon": HORIZON,
+            "source_index_formula": "n+k",
+            "row_grid_rate_hz": 30,
+            "payload_policy": "read-only symlink to canonical data/videos",
+        }
+        if manifest != expected_manifest:
+            raise ValueError("Enabled Codec loader view manifest differs from its contract")
+
+        expected_info = _json_load(canonical_root / "meta/info.json")
+        expected_info["data_path"] = expected_info["data_path"].replace(
+            "{chunk_index", "{episode_chunk"
+        )
+        if expected_info.get("video_path"):
+            expected_info["video_path"] = expected_info["video_path"].replace(
+                "{chunk_index", "{episode_chunk"
+            )
+        if self.info_meta != expected_info:
+            raise ValueError("Enabled Codec loader view info.json differs from canonical mapping")
+        if type(self.fps) is not int or self.fps != 30:
+            raise ValueError("Enabled Codec loader view requires exact integer 30 fps")
+
+        expected_modality = _json_load(canonical_root / "meta/modality.json")
+        try:
+            head = deepcopy(expected_modality["video"][CODEC_CAMERA_ID])
+        except KeyError as exc:
+            raise ValueError("Canonical dataset has no cam_left_high modality") from exc
+        head["original_key"] = CODEC_VIDEO_KEY
+        expected_modality["video"] = {"ego_view": head}
+        expected_modality["state"] = {
+            key: deepcopy(expected_modality["state"][key]) for key in STATE_SLICES
+        }
+        expected_modality["action"] = {
+            key: deepcopy(expected_modality["action"][key]) for key in ACTION_SLICES
+        }
+        expected_modality["annotation"] = {"human.task_description": {"original_key": "task_index"}}
+        if self.modality_meta != expected_modality:
+            raise ValueError(
+                "Enabled Codec loader view modality.json differs from canonical mapping"
+            )
+
+    def _initialize_codec_episode_identities(self) -> None:
+        """Hash exact payload identities only for an explicitly enabled Codec leaf."""
+
+        canonical_root = Path(self.adapter_config["canonical_root"]).resolve(strict=True)
+        current_metadata = {
+            "canonical_info_sha256": _sha256(canonical_root / "meta/info.json"),
+            "canonical_modality_sha256": _sha256(canonical_root / "meta/modality.json"),
+        }
+        for key, actual in current_metadata.items():
+            if actual != self.adapter_config[key]:
+                raise ValueError(f"Codec canonical metadata identity changed: {key}")
+        if not self.video_path_pattern:
+            raise ValueError("Enabled Codec evidence requires a canonical video path pattern")
+
+        identities = []
+        seen_episode_indices: set[int] = set()
+        for episode in self.episodes_metadata:
+            episode_index = episode.get("episode_index")
+            episode_length = episode.get("length")
+            if (
+                isinstance(episode_index, bool)
+                or not isinstance(episode_index, int)
+                or episode_index in seen_episode_indices
+            ):
+                raise ValueError("Codec episode indices must be unique integers")
+            seen_episode_indices.add(episode_index)
+            identities.append(
+                build_codec_episode_identity(
+                    source_id=self.adapter_config["source_id"],
+                    canonical_root=canonical_root,
+                    canonical_info_sha256=self.adapter_config["canonical_info_sha256"],
+                    canonical_modality_sha256=self.adapter_config["canonical_modality_sha256"],
+                    data_path_pattern=self.data_path_pattern,
+                    video_path_pattern=self.video_path_pattern,
+                    chunk_size=self.chunk_size,
+                    episode_index=episode_index,
+                    episode_length=episode_length,
+                )
+            )
+        episode_uids = tuple(identity["episode_uid"] for identity in identities)
+        if len(episode_uids) != len(set(episode_uids)):
+            raise ValueError("Codec episode UIDs must be unique within one source")
+        self.codec_episode_identities = tuple(identities)
+        self.selected_episode_uids = episode_uids
 
     def _load_parquet_data(self, episode_index: int) -> pd.DataFrame:
         filename = _format_episode_path(self.data_path_pattern, episode_index, self.chunk_size)
@@ -386,10 +646,14 @@ class G1AllLerobotH40SingleStepDataset(ShardedSingleStepDataset):
 __all__ = [
     "ADAPTER_KIND",
     "BASELINE_ID",
+    "CODEC_CAMERA_ID",
+    "CODEC_EPISODE_UID_SCHEMA_VERSION",
     "CONFIG_SCHEMA_VERSION",
     "G1AllLerobotH40EpisodeLoader",
     "G1AllLerobotH40SingleStepDataset",
     "VIEW_SCHEMA_VERSION",
+    "build_codec_episode_identity",
     "build_metadata_loader_view",
     "load_adapter_config",
+    "parse_adapter_codec_evidence_config",
 ]

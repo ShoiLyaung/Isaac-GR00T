@@ -1,6 +1,6 @@
 # G1 all-LeRobot Codec branch contract
 
-Status: `HUMAN_DECISION_REQUIRED_CPU_ONLY_NO_FIXTURE_NO_TRAINING`
+Status: `C0_C1_IMPLEMENTED_CPU_VALIDATED_NO_REAL_FIXTURE_NO_GPU_NO_TRAINING`
 
 This short-lived branch starts from
 `feat/groot-n17-all-lerobot-20k-r1@dd86aa8deb7c5ee314ca0cf082ab9468b0b61119`.
@@ -79,9 +79,12 @@ The candidate retains the established T8 transport:
 - camera-motion summary `[B,8,4]` plus mask
 - sample validity and reason code `[B]`
 
-PAD values are numeric zero, indices are `-1`, and all PAD validity is false.
-No truncation, pickle, silent drop, B/future reference, or repeated-first-frame
-padding is allowed.
+For record-v2, PAD temporal/reference indices are `-1`. For episode-bundle,
+ordinary numeric fields including `frame_index` are zero and excluded by an
+exact-false `frame_mask`; only `frame_anchor_slot` is `-1`. In both schemas,
+PAD evidence is numerically zero and all PAD validity is false. No truncation,
+pickle, silent drop, B/future reference, or repeated-first-frame padding is
+allowed.
 
 ### T8/H40 alignment
 
@@ -145,10 +148,12 @@ forbidden.
 
 ## Experiment sequence
 
-1. **C0:** branch-owned schema/transport/conditioner port, default-disabled.
-2. **C1:** synthetic and temporary CPU conformance tests, including the two P1
-   negatives, all-invalid fallback, no-read disabled identity, ragged `M=0`,
-   five-source DatasetFactory closure and exact-zero parity.
+1. **C0 — completed:** branch-owned schema/transport/conditioner port,
+   default-disabled.
+2. **C1 — completed:** synthetic and temporary CPU conformance tests, including
+   strict PAD/causality/identity negatives, all-invalid online fallback,
+   enabled-training fail-closed behavior, no-read/no-import disabled identity,
+   ragged `M=0`, five-source DatasetFactory closure and exact-zero parity.
 3. **C2:** one real bounded causal capability fixture after Human supplies the
    output root, binary identities and storage/time budget.
 4. **C3:** separately authorized five-source fixture coverage.
@@ -170,8 +175,9 @@ F8 single-token fusion is currently unmatched cost and excluded.
 
 ## Decisions still required
 
-1. Fixture format: transport-only `record-v2` or the later episode-bundle/full
-   snapshot design. Episode-bundle is recommended for eventual training.
+1. C2 fixture materialization uses `episode-bundle-v1`; `record-v2` remains a
+   bounded transport/online conformance surface and is rejected for enabled
+   five-source training.
 2. Fixture coverage and absolute output root: small five-source canary first,
    then separately authorize all 806 episodes.
 3. Initialization: continue all arms from the retained checkpoint-20000, or
@@ -185,3 +191,35 @@ F8 single-token fusion is currently unmatched cost and excluded.
 Until those decisions are supplied, this branch may contain only C0/C1
 CPU-safe code and tests. It must not materialize real fixtures or start GPU
 work.
+
+Before C2/C5, move the hash-only index/identity preflight ahead of 3B model
+allocation. The current C0/C1 factory validates the index before dataset batch
+construction but is invoked after model construction; that ordering is a
+future resource-efficiency prerequisite, not evidence of a real fixture.
+Also tighten the bundle JSON Schema descriptions for the raw-MV 11-field audit
+and accepted-bitstream dtype/shape; runtime validation is already strict. Model
+checkpoints intentionally retain only fixture-free Codec semantics, so every
+C5 Run must separately record and compare the adapter, fixture index and global
+codec-contract identities rather than claiming the checkpoint is a data closure.
+
+## C0/C1 validation result
+
+- record-v2 and episode-bundle-v1 synthetic/in-memory/temp-disk paths execute
+- R4 PAD/causality/identity negative cases fail closed
+- all five H40 leaves share one verified store and require exact UID/identity
+  coverage from a production (not synthetic) fixture contract
+- enabled loader views bind data/video symlink targets and exact
+  info/modality/stats/episodes/tasks/manifest semantics to the canonical source
+- invalid enabled-training evidence fails closed; reason-coded exact-zero
+  fallback is restricted to the online path
+- absent/disabled paths do not import Codec modules, read fixture/episode
+  payloads, allocate Codec modules, or perturb RNG
+- gate=0 and all-invalid paths return exact native action features
+- model sizing is exactly 9,571,649 parameters and the R4 analytic FLOP envelope
+- processor save/reload retains Codec config only for enabled checkpoints
+- focused command:
+  `NO_ALBUMENTATIONS_UPDATE=1 /home/sl/Isaac-GR00T-m0-clean/.venv/bin/python -m pytest -q -p no:cacheprovider tests/codec_evidence tests/g1_all_lerobot_h40/test_cpu_adapter.py`
+- focused suite: 157 passed; Ruff check/format and `git diff --check` passed
+
+These are CPU interface results, not real-fixture, GPU-parity, training,
+latency, task-success, or scientific-performance results.

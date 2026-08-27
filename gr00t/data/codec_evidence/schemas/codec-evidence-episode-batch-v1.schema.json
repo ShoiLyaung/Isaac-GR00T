@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://groot.local/schemas/codec-evidence-episode-batch-v1.schema.json",
+  "title": "Codec Evidence Episode Batch v1 tensor transport descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "action_input_key",
+    "history",
+    "k_max",
+    "fields",
+    "padding_policy",
+    "identity_policy",
+    "fallback_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "codec-evidence-episode-batch-v1"
+    },
+    "action_input_key": {
+      "const": "codec_evidence"
+    },
+    "history": {
+      "const": 8
+    },
+    "k_max": {
+      "const": 2
+    },
+    "fields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation_row",
+        "frame_mask",
+        "frame_index",
+        "frame_type",
+        "frame_validity",
+        "frame_reason_code",
+        "mv_cell_features",
+        "mv_cell_mask",
+        "rpe",
+        "rpe_mask",
+        "metadata_features",
+        "anchor_appearance",
+        "anchor_mask",
+        "anchor_frame_index",
+        "frame_anchor_slot",
+        "sample_valid",
+        "sample_reason_code"
+      ],
+      "properties": {
+        "observation_row": {"const": {"dtype": "int64", "shape": ["B"]}},
+        "frame_mask": {"const": {"dtype": "bool", "shape": ["B", 8]}},
+        "frame_index": {"const": {"dtype": "int64", "shape": ["B", 8]}},
+        "frame_type": {"const": {"dtype": "uint8", "shape": ["B", 8]}},
+        "frame_validity": {"const": {"dtype": "bool", "shape": ["B", 8, 7]}},
+        "frame_reason_code": {"const": {"dtype": "int16", "shape": ["B", 8]}},
+        "mv_cell_features": {"const": {"dtype": "float32", "shape": ["B", 8, 2, 2, 11]}},
+        "mv_cell_mask": {"const": {"dtype": "bool", "shape": ["B", 8, 2, 2]}},
+        "rpe": {"const": {"dtype": "float32", "shape": ["B", 8, 2, 2, 4]}},
+        "rpe_mask": {"const": {"dtype": "bool", "shape": ["B", 8, 2, 2]}},
+        "metadata_features": {"const": {"dtype": "float32", "shape": ["B", 8, 21]}},
+        "anchor_appearance": {"const": {"dtype": "float32", "shape": ["B", 2, 3, 256, 256]}},
+        "anchor_mask": {"const": {"dtype": "bool", "shape": ["B", 2]}},
+        "anchor_frame_index": {"const": {"dtype": "int64", "shape": ["B", 2]}},
+        "frame_anchor_slot": {"const": {"dtype": "int64", "shape": ["B", 8]}},
+        "sample_valid": {"const": {"dtype": "bool", "shape": ["B"]}},
+        "sample_reason_code": {"const": {"dtype": "int16", "shape": ["B"]}}
+      }
+    },
+    "padding_policy": {
+      "const": {
+        "ordinary_numeric_and_frame_index": 0,
+        "frame_anchor_slot": -1,
+        "frame_mask": false,
+        "masked_values_excluded": true,
+        "repeated_first_frame": false
+      }
+    },
+    "identity_policy": {
+      "const": {
+        "cpu_audit_identity_removed_before_model": true,
+        "global_index_sha256_required": true,
+        "bundle_manifest_sha256_required": true,
+        "array_sha256_required": true
+      }
+    },
+    "fallback_policy": {
+      "const": {
+        "transport_reason_codes": [10, 11, 12],
+        "sample_valid": false,
+        "model_evidence": "EXACT_ZERO_FALSE",
+        "frame_anchor_slot": -1,
+        "training_store_error": "RAISE"
+      }
+    }
+  }
+}
