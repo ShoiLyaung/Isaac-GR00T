@@ -1,0 +1,68 @@
+{
+  "schema_version": "g1-all-lerobot-codec-branch-contract-v1",
+  "status": "HUMAN_DECISION_REQUIRED_CPU_ONLY_NO_FIXTURE_NO_TRAINING",
+  "branch": "feat/groot-n17-all-lerobot-codec-r1",
+  "baseline": {
+    "branch": "feat/groot-n17-all-lerobot-20k-r1",
+    "commit": "dd86aa8deb7c5ee314ca0cf082ab9468b0b61119"
+  },
+  "evidence": {
+    "codex_thread_id": "01a024c9-740f-7b22-af88-a3f4c8474f73",
+    "codex_thread_title": "确认Unitree G1相机串流格式",
+    "followup_send_status": "failed_tool_unavailable_no_reply_claimed",
+    "r4_closure_sha256": "bafd735be8e206f99015ba8a1802fead8210823010495e0d86d28934b7616296"
+  },
+  "native_invariants": {
+    "embodiment_tag": "new_embodiment",
+    "embodiment_id": 10,
+    "active_dimensions": 26,
+    "padded_dimensions": 132,
+    "action_horizon": 40,
+    "action_mask_sum": 1040,
+    "camera": "cam_left_high",
+    "model_view": "ego_view",
+    "dataset_sources": 5,
+    "episodes": 806,
+    "h40_anchors": 265906
+  },
+  "recommended_first_stage": {
+    "scope": "default-disabled CPU schema, transport, action-side conditioner and synthetic conformance",
+    "history_frames": 8,
+    "codec_context_tokens": 32,
+    "action_feature_width": 1536,
+    "conditioner_output_shape": "[B,40,1536]",
+    "mamba_action_expert": "deferred",
+    "bitstream_residual": "excluded",
+    "missing_online_evidence": "reason-coded exact-zero native fallback",
+    "missing_enabled_training_evidence": "fail_closed"
+  },
+  "canonical_encoder_candidate": {
+    "input": "decoded RGB uint8 640x480 at represented 30 CFR",
+    "codec": "H.264/libx264",
+    "pixel_format": "yuv420p",
+    "preset": "medium",
+    "crf": 18,
+    "gop": 30,
+    "bframes": 0,
+    "reference_frames": 1,
+    "scene_cut": false,
+    "open_gop": false,
+    "time_base": "1/30000",
+    "timestamp_formula": "PTS=DTS=row*1000",
+    "color_tags": "unknown_pending_separate_decision"
+  },
+  "stages_requiring_separate_human_authorization": [
+    "real causal fixture generation",
+    "full five-source fixture materialization",
+    "GPU exact parity",
+    "Codec training",
+    "evaluator or robot execution"
+  ],
+  "human_decisions": [
+    "record-v2 versus episode-bundle fixture format",
+    "fixture coverage, absolute output root and resource budget",
+    "checkpoint-20000 continuation versus original-base retraining",
+    "Codec-only versus broader native module trainability",
+    "exact encoder, probe and MV extractor identities and hashes"
+  ]
+}
