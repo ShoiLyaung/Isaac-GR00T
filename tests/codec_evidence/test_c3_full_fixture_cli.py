@@ -98,7 +98,8 @@ def test_r2_memory_canary_profile_freezes_exact_order_and_new_root():
     module = _load_cli()
     module.configure_memory_canary_r2()
     repository = Path(__file__).parents[2]
-    frozen = module._load_json(repository / module.INPUT_FREEZE_RELATIVE)
+    _preparation, frozen, _artifacts = module._validate_preparation_and_freeze(repository)
+    assert len(frozen["episodes"]) == 806
     selected = module._select_execution_episodes(frozen)
 
     assert module.PROFILE_NAME == "memory-canary-r2"

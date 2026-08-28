@@ -382,7 +382,7 @@ def _validate_preparation_and_freeze(
     if episodes != expected_order:
         raise ValueError("C3 episodes are not in frozen recipe/index order")
     uids = [item.get("episode_uid") for item in episodes]
-    if len(set(uids)) != EXPECTED_EPISODES or canonical_json_sha256(sorted(uids)) != frozen.get(
+    if len(set(uids)) != FROZEN_EPISODES or canonical_json_sha256(sorted(uids)) != frozen.get(
         "episode_uid_digest"
     ):
         raise ValueError("C3 frozen UID closure is inconsistent")
