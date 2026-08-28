@@ -71,6 +71,7 @@ def _publish(
     seed: str = "a",
     derivation_variant: str = "same",
     bitstream: bytes = b"synthetic-mp4",
+    prepublish_guard=None,
 ):
     bundle = make_synthetic_episode_bundle(
         num_frames=40,
@@ -107,8 +108,26 @@ def _publish(
         raw_mv_offsets=offsets,
         raw_mv_fields=fields,
         accepted_bitstream=bitstream_path,
+        prepublish_guard=prepublish_guard,
     )
     return bundle, derivation, published
+
+
+def test_prepublish_budget_guard_runs_before_binding_or_object_mutation(
+    warehouse: Path, tmp_path: Path
+):
+    observed = []
+
+    def reject(stage_bytes: int) -> None:
+        observed.append(stage_bytes)
+        raise RuntimeError("focused budget exceeded")
+
+    with pytest.raises(RuntimeError, match="focused budget exceeded"):
+        _publish(warehouse, tmp_path, prepublish_guard=reject)
+    assert observed and observed[0] > 0
+    assert not list((warehouse / "objects").iterdir())
+    assert not list((warehouse / "derivations").iterdir())
+    assert not list((warehouse / ".staging").iterdir())
 
 
 def test_publish_reuses_only_a_fully_verified_current_episode_bundle(
@@ -249,6 +268,34 @@ def test_manual_resume_requires_explicit_prior_attempt_and_exact_plan(warehouse:
             resume_from_attempt_id="explicitly-missing",
             plan=plan,
         )
+
+
+def test_attempt_has_one_exclusive_terminal_record(warehouse: Path):
+    plan = {"schema_version": "c3-test-plan-v1", "episode_count": 806}
+    attempt = AttemptJournal.start(warehouse, attempt_id="attempt-1", plan=plan)
+    terminal = attempt.finish("FAILED", {"reason": "synthetic interruption"})
+
+    with pytest.raises(FileExistsError):
+        attempt.finish("READY", {"reason": "conflicting terminal"})
+
+    payload = json.loads(terminal.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAILED"
+    assert payload["result"] == {"reason": "synthetic interruption"}
+
+
+def test_manual_resume_rejects_ready_attempt(warehouse: Path):
+    plan = {"schema_version": "c3-test-plan-v1", "episode_count": 806}
+    first = AttemptJournal.start(warehouse, attempt_id="attempt-1", plan=plan)
+    first.finish("READY", {"reason": "complete"})
+
+    with pytest.raises(ValueError, match="FAILED or STOPPED"):
+        AttemptJournal.manual_resume(
+            warehouse,
+            attempt_id="attempt-2",
+            resume_from_attempt_id="attempt-1",
+            plan=plan,
+        )
+    assert not (warehouse / "attempts" / "attempt-2").exists()
 
 
 def test_manual_resume_lookup_treats_reserved_missing_object_as_pending(

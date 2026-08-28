@@ -22,7 +22,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -43,6 +43,7 @@ OBJECT_COMMIT_SCHEMA_VERSION = "codec-evidence-warehouse-object-commit-v1"
 DERIVATION_BINDING_SCHEMA_VERSION = "codec-evidence-derivation-binding-v1"
 FULL_FIXTURE_MANIFEST_SCHEMA_VERSION = "codec-evidence-full-fixture-manifest-v1"
 ATTEMPT_SCHEMA_VERSION = "codec-evidence-warehouse-attempt-v1"
+ATTEMPT_TERMINAL_FILENAME = "ATTEMPT_TERMINAL.json"
 
 OBJECT_MANIFEST_FILENAME = "object_manifest.json"
 OBJECT_COMMIT_FILENAME = "OBJECT_COMMITTED.json"
@@ -109,6 +110,13 @@ _ATTEMPT_STARTED_FIELDS = {
     "resume_from_attempt_id",
     "plan_sha256",
     "plan",
+}
+_ATTEMPT_TERMINAL_FIELDS = {
+    "schema_version",
+    "attempt_id",
+    "plan_sha256",
+    "status",
+    "result",
 }
 
 
@@ -603,6 +611,7 @@ def publish_episode_object(
     raw_mv_offsets: np.ndarray | None = None,
     raw_mv_fields: Mapping[str, np.ndarray] | None = None,
     accepted_bitstream: str | Path | None = None,
+    prepublish_guard: Callable[[int], None] | None = None,
 ) -> PublishedObject:
     """Publish one complete bundle as a non-overwritable content object."""
 
@@ -649,6 +658,9 @@ def publish_episode_object(
         object_digest = canonical_json_sha256(_content_digest_payload(object_manifest))
         object_manifest["object_content_sha256"] = object_digest
         _write_json_exclusive(stage / OBJECT_MANIFEST_FILENAME, object_manifest)
+        stage_bytes = sum(path.stat().st_size for path in stage.rglob("*") if path.is_file())
+        if prepublish_guard is not None:
+            prepublish_guard(stage_bytes)
 
         binding = {
             "schema_version": DERIVATION_BINDING_SCHEMA_VERSION,
@@ -832,6 +844,18 @@ class AttemptJournal:
                 raise ValueError("Prior attempt plan digest is internally inconsistent")
             if prior.get("plan_sha256") != plan_digest or prior.get("plan") != normalized:
                 raise ValueError("Manual resume plan differs from the exact prior plan")
+            prior_terminal = _load_json(
+                root / "attempts" / resume_from_attempt_id / ATTEMPT_TERMINAL_FILENAME
+            )
+            if (
+                set(prior_terminal) != _ATTEMPT_TERMINAL_FIELDS
+                or prior_terminal.get("schema_version") != ATTEMPT_SCHEMA_VERSION
+                or prior_terminal.get("attempt_id") != resume_from_attempt_id
+                or prior_terminal.get("plan_sha256") != plan_digest
+                or prior_terminal.get("status") not in {"FAILED", "STOPPED"}
+                or not isinstance(prior_terminal.get("result"), dict)
+            ):
+                raise ValueError("Manual resume requires an exact FAILED or STOPPED prior attempt")
         if (root / FINAL_MANIFEST_FILENAME).exists() or (
             root / FINAL_MANIFEST_FILENAME
         ).is_symlink():
@@ -884,7 +908,7 @@ class AttemptJournal:
             raise ValueError("attempt status must be READY, FAILED, or STOPPED")
         if not isinstance(result, Mapping):
             raise TypeError("attempt result must be a mapping")
-        path = self.path / f"ATTEMPT_{status}.json"
+        path = self.path / ATTEMPT_TERMINAL_FILENAME
         _write_json_exclusive(
             path,
             {
@@ -1177,6 +1201,7 @@ class WarehouseEpisodeBundleStore:
 
 __all__ = [
     "ATTEMPT_SCHEMA_VERSION",
+    "ATTEMPT_TERMINAL_FILENAME",
     "DERIVATION_BINDING_SCHEMA_VERSION",
     "FINAL_MANIFEST_FILENAME",
     "FULL_COVERAGE_KIND",
