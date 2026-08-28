@@ -1,6 +1,6 @@
 # G1 all-LeRobot Codec branch contract
 
-Status: `C3_R2_MEMORY_CANARY_IMPLEMENTED_NOT_EXECUTED`
+Status: `C3_R2_MEMORY_CANARY_ACCEPTED_FULL_NOT_AUTHORIZED`
 
 This short-lived branch starts from
 `feat/groot-n17-all-lerobot-20k-r1@dd86aa8deb7c5ee314ca0cf082ab9468b0b61119`.
@@ -307,6 +307,33 @@ worker and no retry. It does not publish a full-coverage fixture manifest. The
 future full-R2 root is
 `/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c3-full-r2`, with the
 previous 10,800-second/30-GB limits, but is not executed by the canary command.
+
+The authorized R2 canary completed with terminal status `READY` at commit
+`b6e0af1978048d9d23d4a3e1a02f9dfa1f9919fa`:
+
+- 3/3 exact selected episodes, 2,432 frames and 83 GOP30 anchors;
+- live process-tree RSS peak `12,078,727,168` bytes from 640 independent
+  supervisor samples at 0.25-second spacing, below 16 GB;
+- diagnostic-only `RUSAGE_SELF` and `RUSAGE_CHILDREN` maxima each
+  `11,515,850,752` bytes; their non-causal historical sum was
+  `23,031,701,504` bytes and did not stop execution;
+- wall time `160.9882884900435` seconds, persistent bytes `187,843,723`,
+  scratch zero, no GPU/network/training/evaluator;
+- all three objects passed full bundle, raw-MV, accepted-bitstream and input
+  identity revalidation; no full fixture manifest was published.
+
+Material hashes:
+
+- terminal: `3cb2ce9c418b47178ca54b02463c0a1fb79f689e8c4622e9cf084d9a89c9bd8c`;
+- final summary: `d690da2b0f2af43f1e67c702288c7d0981dbf1f751d7ed3195e0d7dbb076f4fe`;
+- supervisor resources: `3faa3de041b13c07005ec81b12ee39e42f31c57f5cb004b4a87e90e942fbe8a7`;
+- execution plan: `c8e827152a00d73ecfd877bf72b2a5845d705f63d9eaa27b95938989196e395f`;
+- toolchain: `e1a99610ee71f6303a0d4181336abb85675447369eaa3fe4938388aa6927b416`;
+- implementation: `e51dea06ad11d67a536805c6bb488ef2a75087cc9af1ec5b670e68d5c44d9687`.
+
+This is a resource-measurement and production-pipeline canary, not a complete
+training fixture or model-quality result. Full R2 remains a separately
+authorized materialization.
 
 ## Recommended comparison matrix
 
