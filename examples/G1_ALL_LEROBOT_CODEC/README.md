@@ -1,6 +1,6 @@
 # G1 all-LeRobot Codec branch contract
 
-Status: `C3_R2_MEMORY_CANARY_ACCEPTED_FULL_NOT_AUTHORIZED`
+Status: `C3_R2_FULL_FIXTURE_ACCEPTED_C4_NOT_AUTHORIZED`
 
 This short-lived branch starts from
 `feat/groot-n17-all-lerobot-20k-r1@dd86aa8deb7c5ee314ca0cf082ab9468b0b61119`.
@@ -157,10 +157,10 @@ forbidden.
    ragged `M=0`, five-source DatasetFactory closure and exact-zero parity.
 3. **C2 — completed:** one bounded five-source causal fixture canary under the
    Human-supplied output, toolchain, time and storage contract.
-4. **C3 — R2 memory canary authorized:** all 806 inputs remain frozen. R1
+4. **C3 — R2 full fixture completed:** all 806 inputs remain frozen. R1
    stopped twice at its incorrect summed historical RSS limit; R2 uses only a
-   supervisor-sampled live process-tree RSS limit and first runs three fixed
-   CPU episodes. Full R2 materialization remains a separate later action.
+   supervisor-sampled live process-tree RSS limit. Its three-episode memory
+   canary and subsequent full 806-episode materialization are both accepted.
 5. **C4:** separately authorized GPU full-model parity.
 6. **C5:** separately authorized training and evaluator experiments.
 
@@ -304,9 +304,9 @@ The first R2 execution is the fixed-order three-episode memory canary at
 
 It is bounded to 7,200 seconds, 5 GB persistent output, 256 MB scratch, one CPU
 worker and no retry. It does not publish a full-coverage fixture manifest. The
-future full-R2 root is
+The full-R2 root is
 `/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c3-full-r2`, with the
-previous 10,800-second/30-GB limits, but is not executed by the canary command.
+previous 10,800-second/30-GB limits. It is distinct from the canary root.
 
 The authorized R2 canary completed with terminal status `READY` at commit
 `b6e0af1978048d9d23d4a3e1a02f9dfa1f9919fa`:
@@ -332,8 +332,39 @@ Material hashes:
 - implementation: `e51dea06ad11d67a536805c6bb488ef2a75087cc9af1ec5b670e68d5c44d9687`.
 
 This is a resource-measurement and production-pipeline canary, not a complete
-training fixture or model-quality result. Full R2 remains a separately
-authorized materialization.
+training fixture or model-quality result.
+
+The separately authorized full R2 completed after one preserved engineering
+failure and one explicit manual resume under the exact same plan. Attempt 1
+stopped after 388 objects because a supervisor scratch scan raced an atomic
+staging rename; its terminal SHA-256 is
+`0a9a03df817e8c9b446c9fd676852b9844fd1335d638fcc2cbdf61b96882819d`.
+Attempt 2 reused those 388 objects and materialized the remaining 418 without
+copying any R1 object.
+
+Accepted full-R2 facts:
+
+- 806/806 episodes, 297,340 frames and 10,291 GOP30 anchors;
+- `fixture_manifest.json` is complete `FULL_EPISODE_SET` coverage and loads as
+  exactly 806 warehouse keys;
+- cumulative wall `8,734.808968939004` seconds;
+- live process-tree RSS peak `9,316,560,896` bytes from 16,702 supervisor
+  samples, below 16 GB;
+- persistent bytes `22,845,930,367`, scratch zero and empty staging;
+- CPU-only, offline, no GPU, training or evaluator execution.
+
+Material hashes:
+
+- fixture manifest: `c05736e1e33745ee0580d45aeebf651891a6533701297f23f41a1bd5090c3a88`;
+- READY terminal: `ec1a1fae1f19fc732195690fa384d44c510839a4ebe139c7b6b8b48dda09a649`;
+- final summary: `0130b3cc4f54017688bb1879733b23a7d324da78de59964035b504de2644ffd0`;
+- supervisor resources: `9a5b33ba044d1bdf84a66f77edeb4a70e12515a347bed1e798948721ed88887e`;
+- execution plan: `f3b3b5334769b6f195937ea88292464ae1bf01ea7ef9e0ac5f762970a7b6ace3`;
+- toolchain: `93ea5cdbd74f389fa044fca065ee4cd34a5f48fc10107d65dd4a58419520adaf`;
+- implementation: `cf5f0ca6319c2d6f1a10cbe37dc06a16263b3ce20c994c1c6a954837925ccbe9`.
+
+This is a complete technical training fixture, not evidence of model quality.
+C4 GPU parity and C5 training remain separately authorized stages.
 
 ## Recommended comparison matrix
 
@@ -348,7 +379,7 @@ F8 single-token fusion is currently unmatched cost and excluded.
 
 ## Decisions still required
 
-1. Accept the R2 memory canary before authorizing full-R2 fixture coverage.
+1. Define and separately authorize C4 GPU full-model parity.
 2. Initialization: continue all arms from the retained checkpoint-20000, or
    retrain native and Codec arms from the original N1.7 base. A code baseline
    does not decide model initialization.
