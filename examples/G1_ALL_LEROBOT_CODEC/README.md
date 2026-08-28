@@ -1,6 +1,6 @@
 # G1 all-LeRobot Codec branch contract
 
-Status: `C3_PREPARATION_COMPLETE`
+Status: `C3_R2_MEMORY_CANARY_IMPLEMENTED_NOT_EXECUTED`
 
 This short-lived branch starts from
 `feat/groot-n17-all-lerobot-20k-r1@dd86aa8deb7c5ee314ca0cf082ab9468b0b61119`.
@@ -157,9 +157,10 @@ forbidden.
    ragged `M=0`, five-source DatasetFactory closure and exact-zero parity.
 3. **C2 — completed:** one bounded five-source causal fixture canary under the
    Human-supplied output, toolchain, time and storage contract.
-4. **C3 — preparation completed:** all 806 inputs and a bounded budget are
-   frozen; immutable object storage, explicit manual resume and atomic final
-   manifest code are implemented. Full materialization is not authorized.
+4. **C3 — R2 memory canary authorized:** all 806 inputs remain frozen. R1
+   stopped twice at its incorrect summed historical RSS limit; R2 uses only a
+   supervisor-sampled live process-tree RSS limit and first runs three fixed
+   CPU episodes. Full R2 materialization remains a separate later action.
 5. **C4:** separately authorized GPU full-model parity.
 6. **C5:** separately authorized training and evaluator experiments.
 
@@ -256,7 +257,7 @@ float32 30 Hz representation; four long episodes exceeded the old fixed
 `1e-6` tolerance despite matching that grid exactly. Validation now accepts
 only the exact ideal-float64 or exact stored-float32 grid.
 
-The budget is an empirical C2 projection, not execution authority:
+The full-fixture budget is an empirical C2 projection:
 
 - central object storage: 22,955,473,233 bytes;
 - conservative storage: 28,694,341,542 bytes;
@@ -270,15 +271,42 @@ The budget is an empirical C2 projection, not execution authority:
 format in content-addressed, non-overwritable objects. It binds one derivation
 digest to one content digest, fully verifies objects before reuse, never scans
 for a “latest” attempt, and publishes the final exact-coverage manifest with
-an atomic hard-link create that cannot replace an existing file. The frozen
-execution packet is `c3_full_fixture_plan.json`; its candidate warehouse root
-has not been created.
+an atomic hard-link create that cannot replace an existing file. The input and
+budget preparation packet remains `c3_full_fixture_plan.json`.
 
 Five earlier complete scans remain locally under gitignored `preliminary`
 filenames as superseded receipts; they are not part of the reproducible Git
 contract. Only tracked `c3_full_input_freeze.json` is authoritative.
-The combined C0–C3 preparation focused suite reports 184 passed with one
-existing Transformers cache deprecation warning.
+The C3-R1 execution at
+`/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c3-full-r1` is retained as
+historical failure evidence. Attempt 1 and its one manual resume both stopped
+at the same RSS root cause. They left 65 fully verified immutable objects
+(24,890 frames, 857 GOP30 anchors) but no `fixture_manifest.json`. Their
+terminal hashes are respectively
+`fb4b7d86b5df228e630d926b50aba895d9bb6428caa1c0367c6e19e7baff1b7c`
+and `24100b1ddbfba07e25498b96aacfc0af3993d00d28fe2fd8e5cc459492ede311`.
+R1 is not resumed or migrated.
+
+C3-R2 corrects only resource measurement. The 16 GB limit is enforced from an
+independent supervisor thread sampling the current process tree every 0.25
+seconds. `RUSAGE_SELF` and `RUSAGE_CHILDREN` maxima remain separate diagnostic
+values; their historical maxima are never summed into the limit decision.
+Dataset identities, input freeze, codec contract, sequential CPU worker,
+offline execution, 256 MB scratch policy and automatic retry count remain
+unchanged.
+
+The first R2 execution is the fixed-order three-episode memory canary at
+`/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c3-memory-canary-r2`:
+
+1. `no_torque_100` episode 64 — 1,028 frames;
+2. `no_torque_100` episode 65 — 241 frames;
+3. `aug1p2mm_220` episode 7 — 1,163 frames.
+
+It is bounded to 7,200 seconds, 5 GB persistent output, 256 MB scratch, one CPU
+worker and no retry. It does not publish a full-coverage fixture manifest. The
+future full-R2 root is
+`/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c3-full-r2`, with the
+previous 10,800-second/30-GB limits, but is not executed by the canary command.
 
 ## Recommended comparison matrix
 
@@ -293,16 +321,15 @@ F8 single-token fusion is currently unmatched cost and excluded.
 
 ## Decisions still required
 
-1. Full fixture coverage and a new storage/time budget for all 806 episodes.
+1. Accept the R2 memory canary before authorizing full-R2 fixture coverage.
 2. Initialization: continue all arms from the retained checkpoint-20000, or
    retrain native and Codec arms from the original N1.7 base. A code baseline
    does not decide model initialization.
 3. Trainability: Codec-only is recommended for the first attribution study;
    every control must use the same native trainability and optimizer contract.
 
-Until those decisions are supplied, this branch and the accepted C2 canary
-must not be expanded into full fixture generation, GPU work, training or an
-evaluator.
+Until those decisions are supplied, the R2 canary must not be expanded into
+full fixture generation, GPU work, training or an evaluator.
 
 Before C2/C5, move the hash-only index/identity preflight ahead of 3B model
 allocation. The current C0/C1 factory validates the index before dataset batch

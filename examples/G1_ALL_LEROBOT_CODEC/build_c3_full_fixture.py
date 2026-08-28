@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize the frozen 806-episode C3 Codec fixture, sequentially on CPU.
+"""Materialize one frozen C3-R2 Codec selection, sequentially on CPU.
 
 ``--preflight`` is read-only. ``--execute-initial`` consumes the one fixed
 initial attempt. A later run may use ``--manual-resume`` only with an explicit
@@ -20,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from typing import Any, Mapping, Sequence
@@ -69,19 +70,27 @@ from gr00t.data.codec_evidence.warehouse import (
 import numpy as np
 
 
-SCHEMA_VERSION = "g1-all-lerobot-c3-full-fixture-execution-v1"
-DERIVATION_SCHEMA_VERSION = "g1-all-lerobot-c3-episode-derivation-v1"
-FIXTURE_ID = "g1-all-lerobot-c3-full-r1"
-INITIAL_ATTEMPT_ID = "G1-ALL-LEROBOT-C3-FULL-R1-ATTEMPT1"
-EXPECTED_OUTPUT_ROOT = Path("/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c3-full-r1")
+SCHEMA_VERSION = "g1-all-lerobot-c3-full-fixture-execution-r2-v1"
+DERIVATION_SCHEMA_VERSION = "g1-all-lerobot-c3-episode-derivation-r2-v1"
+FIXTURE_ID = "g1-all-lerobot-c3-full-r2"
+INITIAL_ATTEMPT_ID = "G1-ALL-LEROBOT-C3-FULL-R2-ATTEMPT1"
+EXPECTED_OUTPUT_ROOT = Path("/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c3-full-r2")
+PRODUCER_CLI_RELATIVE = Path("examples/G1_ALL_LEROBOT_CODEC/build_c3_full_fixture.py")
 PREPARATION_PLAN_RELATIVE = Path("examples/G1_ALL_LEROBOT_CODEC/c3_full_fixture_plan.json")
 INPUT_FREEZE_RELATIVE = Path("examples/G1_ALL_LEROBOT_CODEC/c3_full_input_freeze.json")
 PREPARATION_PLAN_FILE_SHA256 = "1e9e34e3134429792e4b8bd2573a3b68e2a30a6349accc6b60aedc52c86749cb"
 INPUT_FREEZE_FILE_SHA256 = "f2e950071eb6187be7747658ae46598b8a3f741c37b710a6e2288c041ea7b9cd"
 EXPECTED_BASELINE = "dd86aa8deb7c5ee314ca0cf082ab9468b0b61119"
-EXPECTED_EPISODES = 806
-EXPECTED_FRAMES = 297_340
-EXPECTED_CODEC_ANCHORS = 10_291
+FROZEN_EPISODES = 806
+FROZEN_FRAMES = 297_340
+FROZEN_CODEC_ANCHORS = 10_291
+EXPECTED_EPISODES = FROZEN_EPISODES
+EXPECTED_FRAMES = FROZEN_FRAMES
+EXPECTED_CODEC_ANCHORS = FROZEN_CODEC_ANCHORS
+EPISODE_SELECTION: tuple[tuple[str, int], ...] | None = None
+PUBLISH_FULL_FIXTURE_MANIFEST = True
+COVERAGE_SCOPE = "EXACT_FROZEN_806_COMPLETE_EPISODES_FULL_TECHNICAL_FIXTURE_R2"
+PROFILE_NAME = "full-r2"
 MAX_WALL_SECONDS = 10_800
 MAX_NEW_BYTES = 30_000_000_000
 MAX_PEAK_RSS_BYTES = 16_000_000_000
@@ -100,6 +109,35 @@ MARKERS = (
     Path("/home/sl/groot_datasets/catalog/STALE_AFTER_SYNC.json"),
 )
 TERMINAL_NAMES = ("ATTEMPT_TERMINAL.json",)
+
+
+def configure_memory_canary_r2() -> None:
+    """Select the fixed three-episode R2 live-RSS canary profile."""
+
+    global SCHEMA_VERSION, FIXTURE_ID, INITIAL_ATTEMPT_ID, EXPECTED_OUTPUT_ROOT
+    global PRODUCER_CLI_RELATIVE, EXPECTED_EPISODES, EXPECTED_FRAMES
+    global EXPECTED_CODEC_ANCHORS, EPISODE_SELECTION, PUBLISH_FULL_FIXTURE_MANIFEST
+    global COVERAGE_SCOPE, PROFILE_NAME, MAX_WALL_SECONDS, MAX_NEW_BYTES
+    SCHEMA_VERSION = "g1-all-lerobot-c3-memory-canary-r2-v1"
+    FIXTURE_ID = "g1-all-lerobot-c3-memory-canary-r2"
+    INITIAL_ATTEMPT_ID = "G1-ALL-LEROBOT-C3-MEMORY-CANARY-R2-ATTEMPT1"
+    EXPECTED_OUTPUT_ROOT = Path(
+        "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c3-memory-canary-r2"
+    )
+    PRODUCER_CLI_RELATIVE = Path("examples/G1_ALL_LEROBOT_CODEC/build_c3_r2_memory_canary.py")
+    EPISODE_SELECTION = (
+        ("no_torque_100", 64),
+        ("no_torque_100", 65),
+        ("aug1p2mm_220", 7),
+    )
+    EXPECTED_EPISODES = 3
+    EXPECTED_FRAMES = 2_432
+    EXPECTED_CODEC_ANCHORS = 83
+    PUBLISH_FULL_FIXTURE_MANIFEST = False
+    COVERAGE_SCOPE = "FIXED_THREE_EPISODE_LIVE_RSS_MEMORY_CANARY_NOT_FULL_COVERAGE"
+    PROFILE_NAME = "memory-canary-r2"
+    MAX_WALL_SECONDS = 7_200
+    MAX_NEW_BYTES = 5_000_000_000
 
 
 def _utc_now() -> str:
@@ -313,12 +351,12 @@ def _validate_preparation_and_freeze(
         raise ValueError("C3 input freeze content digest is internally inconsistent")
     budget = frozen.get("budget")
     expected_budget = {
-        "recommended_cumulative_wall_limit_seconds": MAX_WALL_SECONDS,
-        "recommended_persistent_limit_bytes": MAX_NEW_BYTES,
-        "recommended_peak_rss_limit_bytes": MAX_PEAK_RSS_BYTES,
-        "recommended_scratch_limit_bytes": MAX_SCRATCH_BYTES,
-        "max_workers": MAX_WORKERS,
-        "automatic_retries": AUTOMATIC_RETRIES,
+        "recommended_cumulative_wall_limit_seconds": 10_800,
+        "recommended_persistent_limit_bytes": 30_000_000_000,
+        "recommended_peak_rss_limit_bytes": 16_000_000_000,
+        "recommended_scratch_limit_bytes": 256_000_000,
+        "max_workers": 1,
+        "automatic_retries": 0,
         "resume": "EXPLICIT_MANUAL_ONLY_SAME_PLAN",
     }
     if not isinstance(budget, dict) or any(
@@ -326,9 +364,9 @@ def _validate_preparation_and_freeze(
     ):
         raise ValueError("Tracked C3 budget differs from the authorized exact limits")
     if (
-        frozen.get("episode_count") != EXPECTED_EPISODES
-        or frozen.get("total_frames") != EXPECTED_FRAMES
-        or frozen.get("total_codec_anchors") != EXPECTED_CODEC_ANCHORS
+        frozen.get("episode_count") != FROZEN_EPISODES
+        or frozen.get("total_frames") != FROZEN_FRAMES
+        or frozen.get("total_codec_anchors") != FROZEN_CODEC_ANCHORS
         or frozen.get("camera_id") != CAMERA_ID
         or frozen.get("source_kind") != SOURCE_KIND_NATIVE_CANONICAL
     ):
@@ -374,9 +412,40 @@ def _validate_preparation_and_freeze(
     )
 
 
+def _select_execution_episodes(frozen: Mapping[str, Any]) -> dict[str, Any]:
+    selected = dict(frozen)
+    if EPISODE_SELECTION is None:
+        episodes = list(frozen["episodes"])
+    else:
+        by_key = {(item["source_id"], item["episode_index"]): item for item in frozen["episodes"]}
+        if len(by_key) != FROZEN_EPISODES:
+            raise RuntimeError("Frozen episode keys are not unique")
+        try:
+            episodes = [by_key[key] for key in EPISODE_SELECTION]
+        except KeyError as error:
+            raise RuntimeError(
+                f"R2 execution selection is absent from the freeze: {error}"
+            ) from error
+    if (
+        len(episodes) != EXPECTED_EPISODES
+        or sum(item["num_frames"] for item in episodes) != EXPECTED_FRAMES
+        or sum(item["gop30_anchors"] for item in episodes) != EXPECTED_CODEC_ANCHORS
+    ):
+        raise RuntimeError("R2 execution selection differs from its exact count closure")
+    selected["episodes"] = episodes
+    selected["episode_count"] = len(episodes)
+    selected["total_frames"] = sum(item["num_frames"] for item in episodes)
+    selected["total_codec_anchors"] = sum(item["gop30_anchors"] for item in episodes)
+    selected["episode_uid_digest"] = canonical_json_sha256(
+        sorted(item["episode_uid"] for item in episodes)
+    )
+    return selected
+
+
 def _implementation_closure(repository: Path) -> dict[str, dict[str, Any]]:
     relative_paths = {
-        "producer_cli": "examples/G1_ALL_LEROBOT_CODEC/build_c3_full_fixture.py",
+        "producer_cli": PRODUCER_CLI_RELATIVE.as_posix(),
+        "execution_engine": "examples/G1_ALL_LEROBOT_CODEC/build_c3_full_fixture.py",
         "preparation_plan": PREPARATION_PLAN_RELATIVE.as_posix(),
         "input_freeze": INPUT_FREEZE_RELATIVE.as_posix(),
         "production_primitives": "gr00t/data/codec_evidence/production.py",
@@ -403,7 +472,7 @@ def _implementation_closure(repository: Path) -> dict[str, dict[str, Any]]:
 
 
 def _compact_identity(name: str, value: Any) -> dict[str, str]:
-    return {"name": name, "version": "c3-r1", "sha256": canonical_json_sha256(value)}
+    return {"name": name, "version": "c3-r2", "sha256": canonical_json_sha256(value)}
 
 
 def _codec_contract(toolchain: Mapping[str, Any]) -> dict[str, Any]:
@@ -477,7 +546,9 @@ def _verify_all_frozen_inputs(frozen: Mapping[str, Any]) -> None:
         verify_canonical_input_identity(episode, stage="FULL_FROZEN_INPUT_CLOSURE")
         total_frames += episode.num_frames
     if total_frames != EXPECTED_FRAMES:
-        raise RuntimeError("Full frozen input re-hash did not cover exactly 297340 frames")
+        raise RuntimeError(
+            f"R2 input re-hash did not cover exactly {EXPECTED_FRAMES} selected frames"
+        )
     _check_dataset_markers()
 
 
@@ -486,7 +557,8 @@ def build_execution_plan(repository: Path) -> dict[str, Any]:
 
     _force_cpu_offline_environment()
     _check_dataset_markers()
-    preparation, frozen, artifacts = _validate_preparation_and_freeze(repository)
+    preparation, full_frozen, artifacts = _validate_preparation_and_freeze(repository)
+    frozen = _select_execution_episodes(full_frozen)
     git_identity = _git_identity(repository, preparation)
     implementation = _implementation_closure(repository)
     tools = toolchain_identity(ffmpeg="/usr/bin/ffmpeg", ffprobe="/usr/bin/ffprobe")
@@ -530,7 +602,9 @@ def build_execution_plan(repository: Path) -> dict[str, Any]:
             "outer_timeout_seconds": MAX_WALL_SECONDS,
             "maximum_cumulative_wall_seconds": MAX_WALL_SECONDS,
             "maximum_new_bytes": MAX_NEW_BYTES,
-            "maximum_peak_rss_bytes_including_children": MAX_PEAK_RSS_BYTES,
+            "maximum_live_process_tree_rss_bytes": MAX_PEAK_RSS_BYTES,
+            "rss_enforcement": "SUPERVISOR_LIVE_PROCESS_TREE_SAMPLED_EVERY_0P25_SECONDS",
+            "rusage_diagnostics": ["RUSAGE_SELF_MAXRSS", "RUSAGE_CHILDREN_MAXRSS"],
             "maximum_scratch_bytes_including_encode_and_publish_stage": MAX_SCRATCH_BYTES,
             "max_workers": MAX_WORKERS,
             "automatic_retries": AUTOMATIC_RETRIES,
@@ -542,7 +616,15 @@ def build_execution_plan(repository: Path) -> dict[str, Any]:
         "implementation_identity_sha256": canonical_json_sha256(implementation),
         "codec_contract": contract,
         "codec_contract_sha256": codec_contract_sha256(contract),
-        "scope": "EXACT_FROZEN_806_COMPLETE_EPISODES_FULL_TECHNICAL_FIXTURE",
+        "scope": COVERAGE_SCOPE,
+        "episode_selection": (
+            None
+            if EPISODE_SELECTION is None
+            else [
+                {"source_id": source_id, "episode_index": episode_index}
+                for source_id, episode_index in EPISODE_SELECTION
+            ]
+        ),
     }
     plan["plan_sha256"] = canonical_json_sha256(plan)
     return plan
@@ -557,7 +639,8 @@ def _verify_execution_identity(plan: Mapping[str, Any], repository: Path) -> dic
     embedded_digest = detached_plan.pop("plan_sha256", None)
     if embedded_digest != canonical_json_sha256(detached_plan):
         raise RuntimeError("C3 execution plan digest is internally inconsistent")
-    preparation, frozen, artifacts = _validate_preparation_and_freeze(repository)
+    preparation, full_frozen, artifacts = _validate_preparation_and_freeze(repository)
+    frozen = _select_execution_episodes(full_frozen)
     if (
         artifacts["preparation_plan"] != plan["preparation_plan"]
         or artifacts["input_freeze"] != plan["input_freeze"]
@@ -675,11 +758,14 @@ def _scratch_bytes(root: Path) -> int:
     return _tree_bytes(root / ".scratch") + _tree_bytes(root / ".staging")
 
 
-def _peak_rss_bytes_including_children() -> int:
-    own = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
-    children = int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss) * 1024
-    supervisor = int(os.environ.get("C3_SUPERVISOR_RSS_BASELINE_BYTES", "0"))
-    return own + children + supervisor
+def _rusage_diagnostics() -> dict[str, int]:
+    self_maxrss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+    children_maxrss = int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss) * 1024
+    return {
+        "rusage_self_maxrss_bytes": self_maxrss,
+        "rusage_children_maxrss_bytes": children_maxrss,
+        "rusage_historical_sum_diagnostic_bytes": self_maxrss + children_maxrss,
+    }
 
 
 class BudgetMonitor:
@@ -725,7 +811,7 @@ class BudgetMonitor:
             "persistent_bytes": self.persistent_bytes,
             "scratch_bytes": scratch,
             "new_bytes_including_scratch": self.persistent_bytes + scratch,
-            "peak_rss_bytes_including_children": _peak_rss_bytes_including_children(),
+            **_rusage_diagnostics(),
         }
 
     def check(
@@ -737,8 +823,6 @@ class BudgetMonitor:
         observed = self.observed(refresh_persistent=refresh_persistent)
         if observed["cumulative_wall_seconds"] > MAX_WALL_SECONDS:
             raise RuntimeError(f"C3 cumulative wall budget exceeded: {observed}")
-        if observed["peak_rss_bytes_including_children"] > MAX_PEAK_RSS_BYTES:
-            raise RuntimeError(f"C3 peak RSS budget exceeded: {observed}")
         if observed["scratch_bytes"] > MAX_SCRATCH_BYTES:
             raise RuntimeError(f"C3 scratch budget exceeded: {observed}")
         if observed["new_bytes_including_scratch"] + reserve_bytes > MAX_NEW_BYTES:
@@ -767,8 +851,6 @@ class BudgetMonitor:
             raise RuntimeError(f"C3 pre-publish storage quota exceeded: {proposed}>{MAX_NEW_BYTES}")
         if observed["cumulative_wall_seconds"] > MAX_WALL_SECONDS:
             raise RuntimeError("C3 cumulative wall budget exceeded before CAS publish")
-        if observed["peak_rss_bytes_including_children"] > MAX_PEAK_RSS_BYTES:
-            raise RuntimeError("C3 peak RSS budget exceeded before CAS publish")
 
 
 def _predicted_episode_bytes(source: Mapping[str, Any], episode: Mapping[str, Any]) -> int:
@@ -991,6 +1073,20 @@ def _finish_attempt_once(
         "terminal_utc_time": _utc_now(),
     }
     return journal.finish(status, terminal_result)
+
+
+def _write_worker_result(journal: AttemptJournal, result: Mapping[str, Any]) -> Path:
+    path = journal.path / "WORKER_RESULT.json"
+    _write_json_new(
+        path,
+        {
+            "schema_version": "g1-all-lerobot-c3-worker-result-r2-v1",
+            "attempt_id": journal.attempt_id,
+            "plan_sha256": journal.plan_sha256,
+            "result": dict(result),
+        },
+    )
+    return path
 
 
 def _load_prior_chain(
@@ -1247,7 +1343,8 @@ def _verify_final_bundle_facts(
         total_anchors += bundle.num_anchors
     if total_frames != EXPECTED_FRAMES or total_anchors != EXPECTED_CODEC_ANCHORS:
         raise RuntimeError(
-            f"Final C3 aggregate coverage differs from 297340 frames/10291 anchors: "
+            f"Final C3 aggregate coverage differs from "
+            f"{EXPECTED_FRAMES} frames/{EXPECTED_CODEC_ANCHORS} anchors: "
             f"{total_frames}/{total_anchors}"
         )
     return total_frames, total_anchors
@@ -1364,7 +1461,7 @@ def _run_attempt(
             or len(set(observed_uids)) != EXPECTED_EPISODES
             or any(item.num_frames != expected_frames[item.key.episode_uid] for item in objects)
         ):
-            raise RuntimeError("C3 final object closure is not exact frozen 806-episode coverage")
+            raise RuntimeError("C3 final object closure differs from the exact execution selection")
         for item, episode_row in zip(objects, frozen["episodes"]):
             if item.derivation_sha256 != derivation_sha256(episode_derivation(plan, episode_row)):
                 raise RuntimeError("C3 final derivation closure differs from the frozen plan")
@@ -1372,6 +1469,45 @@ def _run_attempt(
         total_frames, total_anchors = _verify_final_bundle_facts(objects, frozen)
         producer = _producer_identity(plan, journal, objects, frozen, resume_chain)
         before_commit = budget.check(refresh_persistent=True)
+        common_summary = {
+            "schema_version": SCHEMA_VERSION,
+            "status": "READY",
+            "fixture_id": FIXTURE_ID,
+            "attempt_id": journal.attempt_id,
+            "resume_from_attempt_id": resume_from_attempt_id,
+            "resume_chain": list(resume_chain),
+            "coverage_scope": COVERAGE_SCOPE,
+            "episode_selection": plan["episode_selection"],
+            "episode_count": len(objects),
+            "total_frames": total_frames,
+            "total_codec_anchors": total_anchors,
+            "reused_episode_count": sum(item.reused for item in objects),
+            "materialized_episode_count": sum(not item.reused for item in objects),
+            "codec_contract_sha256": plan["codec_contract_sha256"],
+            "toolchain_identity_sha256": plan["toolchain_identity_sha256"],
+            "input_snapshot_sha256": plan["input_snapshot_sha256"],
+            "expected_episode_lengths_sha256": plan["expected_episode_lengths_sha256"],
+            "expected_derivations_sha256": producer["expected_derivations_sha256"],
+            "episode_attestations_sha256": canonical_json_sha256(attestations),
+            "resources": before_commit,
+            "rss_enforcement": "SUPERVISOR_LIVE_PROCESS_TREE_SAMPLED_EVERY_0P25_SECONDS",
+            "supervisor_resources_path": "SUPERVISOR_RESOURCES.json",
+            "cpu_only": True,
+            "network": "offline_no_download",
+            "gpu_used": False,
+            "training_run": False,
+            "evaluator_run": False,
+            "automatic_retries": AUTOMATIC_RETRIES,
+        }
+        if not PUBLISH_FULL_FIXTURE_MANIFEST:
+            summary = {
+                **common_summary,
+                "fixture_manifest_sha256": None,
+                "full_fixture": False,
+            }
+            _write_json_new(journal.path / "CANARY_SUMMARY.json", summary)
+            _write_worker_result(journal, summary)
+            return summary
         if (
             before_commit["cumulative_wall_seconds"] + FINAL_COMMIT_WALL_RESERVE_SECONDS
             > MAX_WALL_SECONDS
@@ -1388,7 +1524,7 @@ def _run_attempt(
             codec_contract=plan["codec_contract"],
             producer_identity=producer,
         )
-        # Returning from commit means its one full 806-object validation and
+        # Returning from commit means its exact full-selection validation and
         # atomic no-replace hard-link are authoritative. Keep the post-commit
         # path minimal; the supervisor can recover READY from this manifest.
         manifest_sha256 = sha256_path(manifest_path)
@@ -1399,38 +1535,12 @@ def _run_attempt(
             "new_bytes_including_scratch": budget.persistent_bytes + before_commit["scratch_bytes"],
         }
         summary = {
-            "schema_version": SCHEMA_VERSION,
-            "status": "READY",
-            "fixture_id": FIXTURE_ID,
-            "attempt_id": journal.attempt_id,
-            "resume_from_attempt_id": resume_from_attempt_id,
-            "resume_chain": list(resume_chain),
-            "episode_count": len(objects),
-            "total_frames": total_frames,
-            "total_codec_anchors": total_anchors,
-            "reused_episode_count": sum(item.reused for item in objects),
-            "materialized_episode_count": sum(not item.reused for item in objects),
+            **common_summary,
             "fixture_manifest_sha256": manifest_sha256,
-            "codec_contract_sha256": plan["codec_contract_sha256"],
-            "toolchain_identity_sha256": plan["toolchain_identity_sha256"],
-            "input_snapshot_sha256": plan["input_snapshot_sha256"],
-            "expected_episode_lengths_sha256": plan["expected_episode_lengths_sha256"],
-            "expected_derivations_sha256": producer["expected_derivations_sha256"],
-            "episode_attestations_sha256": canonical_json_sha256(attestations),
             "resources": resources,
-            "cpu_only": True,
-            "network": "offline_no_download",
-            "gpu_used": False,
-            "training_run": False,
-            "evaluator_run": False,
-            "automatic_retries": AUTOMATIC_RETRIES,
+            "full_fixture": True,
         }
-        _finish_attempt_once(
-            journal,
-            status="READY",
-            result=summary,
-            resume_from_attempt_id=resume_from_attempt_id,
-        )
+        _write_worker_result(journal, summary)
         return summary
     except BaseException as error:
         if (root / FINAL_MANIFEST_FILENAME).is_file():
@@ -1447,7 +1557,7 @@ def _run_attempt(
                 "persistent_bytes": _persistent_bytes(root),
                 "scratch_bytes": _scratch_bytes(root),
                 "new_bytes_including_scratch": _persistent_bytes(root) + _scratch_bytes(root),
-                "peak_rss_bytes_including_children": _peak_rss_bytes_including_children(),
+                **_rusage_diagnostics(),
             }
         else:
             resources = budget.observed(refresh_persistent=True)
@@ -1498,7 +1608,9 @@ def execute_attempt(
 
 def _verify_outer_timeout_supervisor() -> None:
     if os.environ.get("C3_OUTER_TIMEOUT_SECONDS") != str(MAX_WALL_SECONDS):
-        raise RuntimeError("C3 execute requires the frozen outer 10800-second timeout")
+        raise RuntimeError(
+            f"C3 execute requires the frozen outer {MAX_WALL_SECONDS}-second timeout"
+        )
     parent_executable = Path(f"/proc/{os.getppid()}/exe").resolve(strict=True)
     if parent_executable != Path("/usr/bin/timeout").resolve(strict=True):
         raise RuntimeError(f"C3 execute parent must be /usr/bin/timeout, got {parent_executable}")
@@ -1507,10 +1619,12 @@ def _verify_outer_timeout_supervisor() -> None:
         b"/usr/bin/timeout",
         b"--signal=TERM",
         b"--kill-after=30s",
-        b"10800s",
+        f"{MAX_WALL_SECONDS}s".encode("ascii"),
     ]
     if command[:4] != expected_prefix:
-        raise RuntimeError("C3 outer timeout argv must be --signal=TERM --kill-after=30s 10800s")
+        raise RuntimeError(
+            f"C3 outer timeout argv must be --signal=TERM --kill-after=30s {MAX_WALL_SECONDS}s"
+        )
 
 
 def _process_tree_rss_bytes(root_pid: int) -> int:
@@ -1538,6 +1652,70 @@ def _process_tree_rss_bytes(root_pid: int) -> int:
                 descendants.add(pid)
                 changed = True
     return sum(rss.get(pid, 0) for pid in descendants)
+
+
+class LiveProcessTreeRssMonitor:
+    """Sample one live process tree on an independent 0.25-second cadence."""
+
+    def __init__(self, root_pid: int) -> None:
+        self.root_pid = root_pid
+        self._stop = threading.Event()
+        self._triggered = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._peak = 0
+        self._last = 0
+        self._samples = 0
+        self._error: str | None = None
+
+    def _sample(self) -> None:
+        try:
+            live = _process_tree_rss_bytes(self.root_pid)
+        except BaseException as error:
+            with self._lock:
+                self._error = f"{type(error).__name__}:{error}"
+            self._triggered.set()
+            return
+        with self._lock:
+            self._last = live
+            self._peak = max(self._peak, live)
+            self._samples += 1
+            if live > MAX_PEAK_RSS_BYTES:
+                self._triggered.set()
+
+    def _run(self) -> None:
+        deadline = time.monotonic()
+        while not self._stop.is_set():
+            self._sample()
+            deadline += SUPERVISOR_POLL_SECONDS
+            self._stop.wait(max(0.0, deadline - time.monotonic()))
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("Live RSS monitor may only be started once")
+        self._thread = threading.Thread(target=self._run, name="c3-live-rss", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._sample()
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                raise RuntimeError("Live RSS monitor did not stop")
+
+    @property
+    def triggered(self) -> bool:
+        return self._triggered.is_set()
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "peak_live_rss_bytes": self._peak,
+                "last_live_rss_bytes": self._last,
+                "sample_count": self._samples,
+                "error": self._error,
+            }
 
 
 def _terminate_worker(worker: subprocess.Popen[bytes]) -> None:
@@ -1570,6 +1748,85 @@ def _arm_parent_death_signal() -> None:
         raise RuntimeError("C3 supervisor exited before the worker armed its death signal")
 
 
+def _write_supervisor_resources(
+    journal: AttemptJournal,
+    *,
+    peak_live_rss_bytes: int,
+    last_live_rss_bytes: int,
+    sample_count: int,
+    supervisor_started: float,
+    prior_wall: float,
+) -> Path:
+    path = journal.path / "SUPERVISOR_RESOURCES.json"
+    if path.exists() or path.is_symlink():
+        existing = _load_json(path)
+        if existing.get("attempt_id") != journal.attempt_id:
+            raise RuntimeError("Existing supervisor resource receipt belongs to another attempt")
+        return path
+    attempt_wall = time.monotonic() - supervisor_started
+    _write_json_new(
+        path,
+        {
+            "schema_version": "g1-all-lerobot-c3-supervisor-resources-r2-v1",
+            "attempt_id": journal.attempt_id,
+            "sample_interval_seconds": SUPERVISOR_POLL_SECONDS,
+            "sample_count": sample_count,
+            "last_live_process_tree_rss_bytes": last_live_rss_bytes,
+            "peak_live_process_tree_rss_bytes": peak_live_rss_bytes,
+            "hard_limit_live_process_tree_rss_bytes": MAX_PEAK_RSS_BYTES,
+            "live_rss_within_limit": peak_live_rss_bytes <= MAX_PEAK_RSS_BYTES,
+            "attempt_wall_seconds": attempt_wall,
+            "prior_cumulative_wall_seconds": prior_wall,
+            "cumulative_wall_seconds": prior_wall + attempt_wall,
+            "diagnostic_only": _rusage_diagnostics(),
+        },
+    )
+    return path
+
+
+def _finalize_worker_result(
+    journal: AttemptJournal,
+    *,
+    resume_from_attempt_id: str | None,
+) -> dict[str, Any]:
+    payload = _load_json(journal.path / "WORKER_RESULT.json")
+    if (
+        set(payload) != {"schema_version", "attempt_id", "plan_sha256", "result"}
+        or payload.get("schema_version") != "g1-all-lerobot-c3-worker-result-r2-v1"
+        or payload.get("attempt_id") != journal.attempt_id
+        or payload.get("plan_sha256") != journal.plan_sha256
+        or not isinstance(payload.get("result"), dict)
+        or payload["result"].get("status") != "READY"
+    ):
+        raise RuntimeError("C3 worker result differs from its exact attempt")
+    supervisor_path = journal.path / "SUPERVISOR_RESOURCES.json"
+    supervisor = _load_json(supervisor_path)
+    if (
+        supervisor.get("attempt_id") != journal.attempt_id
+        or supervisor.get("live_rss_within_limit") is not True
+        or supervisor.get("peak_live_process_tree_rss_bytes", MAX_PEAK_RSS_BYTES + 1)
+        > MAX_PEAK_RSS_BYTES
+    ):
+        raise RuntimeError("C3 supervisor live process-tree RSS result exceeds its limit")
+    result = dict(payload["result"])
+    result["resources"] = {
+        **dict(result["resources"]),
+        "supervisor_live_process_tree_peak_rss_bytes": supervisor[
+            "peak_live_process_tree_rss_bytes"
+        ],
+        "supervisor_rss_sample_count": supervisor["sample_count"],
+        "supervisor_resources": _file_identity(supervisor_path),
+    }
+    _write_json_new(journal.path / "FINAL_SUMMARY.json", result)
+    _finish_attempt_once(
+        journal,
+        status="READY",
+        result=result,
+        resume_from_attempt_id=resume_from_attempt_id,
+    )
+    return result
+
+
 def _supervised_terminal(
     journal: AttemptJournal,
     *,
@@ -1578,6 +1835,7 @@ def _supervised_terminal(
     resume_from_attempt_id: str | None,
     prior_wall: float,
     supervisor_started: float,
+    supervisor_peak_live_rss_bytes: int = 0,
 ) -> None:
     if _attempt_terminal_path(journal).exists():
         return
@@ -1590,7 +1848,8 @@ def _supervised_terminal(
         "scratch_bytes": _scratch_bytes(journal.root),
         "new_bytes_including_scratch": _persistent_bytes(journal.root)
         + _scratch_bytes(journal.root),
-        "peak_rss_bytes_including_children": _peak_rss_bytes_including_children(),
+        "supervisor_live_process_tree_peak_rss_bytes": supervisor_peak_live_rss_bytes,
+        **_rusage_diagnostics(),
     }
     _finish_attempt_once(
         journal,
@@ -1613,6 +1872,7 @@ def _recover_ready_from_manifest(
     resume_from_attempt_id: str | None,
     prior_wall: float,
     supervisor_started: float,
+    supervisor_peak_live_rss_bytes: int,
 ) -> dict[str, Any]:
     """Validate an authoritative final commit and recover its READY terminal."""
 
@@ -1720,13 +1980,14 @@ def _recover_ready_from_manifest(
         "scratch_bytes": _scratch_bytes(journal.root),
         "new_bytes_including_scratch": _persistent_bytes(journal.root)
         + _scratch_bytes(journal.root),
-        "peak_rss_bytes_including_children": _peak_rss_bytes_including_children(),
+        "supervisor_live_process_tree_peak_rss_bytes": supervisor_peak_live_rss_bytes,
+        **_rusage_diagnostics(),
     }
     if (
         resources["cumulative_wall_seconds"] > MAX_WALL_SECONDS
         or resources["new_bytes_including_scratch"] > MAX_NEW_BYTES
         or resources["scratch_bytes"] > MAX_SCRATCH_BYTES
-        or resources["peak_rss_bytes_including_children"] > MAX_PEAK_RSS_BYTES
+        or resources["supervisor_live_process_tree_peak_rss_bytes"] > MAX_PEAK_RSS_BYTES
     ):
         raise RuntimeError("Committed C3 manifest recovery exceeds the frozen resource budget")
     result = {
@@ -1784,6 +2045,8 @@ def _supervise_attempt(
         str(Path(sys.executable).resolve(strict=True)),
         str(Path(__file__).resolve(strict=True)),
         "--_worker-attempt",
+        "--profile",
+        PROFILE_NAME,
         "--attempt-id",
         attempt_id,
         "--output-root",
@@ -1800,12 +2063,33 @@ def _supervise_attempt(
     previous = signal.signal(signal.SIGTERM, handle_outer_timeout)
     worker: subprocess.Popen[bytes] | None = None
     stop_reason: str | None = None
+    rss_monitor: LiveProcessTreeRssMonitor | None = None
+
+    def rss_snapshot() -> dict[str, Any]:
+        if rss_monitor is not None:
+            return rss_monitor.snapshot()
+        live = _process_tree_rss_bytes(os.getpid())
+        return {
+            "peak_live_rss_bytes": live,
+            "last_live_rss_bytes": live,
+            "sample_count": 1,
+            "error": None,
+        }
+
+    def write_supervisor_receipt() -> Path:
+        snapshot = rss_snapshot()
+        return _write_supervisor_resources(
+            journal,
+            peak_live_rss_bytes=snapshot["peak_live_rss_bytes"],
+            last_live_rss_bytes=snapshot["last_live_rss_bytes"],
+            sample_count=snapshot["sample_count"],
+            supervisor_started=supervisor_started,
+            prior_wall=prior_wall,
+        )
+
     try:
         worker_environment = os.environ.copy()
         worker_environment["C3_ATTEMPT_MONOTONIC_STARTED"] = repr(attempt_started)
-        worker_environment["C3_SUPERVISOR_RSS_BASELINE_BYTES"] = str(
-            _process_tree_rss_bytes(os.getpid())
-        )
         try:
             worker = subprocess.Popen(
                 command,
@@ -1813,6 +2097,8 @@ def _supervise_attempt(
                 start_new_session=True,
             )
         except BaseException as error:
+            write_supervisor_receipt()
+            snapshot = rss_snapshot()
             _supervised_terminal(
                 journal,
                 status="FAILED",
@@ -1820,20 +2106,28 @@ def _supervise_attempt(
                 resume_from_attempt_id=resume_from_attempt_id,
                 prior_wall=prior_wall,
                 supervisor_started=supervisor_started,
+                supervisor_peak_live_rss_bytes=snapshot["peak_live_rss_bytes"],
             )
             return 1
+        rss_monitor = LiveProcessTreeRssMonitor(os.getpid())
+        rss_monitor.start()
         last_persistent_scan = 0.0
         while worker.poll() is None:
             if timeout_requested:
-                stop_reason = "OUTER_TIMEOUT_10800_SECONDS"
+                stop_reason = f"OUTER_TIMEOUT_{MAX_WALL_SECONDS}_SECONDS"
                 break
             now = time.monotonic()
             if prior_wall + (now - supervisor_started) > MAX_WALL_SECONDS:
                 stop_reason = "CUMULATIVE_WALL_EXCEEDED"
                 break
-            live_rss = _process_tree_rss_bytes(os.getpid())
-            if live_rss > MAX_PEAK_RSS_BYTES:
-                stop_reason = f"LIVE_PROCESS_TREE_RSS_EXCEEDED:{live_rss}"
+            snapshot = rss_snapshot()
+            if rss_monitor.triggered:
+                if snapshot["error"] is not None:
+                    stop_reason = f"LIVE_RSS_MONITOR_FAILED:{snapshot['error']}"
+                else:
+                    stop_reason = (
+                        f"LIVE_PROCESS_TREE_RSS_EXCEEDED:{snapshot['peak_live_rss_bytes']}"
+                    )
                 break
             scratch = _scratch_bytes(journal.root)
             if scratch > MAX_SCRATCH_BYTES:
@@ -1848,6 +2142,9 @@ def _supervise_attempt(
             time.sleep(SUPERVISOR_POLL_SECONDS)
         if stop_reason is not None:
             _terminate_worker(worker)
+            rss_monitor.stop()
+            snapshot = rss_snapshot()
+            write_supervisor_receipt()
             if _attempt_terminal_path(journal).exists():
                 terminal = _load_json(_attempt_terminal_path(journal))
                 if terminal.get("status") == "READY":
@@ -1863,6 +2160,7 @@ def _supervise_attempt(
                     resume_from_attempt_id=resume_from_attempt_id,
                     prior_wall=prior_wall,
                     supervisor_started=supervisor_started,
+                    supervisor_peak_live_rss_bytes=snapshot["peak_live_rss_bytes"],
                 )
                 return 0
             _supervised_terminal(
@@ -1872,17 +2170,43 @@ def _supervise_attempt(
                 resume_from_attempt_id=resume_from_attempt_id,
                 prior_wall=prior_wall,
                 supervisor_started=supervisor_started,
+                supervisor_peak_live_rss_bytes=snapshot["peak_live_rss_bytes"],
             )
             return 124 if timeout_requested else 1
         returncode = worker.wait()
+        rss_monitor.stop()
+        snapshot = rss_snapshot()
+        write_supervisor_receipt()
+        if snapshot["error"] is not None or snapshot["peak_live_rss_bytes"] > MAX_PEAK_RSS_BYTES:
+            if not _attempt_terminal_path(journal).exists():
+                _supervised_terminal(
+                    journal,
+                    status="STOPPED",
+                    reason=(
+                        f"LIVE_RSS_MONITOR_FAILED:{snapshot['error']}"
+                        if snapshot["error"] is not None
+                        else f"LIVE_PROCESS_TREE_RSS_EXCEEDED:{snapshot['peak_live_rss_bytes']}"
+                    ),
+                    resume_from_attempt_id=resume_from_attempt_id,
+                    prior_wall=prior_wall,
+                    supervisor_started=supervisor_started,
+                    supervisor_peak_live_rss_bytes=snapshot["peak_live_rss_bytes"],
+                )
+            return 1
         if not _attempt_terminal_path(journal).exists():
-            if (journal.root / FINAL_MANIFEST_FILENAME).is_file():
+            if returncode == 0 and (journal.path / "WORKER_RESULT.json").is_file():
+                _finalize_worker_result(
+                    journal,
+                    resume_from_attempt_id=resume_from_attempt_id,
+                )
+            elif (journal.root / FINAL_MANIFEST_FILENAME).is_file():
                 _recover_ready_from_manifest(
                     journal,
                     plan,
                     resume_from_attempt_id=resume_from_attempt_id,
                     prior_wall=prior_wall,
                     supervisor_started=supervisor_started,
+                    supervisor_peak_live_rss_bytes=snapshot["peak_live_rss_bytes"],
                 )
                 returncode = 0
             else:
@@ -1893,6 +2217,7 @@ def _supervise_attempt(
                     resume_from_attempt_id=resume_from_attempt_id,
                     prior_wall=prior_wall,
                     supervisor_started=supervisor_started,
+                    supervisor_peak_live_rss_bytes=snapshot["peak_live_rss_bytes"],
                 )
         terminal = _load_json(_attempt_terminal_path(journal))
         if terminal.get("status") == "READY":
@@ -1902,10 +2227,14 @@ def _supervise_attempt(
     except BaseException as error:
         if worker is not None and worker.poll() is None:
             _terminate_worker(worker)
+        if rss_monitor is not None and rss_monitor.snapshot()["sample_count"] > 0:
+            rss_monitor.stop()
         if (
             not _attempt_terminal_path(journal).exists()
             and not (journal.root / FINAL_MANIFEST_FILENAME).is_file()
         ):
+            snapshot = rss_snapshot()
+            write_supervisor_receipt()
             _supervised_terminal(
                 journal,
                 status="FAILED",
@@ -1913,12 +2242,19 @@ def _supervise_attempt(
                 resume_from_attempt_id=resume_from_attempt_id,
                 prior_wall=prior_wall,
                 supervisor_started=supervisor_started,
+                supervisor_peak_live_rss_bytes=snapshot["peak_live_rss_bytes"],
             )
         raise
     finally:
         signal.signal(signal.SIGTERM, previous)
         if worker is not None and worker.poll() is None:
             _terminate_worker(worker)
+        if (
+            rss_monitor is not None
+            and rss_monitor._thread is not None
+            and rss_monitor._thread.is_alive()
+        ):
+            rss_monitor.stop()
 
 
 def _worker_attempt(repository: Path, *, attempt_id: str, resume_from: str | None) -> int:
@@ -1964,6 +2300,11 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--execute-initial", action="store_true")
     mode.add_argument("--manual-resume", action="store_true")
     mode.add_argument("--_worker-attempt", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--profile",
+        choices=("full-r2", "memory-canary-r2"),
+        default=PROFILE_NAME,
+    )
     parser.add_argument("--attempt-id")
     parser.add_argument("--resume-from")
     parser.add_argument("--output-root", type=Path, default=EXPECTED_OUTPUT_ROOT)
@@ -2004,6 +2345,12 @@ def _exact_prior_plan(resume_from_attempt_id: str) -> dict[str, Any]:
 
 def main() -> int:
     args = _parser().parse_args()
+    if args.profile == "memory-canary-r2" and PROFILE_NAME != "memory-canary-r2":
+        configure_memory_canary_r2()
+    elif args.profile != PROFILE_NAME:
+        raise ValueError(
+            f"Configured R2 profile differs from CLI: {PROFILE_NAME} != {args.profile}"
+        )
     _validate_args(args)
     _force_cpu_offline_environment()
     repository = Path(__file__).resolve(strict=True).parents[2]

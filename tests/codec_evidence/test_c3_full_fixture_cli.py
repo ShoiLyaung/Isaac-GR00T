@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
 from gr00t.data.codec_evidence.episode_bundle import SOURCE_KIND_NATIVE_CANONICAL, EpisodeBundleKey
@@ -91,6 +92,184 @@ def test_full_input_verifier_visits_every_metadata_and_episode(monkeypatch):
     assert metadata_seen == ["a", "b"]
     assert episodes_seen == [3, 5, 7]
     assert len(marker_checks) == 2
+
+
+def test_r2_memory_canary_profile_freezes_exact_order_and_new_root():
+    module = _load_cli()
+    module.configure_memory_canary_r2()
+    repository = Path(__file__).parents[2]
+    frozen = module._load_json(repository / module.INPUT_FREEZE_RELATIVE)
+    selected = module._select_execution_episodes(frozen)
+
+    assert module.PROFILE_NAME == "memory-canary-r2"
+    assert module.EXPECTED_OUTPUT_ROOT == Path(
+        "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-c3-memory-canary-r2"
+    )
+    assert module.MAX_WALL_SECONDS == 7_200
+    assert module.MAX_NEW_BYTES == 5_000_000_000
+    assert module.MAX_PEAK_RSS_BYTES == 16_000_000_000
+    assert module.MAX_SCRATCH_BYTES == 256_000_000
+    assert module.PUBLISH_FULL_FIXTURE_MANIFEST is False
+    assert [
+        (row["source_id"], row["episode_index"], row["num_frames"]) for row in selected["episodes"]
+    ] == [
+        ("no_torque_100", 64, 1028),
+        ("no_torque_100", 65, 241),
+        ("aug1p2mm_220", 7, 1163),
+    ]
+    assert selected["total_frames"] == 2_432
+    assert selected["total_codec_anchors"] == 83
+
+
+def test_rusage_high_water_is_diagnostic_not_a_worker_limit(tmp_path, monkeypatch):
+    module = _load_cli()
+    root = ensure_warehouse_layout(tmp_path / "warehouse")
+    monitor = module.BudgetMonitor(
+        root=root,
+        started=module.time.monotonic(),
+        prior_cumulative_wall_seconds=0.0,
+        persistent_bytes=0,
+    )
+    monkeypatch.setattr(
+        module,
+        "_rusage_diagnostics",
+        lambda: {
+            "rusage_self_maxrss_bytes": 15_000_000_000,
+            "rusage_children_maxrss_bytes": 12_000_000_000,
+            "rusage_historical_sum_diagnostic_bytes": 27_000_000_000,
+        },
+    )
+
+    observed = monitor.check(refresh_persistent=True, reserve_bytes=0)
+
+    assert observed["rusage_historical_sum_diagnostic_bytes"] == 27_000_000_000
+    assert "peak_rss_bytes_including_children" not in observed
+
+
+def test_supervisor_resource_receipt_separates_live_limit_and_rusage(tmp_path):
+    module = _load_cli()
+    root = ensure_warehouse_layout(tmp_path / "warehouse")
+    journal = AttemptJournal.start(root, attempt_id="attempt-1", plan=_attempt_plan())
+    receipt = module._write_supervisor_resources(
+        journal,
+        peak_live_rss_bytes=15_500_000_000,
+        last_live_rss_bytes=1_000_000_000,
+        sample_count=42,
+        supervisor_started=module.time.monotonic(),
+        prior_wall=0.0,
+    )
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+
+    assert payload["peak_live_process_tree_rss_bytes"] == 15_500_000_000
+    assert payload["hard_limit_live_process_tree_rss_bytes"] == 16_000_000_000
+    assert payload["live_rss_within_limit"] is True
+    assert payload["sample_interval_seconds"] == 0.25
+    assert set(payload["diagnostic_only"]) == {
+        "rusage_self_maxrss_bytes",
+        "rusage_children_maxrss_bytes",
+        "rusage_historical_sum_diagnostic_bytes",
+    }
+
+
+def test_live_rss_monitor_samples_independently_and_triggers_on_live_value(monkeypatch):
+    module = _load_cli()
+    values = iter((1_000, 2_000, 17_000, 17_000))
+    monkeypatch.setattr(module, "MAX_PEAK_RSS_BYTES", 16_000)
+    monkeypatch.setattr(module, "SUPERVISOR_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_process_tree_rss_bytes", lambda _pid: next(values, 1_000))
+    monitor = module.LiveProcessTreeRssMonitor(123)
+
+    monitor.start()
+    time.sleep(0.04)
+    monitor.stop()
+    snapshot = monitor.snapshot()
+
+    assert monitor.triggered is True
+    assert snapshot["peak_live_rss_bytes"] == 17_000
+    assert snapshot["sample_count"] >= 3
+    assert snapshot["error"] is None
+
+
+def test_supervisor_finalizes_worker_result_into_the_only_ready_terminal(tmp_path):
+    module = _load_cli()
+    root = ensure_warehouse_layout(tmp_path / "warehouse")
+    journal = AttemptJournal.start(root, attempt_id="attempt-1", plan=_attempt_plan())
+    module._write_worker_result(
+        journal,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "status": "READY",
+            "attempt_id": journal.attempt_id,
+            "resources": {"rusage_self_maxrss_bytes": 99},
+        },
+    )
+    module._write_supervisor_resources(
+        journal,
+        peak_live_rss_bytes=12_000,
+        last_live_rss_bytes=1_000,
+        sample_count=7,
+        supervisor_started=module.time.monotonic(),
+        prior_wall=0.0,
+    )
+
+    result = module._finalize_worker_result(journal, resume_from_attempt_id=None)
+
+    assert result["resources"]["supervisor_live_process_tree_peak_rss_bytes"] == 12_000
+    terminal = json.loads((journal.path / "ATTEMPT_TERMINAL.json").read_text(encoding="utf-8"))
+    assert terminal["status"] == "READY"
+    assert terminal["result"]["resources"]["rusage_self_maxrss_bytes"] == 99
+    assert (journal.path / "FINAL_SUMMARY.json").is_file()
+
+
+def test_supervise_attempt_collects_worker_result_after_live_rss_monitoring(tmp_path, monkeypatch):
+    module = _load_cli()
+    output = tmp_path / "warehouse"
+    monkeypatch.setattr(module, "EXPECTED_OUTPUT_ROOT", output)
+    monkeypatch.setattr(module, "INITIAL_ATTEMPT_ID", "attempt-1")
+    monkeypatch.setattr(module, "_process_tree_rss_bytes", lambda _pid: 123_000)
+
+    class FakePopen:
+        pid = 999_999
+
+        def __init__(self, *_args, **_kwargs):
+            started = module._load_json(output / "attempts" / "attempt-1" / "ATTEMPT_STARTED.json")
+            journal = AttemptJournal(
+                output,
+                output / "attempts" / "attempt-1",
+                started,
+            )
+            module._write_worker_result(
+                journal,
+                {
+                    "schema_version": module.SCHEMA_VERSION,
+                    "status": "READY",
+                    "attempt_id": "attempt-1",
+                    "resources": {"rusage_self_maxrss_bytes": 10},
+                },
+            )
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            del timeout
+            return 0
+
+    monkeypatch.setattr(module.subprocess, "Popen", FakePopen)
+    started = module.time.monotonic()
+
+    returncode = module._supervise_attempt(
+        _attempt_plan(),
+        Path(__file__).parents[2],
+        attempt_id="attempt-1",
+        resume_from_attempt_id=None,
+        attempt_started=started,
+    )
+
+    assert returncode == 0
+    terminal = module._load_json(output / "attempts" / "attempt-1" / "ATTEMPT_TERMINAL.json")
+    assert terminal["status"] == "READY"
+    assert terminal["result"]["resources"]["supervisor_live_process_tree_peak_rss_bytes"] == 123_000
 
 
 def test_initial_attempt_reserves_exact_root_without_adopting_collision(tmp_path, monkeypatch):
@@ -363,6 +542,7 @@ def test_supervisor_recovers_one_plan_bound_ready_terminal_from_atomic_manifest(
         resume_from_attempt_id=None,
         prior_wall=0.0,
         supervisor_started=module.time.monotonic(),
+        supervisor_peak_live_rss_bytes=123_456,
     )
     assert result["status"] == "READY"
     terminal = json.loads((journal.path / "ATTEMPT_TERMINAL.json").read_text(encoding="utf-8"))
