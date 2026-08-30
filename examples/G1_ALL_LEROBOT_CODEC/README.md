@@ -1,6 +1,6 @@
 # G1 all-LeRobot Codec branch contract
 
-Status: `C5_F2_CODEC_ONLY_AUTHORIZED_PREPARING_PROFILE`
+Status: `C5_F2_CODEC_ONLY_20K_TECHNICAL_PASS_SCIENTIFIC_UNEVALUATED`
 
 This short-lived branch starts from
 `feat/groot-n17-all-lerobot-20k-r1@dd86aa8deb7c5ee314ca0cf082ab9468b0b61119`.
@@ -476,6 +476,94 @@ R1 material hashes:
 - rank-0/rank-1 posttrain evidence: respectively
   `be45990d2916ff1649eb57fd6ab90488e17b436de178c30dfe2009ad006d5716`
   and `1fdae9af9a2c9109803513a2f7a7beaa84ce39bc4c0ced8551c9b8986cfdc37d`.
+
+### C5 F2 R2, pilot and full-20k accepted technical results
+
+The R2 profile used the new commit
+`581739449d06295be90ff3e3a5168cb8577e9861` and the distinct root
+`/home/sl/icra27-runs/codec-training/g1-all-lerobot-c5-codec-only-2step-r2`.
+It closed the R1 evidence gaps on real two-rank ZeRO-2:
+
+- both steps and both ranks observed all 27 pre-reduce autograd gradients as
+  finite with `call_count=1`;
+- step 0 had a nonzero gate gradient and exact-zero gradients for all 26
+  upstream Codec tensors;
+- step 1 had finite nonzero gradients for all 26 upstream Codec tensors;
+- the gate changed from exact zero to `-0.00012874603271484375`;
+- the saved state digest `bf746298cdd4967afe6a0e5cad38adc417684d68e727c2c45d839ba8c8524514`
+  matched both ranks and the independently reloaded checkpoint;
+- wall time was `106.41106773808133` seconds, cleanup was complete and
+  `technical_valid=true`.
+
+R2 attempt and summary SHA-256 are respectively
+`090cd9536bd52fe09421f810e50afddb25885c397281e710bbb0e2dd705db540`
+and `53b5972bb66a52c3f45323572d88c712b0f15e1a549df6c71d175b9d0264d382`.
+
+The independently initialized 500-step pilot used commit
+`80bf4c215d72b99634d434395bf8128def8a08f1` and root
+`/home/sl/icra27-runs/codec-training/g1-all-lerobot-c5-codec-only-500step-r1`.
+It completed 500/500 finite optimizer steps over 16,000 samples, saved both
+ZeRO optimizer partitions, reloaded its checkpoint, and covered every source
+at least once. Its wall time was `239.73461157199927` seconds and its 20k
+projection with 25% margin was `11986.730578599963` seconds, below the
+28,200-second inner limit. The short pilot's source proportions were visibly
+noisy, so it was used only as a throughput/stability gate. Its attempt and
+summary SHA-256 are respectively
+`066262fa941cb99a06ef838d3af639520c9cc5fbd6190281b49905f32b3ae92e`
+and `ee5434e705096b524623160aeb41cc1db65417c9649f69ab8aebfd043d2be8d7`.
+
+The full F2 strict Codec-only training then started independently from the
+same retained native checkpoint, with a fresh optimizer, at
+`/home/sl/icra27-runs/codec-training/g1-all-lerobot-c5-codec-only-20k-r1`.
+The supervisor's internal mode name `formal` means only the full 20k training
+stage; it is unrelated to evaluator `formal-800`.
+
+Accepted full-20k technical facts:
+
+- 20,000/20,000 optimizer steps and 640,000 samples; average training loss
+  `0.021159661865234373`;
+- all 20,000 losses and gradient norms on both ranks were finite, with zero
+  skipped steps and zero overflow events;
+- actual sample totals were `74,054 / 228,712 / 128,947 / 183,985 / 24,302`
+  in the frozen source order; proportions were
+  `11.571 / 35.736 / 20.148 / 28.748 / 3.797%`, at most `0.824` percentage
+  points from the declared H40 weights;
+- NCCL flight-recorder sequences matched across ranks, each with 105,176
+  entries and no circular-buffer wrap;
+- only the 27 Codec tensors (`9,571,649` parameters) were optimized; the final
+  gate was `-0.1787109375` and final Codec state digest was
+  `860f5e71d2b9260fa7819ac03ec42c0f1281ffb7a24b0e149c0fd4c71a580b84`;
+- independent tensor comparison proved all 1,031 retained native tensors are
+  `torch.equal` in the final checkpoint; the final key set adds exactly the 27
+  Codec tensors and has no native key missing or changed;
+- `checkpoint-20000` contains two model shards, two ZeRO optimizer partitions,
+  scheduler/RNG state, config, processor, statistics and the complete 53-entry
+  embodiment mapping; offline standalone config/processor reload passed;
+- wall time `5541.872898612055` seconds; peak total GPU memory was 7,843 MiB
+  and 8,910 MiB; final persistent size was about 46.24 GB under the 128 GiB
+  bound; owned processes, compute contexts and GPU leases were clean.
+
+Full-20k material identities:
+
+- attempt: `35b54bd2230e5c0d735e5b8e5c66480f6a0242f3a8063e309eaab8646a371ac1`;
+- supervisor summary: `7440519f9bdf9de5996bcbb8a9c918612a29db6362ac7362fe83e61d9c2fe321`;
+- rank-0/rank-1 posttrain evidence:
+  `f78ff51d21e46ca18dcfb729431cf30c120b45cb7e7ce9c5b3f5a1a4d1f41075`
+  and `0169793e54c87a63197ae4169ffbde8ec63693db6fed95c94a98d21a246c0980`;
+- checkpoint index: `26925948e090e0775039277bada6fdbb359de0a327030006e6555340d360fb17`;
+- checkpoint model shards:
+  `5524cf9933dd6ec40687637444b22db6dc76921dfe0e1843c7140e8701763cf7`
+  and `cfd00a5a4dcbde343d97bfa158e762d880b93349696f9df7b2d9f4cd7c0fc40a`;
+- checkpoint config:
+  `75b18a40270bb5836c31a0b816e4d0793cc51bc9611c6446a6b5f26498e8ba4b`;
+- rank-0/rank-1 optimizer partitions:
+  `ea6efb22c2729b96de41a5cdf8cfc96a3710ce6f393caa409ad27a3e8c706603`
+  and `8a1e87e0fed3cc0ac8dd34fab63d848bc9a69a28f7a19d482f4f4a0c006e0c5a`.
+
+This is a technically valid F2 training result and a new Codec-enabled
+checkpoint. It is not evaluator evidence, native task success, a comparison
+against F0/F3/F4, or a model-quality conclusion. No evaluator or formal-800
+run was performed or authorized by this training sequence.
 
 ## Recommended comparison matrix
 
