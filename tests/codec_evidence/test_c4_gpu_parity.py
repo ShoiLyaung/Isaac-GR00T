@@ -68,6 +68,28 @@ def test_loading_info_accepts_only_explicit_complete_codec_missing_keys():
         )
 
 
+def test_inference_batch_removes_only_ground_truth_action():
+    module = _load_module()
+    action = torch.ones((1, 40, 132))
+    state = torch.zeros((1, 1, 132))
+    action_mask = torch.ones((1, 40))
+    training = {
+        "inputs": {
+            "action": action,
+            "action_mask": action_mask,
+            "state": state,
+        }
+    }
+
+    inference = module._inference_batch(training)
+
+    assert set(inference["inputs"]) == {"action_mask", "state"}
+    assert inference["inputs"]["state"] is state
+    assert inference["inputs"]["action_mask"] is action_mask
+    with pytest.raises(ValueError, match="ground-truth action"):
+        module._inference_batch({"inputs": {"action_mask": action_mask}})
+
+
 def test_tensor_tree_identity_is_exact_and_changes_with_value():
     module = _load_module()
     first = module._tensor_tree_identity({"x": torch.tensor([[1.0, 2.0]])})

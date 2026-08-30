@@ -21,10 +21,10 @@ from typing import Any, Mapping
 import numpy as np
 
 
-SCHEMA_VERSION = "g1-all-lerobot-c4-gpu-parity-r1"
-ATTEMPT_ID = "G1-ALL-LEROBOT-C4-GPU-PARITY-R1-ATTEMPT1"
+SCHEMA_VERSION = "g1-all-lerobot-c4-gpu-parity-r2"
+ATTEMPT_ID = "G1-ALL-LEROBOT-C4-GPU-PARITY-R2-ATTEMPT1"
 REPOSITORY = Path(__file__).resolve().parents[2]
-OUTPUT_ROOT = Path("/home/sl/icra27-runs/codec-gpu-parity/g1-all-lerobot-c4-r1")
+OUTPUT_ROOT = Path("/home/sl/icra27-runs/codec-gpu-parity/g1-all-lerobot-c4-r2")
 CHECKPOINT = Path(
     "/home/sl/icra27-runs/research-control/groot-n17-all-lerobot-20k-r1/"
     "experiments/groot-n17-all-lerobot-20k-r1/runs/"
@@ -434,6 +434,16 @@ def _loading_failures(info: Mapping[str, Any], allowed_missing: set[str]) -> dic
     return failures
 
 
+def _inference_batch(training_batch: Mapping[str, Any]) -> dict[str, Any]:
+    inputs = training_batch.get("inputs")
+    if not isinstance(inputs, Mapping) or "action" not in inputs:
+        raise ValueError("C4 training batch must contain ground-truth action")
+    inference_inputs = {key: value for key, value in inputs.items() if key != "action"}
+    if "action" in inference_inputs or "action_mask" not in inference_inputs:
+        raise RuntimeError("C4 inference input action/action_mask contract drifted")
+    return {"inputs": inference_inputs}
+
+
 def _run_model_phase(
     *,
     codec_enabled: bool,
@@ -491,7 +501,7 @@ def _run_model_phase(
         raise RuntimeError("C4 forward loss is non-finite or non-scalar")
     _set_seed(torch)
     with torch.inference_mode():
-        action = model.get_action(**batch)["action_pred"].detach().float().cpu()
+        action = model.get_action(**_inference_batch(batch))["action_pred"].detach().float().cpu()
     if action.shape != (1, 40, 132) or not torch.isfinite(action).all():
         raise RuntimeError(f"C4 action prediction shape/finite mismatch: {tuple(action.shape)}")
     torch.cuda.synchronize()
