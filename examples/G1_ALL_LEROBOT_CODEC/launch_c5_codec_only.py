@@ -548,6 +548,21 @@ def _saved_codec_checkpoint(
     }
 
 
+def _throughput_projection(
+    mode_name: str, wall_seconds: float, max_steps: int
+) -> tuple[float | None, bool | None]:
+    if mode_name != "pilot":
+        return None, None
+    projected = wall_seconds / max_steps * 20000 * 1.25
+    return projected, projected <= MODES["formal"].timeout_seconds
+
+
+def _source_coverage_complete(mode_name: str, source_sample_totals: dict[str, int]) -> bool:
+    return mode_name not in {"pilot", "formal"} or (
+        bool(source_sample_totals) and all(value > 0 for value in source_sample_totals.values())
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     mode = MODES[args.mode]
     preparation_root = args.preparation_root.resolve(strict=True)
@@ -735,8 +750,9 @@ def run(args: argparse.Namespace) -> int:
                 "checkpoint_root": str(checkpoint_root),
                 "error": f"{type(exc).__name__}: {exc}",
             }
-        optimizer_state_complete = True
-        if args.mode in {"pilot", "formal"}:
+        optimizer_state_required = args.mode in {"pilot", "formal"}
+        optimizer_state_complete = None
+        if optimizer_state_required:
             optimizer_root = (
                 train_output / f"checkpoint-{mode.max_steps}/global_step{mode.max_steps}"
             )
@@ -744,12 +760,8 @@ def run(args: argparse.Namespace) -> int:
                 len(list(optimizer_root.glob("bf16_zero_pp_rank_*_mp_rank_00_optim_states.pt")))
                 == 2
             )
-        projected_20k_with_margin = (
-            wall_seconds / mode.max_steps * 20000 * 1.25 if args.mode == "pilot" else None
-        )
-        throughput_gate = (
-            projected_20k_with_margin is None
-            or projected_20k_with_margin <= MODES["formal"].timeout_seconds
+        projected_20k_with_margin, throughput_gate = _throughput_projection(
+            args.mode, wall_seconds, mode.max_steps
         )
         attempt_bytes = base.directory_size(args.run_dir)
         owned_alive = [identity for identity in owned.values() if base.identity_matches(identity)]
@@ -760,14 +772,11 @@ def run(args: argparse.Namespace) -> int:
             and stop_reason is None
             and posttrain["complete"]
             and saved_checkpoint["complete"]
-            and optimizer_state_complete
-            and throughput_gate
+            and (not optimizer_state_required or optimizer_state_complete is True)
+            and throughput_gate is not False
             and attempt_bytes <= mode.storage_limit_bytes
             and cleanup_complete
-            and (
-                args.mode != "formal"
-                or all(value > 0 for value in posttrain["source_sample_totals"].values())
-            )
+            and _source_coverage_complete(args.mode, posttrain["source_sample_totals"])
         )
         summary = {
             "schema_version": "g1-all-lerobot-c5-codec-only-training-summary-v1",
@@ -789,6 +798,7 @@ def run(args: argparse.Namespace) -> int:
             "cleanup_complete": cleanup_complete,
             "posttrain_evidence": posttrain,
             "saved_codec_checkpoint": saved_checkpoint,
+            "optimizer_state_required": optimizer_state_required,
             "optimizer_state_complete": optimizer_state_complete,
             "projected_20k_seconds_with_25_percent_margin": projected_20k_with_margin,
             "throughput_gate": throughput_gate,

@@ -98,6 +98,20 @@ def test_supervisor_trainable_identity_matches_model_contract():
     assert c5.EXPECTED_TRAINABLE_NUMEL == _CODEC_ONLY_TRAINABLE_NUMEL
 
 
+def test_pilot_alone_owns_throughput_and_all_source_gates():
+    assert c5._throughput_projection("profile", 100.0, 2) == (None, None)
+    projected, passed = c5._throughput_projection("pilot", 500.0, 500)
+    assert projected == 25000.0
+    assert passed is True
+    assert c5._throughput_projection("pilot", 600.0, 500)[1] is False
+
+    totals = {source_id: 1 for source_id in c5.SOURCE_IDS}
+    assert c5._source_coverage_complete("profile", {}) is True
+    assert c5._source_coverage_complete("pilot", totals) is True
+    totals[c5.SOURCE_IDS[-1]] = 0
+    assert c5._source_coverage_complete("pilot", totals) is False
+
+
 def test_codec_posttrain_closes_optimizer_gradient_and_rank_state(tmp_path):
     evidence_dir = tmp_path / "distributed_evidence"
     evidence_dir.mkdir()
