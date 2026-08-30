@@ -1,6 +1,6 @@
 # G1 all-LeRobot Codec branch contract
 
-Status: `C3_R2_FULL_FIXTURE_ACCEPTED_C4_NOT_AUTHORIZED`
+Status: `C4_GPU_EXACT_PARITY_ACCEPTED_C5_NOT_AUTHORIZED`
 
 This short-lived branch starts from
 `feat/groot-n17-all-lerobot-20k-r1@dd86aa8deb7c5ee314ca0cf082ab9468b0b61119`.
@@ -161,7 +161,8 @@ forbidden.
    stopped twice at its incorrect summed historical RSS limit; R2 uses only a
    supervisor-sampled live process-tree RSS limit. Its three-episode memory
    canary and subsequent full 806-episode materialization are both accepted.
-5. **C4:** separately authorized GPU full-model parity.
+5. **C4 — completed:** separately authorized retained-checkpoint full-model
+   native/Codec exact parity on one real full-R2 fixture batch.
 6. **C5:** separately authorized training and evaluator experiments.
 
 No stage automatically authorizes the next one.
@@ -364,7 +365,46 @@ Material hashes:
 - implementation: `cf5f0ca6319c2d6f1a10cbe37dc06a16263b3ce20c994c1c6a954837925ccbe9`.
 
 This is a complete technical training fixture, not evidence of model quality.
-C4 GPU parity and C5 training remain separately authorized stages.
+
+## C4 GPU full-model exact parity
+
+The authorized C4 used the retained native `checkpoint-20000`, full-R2
+`no_torque_100` episode 64 at observation row 64, seed 42 and one RTX 6000 Ada.
+It compared the native model with the first native-to-Codec extension using
+the exact same native preprocessed tensors. The Codec configuration had a
+direct scalar gate of exact zero and the full real episode-bundle evidence.
+
+Two preserved engineering failures preceded the accepted result: r1 supplied
+a training batch with ground-truth action to inference and entered the RTC
+path; r2 exposed that Transformers initialization rewrote the missing new gate
+after construction. The shared native-to-Codec loading path now explicitly
+restores that newly missing gate to exact zero without touching Codec checkpoint
+reloads.
+
+C4-r3 completed with terminal status `READY`:
+
+- native and Codec eval forward loss both `0.2578125` and `torch.equal`;
+- native and Codec four-step Euler action `[1,40,132]` are `torch.equal`, with
+  maximum absolute difference zero;
+- Codec evidence executed (`encode=2`, `condition=5`), rather than bypassing
+  the extension;
+- native checkpoint loading had no missing/unexpected/mismatched/error keys;
+- Codec loading allowed exactly the complete 27-key new extension and no other
+  mismatch;
+- native/Codec peak allocated GPU memory was respectively `6,351,761,920` and
+  `6,370,262,528` bytes;
+- wall time `27.159419923031237` seconds; checkpoint and fixture identities
+  remained unchanged; GPU lease and memory were released.
+
+Material hashes:
+
+- terminal: `99a306824c05697b91d51cddcd8c2539bf690d9719692979dcd424de32ff8dbf`;
+- summary: `46992191bcd420c0f487735fce51d82a0d19fa99b53221ab49a1a653fa48ef63`;
+- action: `25f84d6fda7d6f0872048f8e713087f32997475e55e1532a6d9acc40f2c8bca7`;
+- plan: `fdf74be66c1125f4ef5fabed3a3de3391e4313f0f9892119bb7c3b4e0d392351`.
+
+This proves exact zero-gate technical parity for one real batch. It is not a
+model-quality result and does not authorize C5 training.
 
 ## Recommended comparison matrix
 
@@ -379,11 +419,10 @@ F8 single-token fusion is currently unmatched cost and excluded.
 
 ## Decisions still required
 
-1. Define and separately authorize C4 GPU full-model parity.
-2. Initialization: continue all arms from the retained checkpoint-20000, or
+1. Initialization: continue all arms from the retained checkpoint-20000, or
    retrain native and Codec arms from the original N1.7 base. A code baseline
    does not decide model initialization.
-3. Trainability: Codec-only is recommended for the first attribution study;
+2. Trainability: Codec-only is recommended for the first attribution study;
    every control must use the same native trainability and optimizer contract.
 
 Until those decisions are supplied, the R2 canary must not be expanded into
