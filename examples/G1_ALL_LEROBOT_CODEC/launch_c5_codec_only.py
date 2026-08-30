@@ -547,7 +547,7 @@ def run(args: argparse.Namespace) -> int:
     source = base.validate_source(args.expected_source_commit)
     materials = validate_materials(preparation_root)
     train_output = args.run_dir / "train"
-    port = base.choose_port()
+    port = args.master_port
     train_command = build_train_command(
         mode=mode,
         dataset_manifest=Path(materials["dataset_manifest"]),
@@ -807,11 +807,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--expected-source-commit", required=True)
     parser.add_argument("--lease-root", type=Path, default=Path("/tmp/research-control-gpu-leases"))
     parser.add_argument("--minimum-free-mib", type=int, default=40000)
+    parser.add_argument("--master-port", type=int, default=29573)
     args = parser.parse_args(argv)
     if not args.run_dir.is_absolute() or not args.preparation_root.is_absolute():
         parser.error("run-dir and preparation-root must be absolute")
     if args.minimum_free_mib < 0:
         parser.error("minimum-free-mib must be non-negative")
+    if not 1024 <= args.master_port <= 65535:
+        parser.error("master-port must be between 1024 and 65535")
     return args
 
 

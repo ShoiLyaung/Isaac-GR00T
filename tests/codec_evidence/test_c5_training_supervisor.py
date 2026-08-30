@@ -55,6 +55,7 @@ def test_c5_commands_freeze_only_codec_and_profile_warmup(tmp_path):
         assert "--no-tune-diffusion-model" in command
         assert "--no-tune-vlln" in command
         assert "--nproc_per_node=2" in command
+        assert "--master_port=12345" in command
     assert profile[profile.index("--warmup-ratio") + 1] == "0.0"
     assert pilot[pilot.index("--warmup-ratio") + 1] == "0.05"
     assert "--save-only-model" in profile
