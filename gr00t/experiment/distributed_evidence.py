@@ -224,6 +224,10 @@ class FiniteTrainingMonitor(TrainerCallback):
         self._overflow: list[bool] = []
         self._trainer = None
         self._first_batch: dict[str, Any] | None = None
+        self._trainability_contract: dict[str, Any] | None = None
+        self._trainability_initial_state_sha256: str | None = None
+        self._trainability_initial_gate: float | None = None
+        self._trainability_gradients: list[dict[str, Any]] = []
 
     def capture_loss(self, loss: torch.Tensor) -> None:
         if torch.is_tensor(loss) and loss.numel() == 1:
@@ -257,6 +261,135 @@ class FiniteTrainingMonitor(TrainerCallback):
     def bind_trainer(self, trainer: Any) -> None:
         self._trainer = trainer
         trainer._cleanroom_finite_monitor = self
+        provider = getattr(trainer.model, "trainability_evidence_contract", None)
+        contract = provider() if callable(provider) else None
+        if contract is not None:
+            self._trainability_contract = contract
+            self._trainability_initial_state_sha256 = self._trainability_state_sha256()
+            self._trainability_initial_gate = self._trainability_gate_value()
+
+    def _trainability_named_parameters(self) -> list[tuple[str, torch.nn.Parameter]]:
+        if self._trainer is None or self._trainability_contract is None:
+            return []
+        available = dict(self._trainer.model.named_parameters())
+        names = self._trainability_contract["parameter_names"]
+        missing = [name for name in names if name not in available]
+        if missing:
+            raise RuntimeError(f"trainability evidence parameters are missing: {missing}")
+        return [(name, available[name]) for name in names]
+
+    def _trainability_state_sha256(self) -> str:
+        digest = hashlib.sha256()
+        for name, parameter in self._trainability_named_parameters():
+            value = parameter.detach().contiguous().reshape(-1).view(torch.uint8).cpu()
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(parameter.dtype).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(_canonical_json(list(parameter.shape)).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(value.numpy().tobytes())
+        return digest.hexdigest()
+
+    def _trainability_gate_value(self) -> float:
+        if self._trainability_contract is None:
+            raise RuntimeError("trainability evidence contract is absent")
+        gate_name = self._trainability_contract["gate_parameter_name"]
+        parameters = dict(self._trainability_named_parameters())
+        gate = parameters[gate_name]
+        if gate.numel() != 1:
+            raise RuntimeError("trainability gate must be scalar")
+        return float(gate.detach().float().item())
+
+    def on_pre_optimizer_step(self, args, state, control, **kwargs):
+        del args, state, control, kwargs
+        if self._trainability_contract is None:
+            return
+        capture_steps = int(
+            self._trainability_contract.get(
+                "gradient_capture_steps",
+                self._trainability_contract["required_gradient_steps"],
+            )
+        )
+        if len(self._trainability_gradients) >= capture_steps:
+            return
+        gate_name = self._trainability_contract["gate_parameter_name"]
+        gate_summary = None
+        non_gate = []
+        for name, parameter in self._trainability_named_parameters():
+            gradient = parameter.grad
+            summary = {
+                "name": name,
+                "present": gradient is not None,
+                "finite": bool(torch.isfinite(gradient).all().item())
+                if gradient is not None
+                else False,
+                "nonzero": bool(torch.count_nonzero(gradient).item())
+                if gradient is not None
+                else False,
+                "l2_norm": (
+                    float(torch.linalg.vector_norm(gradient.detach().float()).item())
+                    if gradient is not None
+                    else None
+                ),
+            }
+            if name == gate_name:
+                gate_summary = summary
+            else:
+                non_gate.append(summary)
+        if gate_summary is None:
+            raise RuntimeError("trainability gate gradient is absent from the contract")
+        self._trainability_gradients.append(
+            {
+                "step_index": len(self._trainability_gradients),
+                "gate": gate_summary,
+                "non_gate_parameter_count": len(non_gate),
+                "non_gate_present_count": sum(item["present"] for item in non_gate),
+                "non_gate_finite_count": sum(item["finite"] for item in non_gate),
+                "non_gate_nonzero_count": sum(item["nonzero"] for item in non_gate),
+                "non_gate_present_names": [item["name"] for item in non_gate if item["present"]],
+                "non_gate_nonzero_names": [item["name"] for item in non_gate if item["nonzero"]],
+                "non_gate_nonfinite_names": [
+                    item["name"] for item in non_gate if item["present"] and not item["finite"]
+                ],
+                "non_gate_l2_norm": math.sqrt(
+                    sum((item["l2_norm"] or 0.0) ** 2 for item in non_gate)
+                ),
+            }
+        )
+
+    def _trainability_summary(self, expected_steps: int) -> dict[str, Any] | None:
+        if self._trainability_contract is None:
+            return None
+        required = int(self._trainability_contract["required_gradient_steps"])
+        capture_steps = int(self._trainability_contract.get("gradient_capture_steps", required))
+        expected_captures = min(expected_steps, capture_steps)
+        final_state = self._trainability_state_sha256()
+        final_gate = self._trainability_gate_value()
+        gradients = self._trainability_gradients
+        complete = (
+            expected_steps >= required
+            and len(gradients) == expected_captures
+            and self._trainability_initial_gate == 0.0
+            and math.isfinite(final_gate)
+            and final_gate != 0.0
+            and final_state != self._trainability_initial_state_sha256
+            and all(
+                (not item["gate"]["present"] or item["gate"]["finite"])
+                and not item["non_gate_nonfinite_names"]
+                and (item["gate"]["present"] or item["non_gate_present_count"] > 0)
+                for item in gradients
+            )
+        )
+        return {
+            "contract": self._trainability_contract,
+            "initial_state_sha256": self._trainability_initial_state_sha256,
+            "final_state_sha256": final_state,
+            "initial_gate": self._trainability_initial_gate,
+            "final_gate": final_gate,
+            "first_gradient_steps": gradients,
+            "complete": complete,
+        }
 
     def on_optimizer_step(
         self,
@@ -307,6 +440,7 @@ class FiniteTrainingMonitor(TrainerCallback):
             error = f"{type(exc).__name__}: {exc}"
         finite_losses = all(math.isfinite(value) for value in losses)
         finite_grad_norms = all(math.isfinite(value) for value in grad_norms)
+        trainability = self._trainability_summary(expected_steps)
         complete = (
             error is None
             and len(losses) == expected_steps
@@ -317,6 +451,7 @@ class FiniteTrainingMonitor(TrainerCallback):
             and finite_grad_norms
             and not any(self._skipped)
             and not any(self._overflow)
+            and (trainability is None or trainability["complete"])
         )
         return {
             "expected_optimizer_steps": expected_steps,
@@ -330,6 +465,7 @@ class FiniteTrainingMonitor(TrainerCallback):
             "skipped_optimizer_steps": sum(self._skipped),
             "overflow_events": sum(self._overflow),
             "first_batch": self._first_batch,
+            "trainability": trainability,
             "complete": complete,
             "error": error,
         }
@@ -536,6 +672,9 @@ def record_posttrain(
         **_rank_identity(),
         "resolved_config_sha256": _digest(config),
         **_parameter_summary(model),
+        "optimizer_trainability": _jsonable(
+            getattr(trainer, "optimizer_trainability_summary", None)
+        ),
         "declared_deepspeed_zero_stage": declared_stage,
         "actual_deepspeed_zero_stage": actual_stage,
         "deepspeed_engine_class": engine_class,
@@ -555,6 +694,7 @@ def record_posttrain(
             "trainable_parameter_count",
             "trainable_key_set_sha256",
             "trainable_numel",
+            "optimizer_trainability",
             "declared_deepspeed_zero_stage",
             "actual_deepspeed_zero_stage",
             "deepspeed_engine_class",

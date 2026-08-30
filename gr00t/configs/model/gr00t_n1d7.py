@@ -123,6 +123,7 @@ class Gr00tN1d7Config(PretrainedConfig):
 
     # Optional action-side codec evidence. Absent/None preserves the native model.
     codec_evidence: dict | None = None
+    codec_trainability: str | None = None
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -161,6 +162,8 @@ class Gr00tN1d7Config(PretrainedConfig):
 
         if cfg.get("codec_evidence") is None:
             cfg.pop("codec_evidence", None)
+        if cfg.get("codec_trainability") is None:
+            cfg.pop("codec_trainability", None)
 
         return cfg
 

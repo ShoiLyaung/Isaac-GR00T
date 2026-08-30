@@ -160,6 +160,8 @@ if __name__ == "__main__":
     config.model.tune_visual = ft_config.tune_visual
     config.model.tune_projector = ft_config.tune_projector
     config.model.tune_diffusion_model = ft_config.tune_diffusion_model
+    config.model.tune_vlln = ft_config.tune_vlln
+    config.model.codec_trainability = ft_config.codec_trainability
     config.model.state_dropout_prob = ft_config.state_dropout_prob
     config.model.random_rotation_angle = ft_config.random_rotation_angle
     config.model.color_jitter_params = ft_config.color_jitter_params
@@ -194,6 +196,7 @@ if __name__ == "__main__":
     config.training.wandb_project = ft_config.wandb_project
 
     config.data.shard_size = ft_config.shard_size
+    config.data.seed = ft_config.seed
     config.data.episode_sampling_rate = ft_config.episode_sampling_rate
     config.data.num_shards_per_epoch = ft_config.num_shards_per_epoch
 

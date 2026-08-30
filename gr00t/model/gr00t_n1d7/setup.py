@@ -340,6 +340,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 tune_projector=self.config.model.tune_projector,
                 tune_diffusion_model=self.config.model.tune_diffusion_model,
                 tune_vlln=self.config.model.tune_vlln,
+                codec_trainability=self.config.model.codec_trainability,
                 state_dropout_prob=self.config.model.state_dropout_prob,
                 backbone_trainable_params_fp32=self.config.model.backbone_trainable_params_fp32,
                 load_bf16=self.config.model.load_bf16,

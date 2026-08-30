@@ -2,12 +2,57 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from gr00t.experiment.distributed_evidence import (
+    FiniteTrainingMonitor,
     _dataset_contract_summary,
     record_posttrain,
     record_pretrain,
 )
 import pytest
 import torch
+
+
+class _TrainabilityToy(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate = torch.nn.Parameter(torch.zeros(()))
+        self.weight = torch.nn.Parameter(torch.ones((2,)))
+
+    @staticmethod
+    def trainability_evidence_contract():
+        return {
+            "mode": "toy",
+            "parameter_names": ["gate", "weight"],
+            "gate_parameter_name": "gate",
+            "expected_numel": 3,
+            "required_gradient_steps": 2,
+            "gradient_capture_steps": 3,
+        }
+
+
+def test_trainability_evidence_requires_gate_then_upstream_gradient():
+    model = _TrainabilityToy()
+    monitor = FiniteTrainingMonitor()
+    monitor.bind_trainer(SimpleNamespace(model=model))
+
+    model.gate.grad = torch.ones_like(model.gate)
+    model.weight.grad = torch.zeros_like(model.weight)
+    monitor.on_pre_optimizer_step(None, None, None)
+    with torch.no_grad():
+        model.gate.add_(0.1)
+
+    model.gate.grad = torch.ones_like(model.gate)
+    model.weight.grad = torch.ones_like(model.weight)
+    monitor.on_pre_optimizer_step(None, None, None)
+    with torch.no_grad():
+        model.gate.add_(0.1)
+        model.weight.add_(0.1)
+
+    evidence = monitor.summary(expected_steps=2)["trainability"]
+    assert evidence["complete"] is True
+    assert evidence["initial_gate"] == 0.0
+    assert evidence["final_gate"] == pytest.approx(0.2)
+    assert evidence["first_gradient_steps"][0]["non_gate_nonzero_count"] == 0
+    assert evidence["first_gradient_steps"][1]["non_gate_nonzero_count"] == 1
 
 
 @pytest.mark.parametrize(

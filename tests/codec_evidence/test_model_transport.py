@@ -6,7 +6,11 @@ from types import SimpleNamespace
 from gr00t.configs.model.gr00t_n1d7 import Gr00tN1d7Config
 from gr00t.data.codec_evidence.episode_bundle import make_synthetic_episode_bundle
 from gr00t.data.codec_evidence.processor import CodecEvidenceProcessorCore
+from gr00t.experiment.trainer import Gr00tTrainer
+from gr00t.model.gr00t_n1d7.codec_dynamics import Gr00tCodecConditioningStack
 from gr00t.model.gr00t_n1d7.gr00t_n1d7 import (
+    _CODEC_ONLY_PARAMETER_NAMES,
+    _CODEC_ONLY_TRAINABLE_NUMEL,
     Gr00tN1d7,
     Gr00tN1d7ActionHead,
     _parse_optional_codec_model_config as parse_action_codec_config,
@@ -21,6 +25,7 @@ import numpy as np
 import pytest
 import torch
 from torch import nn
+from transformers import Trainer
 from transformers.feature_extraction_utils import BatchFeature
 
 
@@ -579,6 +584,146 @@ def test_full_model_writes_canonical_codec_config_before_backbone(raw_codec, ena
         assert config.codec_evidence is None
 
 
+@pytest.mark.parametrize(
+    ("codec_config", "overrides", "message"),
+    [
+        (_model_codec_config(), {"codec_trainability": "bogus"}, "Unsupported"),
+        (None, {"codec_trainability": "codec_only"}, "requires enabled Codec"),
+        (
+            _model_codec_config(),
+            {"codec_trainability": "codec_only", "tune_visual": True},
+            "every native tune flag disabled",
+        ),
+        (
+            {**_model_codec_config(), "d_codec": 32},
+            {"codec_trainability": "codec_only"},
+            "sizing differs",
+        ),
+    ],
+)
+def test_codec_only_contract_fails_before_backbone_allocation(
+    codec_config, overrides, message, monkeypatch
+):
+    values = {
+        "codec_evidence": codec_config,
+        "tune_llm": False,
+        "tune_visual": False,
+        "tune_projector": False,
+        "tune_diffusion_model": False,
+        "tune_vlln": False,
+        "tune_top_llm_layers": 0,
+        **overrides,
+    }
+    config = Gr00tN1d7Config(**values)
+    backbone_factory_called = False
+
+    def reject_backbone_factory(_config):
+        nonlocal backbone_factory_called
+        backbone_factory_called = True
+        raise AssertionError("backbone allocation must not be reached")
+
+    monkeypatch.setattr(
+        "gr00t.model.gr00t_n1d7.gr00t_n1d7.get_backbone_cls",
+        reject_backbone_factory,
+    )
+    with pytest.raises(ValueError, match=message):
+        Gr00tN1d7(config)
+    assert backbone_factory_called is False
+
+
+class _CodecOnlyActionHead(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.native = nn.Sequential(nn.Dropout(0.5), nn.Linear(2, 2))
+        self.codec_conditioning = Gr00tCodecConditioningStack(
+            action_width=1536,
+            d_codec=64,
+            conditioner_heads=8,
+            gate_init=0.0,
+            modalities=("mv", "rpe", "i_frame", "metadata"),
+        )
+
+    def set_frozen_modules_to_eval_mode(self):
+        self.native.eval()
+
+
+def _bare_codec_only_model() -> Gr00tN1d7:
+    model = Gr00tN1d7.__new__(Gr00tN1d7)
+    nn.Module.__init__(model)
+    model.config = Gr00tN1d7Config(
+        codec_evidence=_model_codec_config(),
+        codec_trainability="codec_only",
+        tune_llm=False,
+        tune_visual=False,
+        tune_projector=False,
+        tune_diffusion_model=False,
+        tune_vlln=False,
+        tune_top_llm_layers=0,
+    )
+    model.codec_trainability = "codec_only"
+    model.backbone = nn.Sequential(nn.Dropout(0.5), nn.Linear(2, 2))
+    model.action_head = _CodecOnlyActionHead()
+    model._apply_codec_trainability(_model_codec_config())
+    return model
+
+
+def test_codec_only_closure_and_training_modes_are_exact():
+    model = _bare_codec_only_model()
+    trainable = [
+        (name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad
+    ]
+
+    assert tuple(name for name, _parameter in trainable) == _CODEC_ONLY_PARAMETER_NAMES
+    assert len(trainable) == 27
+    assert sum(parameter.numel() for _name, parameter in trainable) == _CODEC_ONLY_TRAINABLE_NUMEL
+
+    model.train()
+    assert model.training is True
+    assert model.backbone.training is False
+    assert model.action_head.training is True
+    assert model.action_head.native.training is False
+    assert model.action_head.codec_conditioning.training is True
+
+
+def test_codec_only_optimizer_closure_is_identity_exact():
+    model = _bare_codec_only_model()
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    optimizer = SimpleNamespace(
+        param_groups=[{"params": trainable[:14]}, {"params": trainable[14:]}]
+    )
+
+    summary = model.validate_optimizer_trainability(optimizer)
+
+    assert summary["parameter_count"] == 27
+    assert summary["trainable_numel"] == _CODEC_ONLY_TRAINABLE_NUMEL
+    assert summary["optimizer_group_parameter_counts"] == [14, 13]
+
+    with pytest.raises(RuntimeError, match="duplicate"):
+        model.validate_optimizer_trainability(
+            SimpleNamespace(param_groups=[{"params": trainable + [trainable[0]]}])
+        )
+    with pytest.raises(RuntimeError, match="differs"):
+        model.validate_optimizer_trainability(
+            SimpleNamespace(param_groups=[{"params": trainable[:-1]}])
+        )
+
+
+def test_trainer_validates_realized_optimizer_closure(monkeypatch):
+    optimizer = SimpleNamespace(param_groups=[])
+    expected_summary = {"mode": "codec_only", "parameter_count": 27}
+    calls = []
+    model = SimpleNamespace(
+        validate_optimizer_trainability=lambda value: calls.append(value) or expected_summary
+    )
+    trainer = Gr00tTrainer.__new__(Gr00tTrainer)
+    trainer.model = model
+    monkeypatch.setattr(Trainer, "create_optimizer", lambda _trainer: optimizer)
+
+    assert trainer.create_optimizer() is optimizer
+    assert calls == [optimizer]
+    assert trainer.optimizer_trainability_summary == expected_summary
+
+
 def test_enabled_checkpoint_partial_codec_missing_fails(monkeypatch):
     requested = _model_codec_config()
     pipeline, codec_config = _checkpoint_identity_pipeline(requested)
@@ -719,3 +864,64 @@ def test_native_checkpoint_relative_or_hf_identity_does_not_read_processor(monke
     )
 
     assert torch.equal(torch.random.get_rng_state(), rng_before)
+
+
+def test_native_to_codec_model_load_receives_strict_trainability(tmp_path, monkeypatch):
+    pipeline = Gr00tN1d7Pipeline.__new__(Gr00tN1d7Pipeline)
+    model_config = SimpleNamespace(
+        action_horizon=40,
+        tune_llm=False,
+        tune_visual=False,
+        tune_projector=False,
+        tune_diffusion_model=False,
+        tune_vlln=False,
+        codec_trainability="codec_only",
+        state_dropout_prob=0.2,
+        backbone_trainable_params_fp32=True,
+        load_bf16=False,
+    )
+    pipeline.config = SimpleNamespace(
+        model=model_config,
+        training=SimpleNamespace(
+            start_from_checkpoint="native-checkpoint",
+            skip_weight_loading=False,
+        ),
+    )
+    pipeline.transformers_loading_kwargs = {"local_files_only": True}
+    pipeline.codec_evidence_config = SimpleNamespace(to_model_dict=lambda: _model_codec_config())
+    pipeline.save_cfg_dir = tmp_path
+    pipeline._checkpoint_codec_load_mode = lambda *_args: "native_to_codec"
+    pipeline._validate_checkpoint_processor_codec_identity = lambda *_args: None
+    pipeline._validate_codec_missing_keys = lambda *_args: set()
+    pipeline._initialize_native_to_codec_gate = lambda *_args: None
+
+    parameter = nn.Parameter(torch.zeros(()))
+    loaded_model = SimpleNamespace(
+        action_head=SimpleNamespace(mask_token=None),
+        config=SimpleNamespace(to_filtered_json=lambda: "{}"),
+        parameters=lambda: [parameter],
+    )
+    captured = {}
+
+    def fake_from_pretrained(checkpoint, **kwargs):
+        captured["checkpoint"] = checkpoint
+        captured.update(kwargs)
+        return loaded_model, {
+            "missing_keys": [],
+            "unexpected_keys": [],
+            "mismatched_keys": [],
+        }
+
+    monkeypatch.setattr(
+        "gr00t.model.gr00t_n1d7.setup.AutoModel.from_pretrained",
+        fake_from_pretrained,
+    )
+    monkeypatch.setattr(
+        "gr00t.model.gr00t_n1d7.setup.run_on_rank0",
+        lambda function, *args, **kwargs: function(*args),
+    )
+
+    assert pipeline._create_model() is loaded_model
+    assert captured["checkpoint"] == "native-checkpoint"
+    assert captured["codec_trainability"] == "codec_only"
+    assert captured["codec_evidence"] == _model_codec_config()

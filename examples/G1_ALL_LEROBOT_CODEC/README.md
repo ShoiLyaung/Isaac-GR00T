@@ -1,13 +1,14 @@
 # G1 all-LeRobot Codec branch contract
 
-Status: `C4_GPU_EXACT_PARITY_ACCEPTED_C5_NOT_AUTHORIZED`
+Status: `C5_F2_CODEC_ONLY_AUTHORIZED_PREPARING_PROFILE`
 
 This short-lived branch starts from
 `feat/groot-n17-all-lerobot-20k-r1@dd86aa8deb7c5ee314ca0cf082ab9468b0b61119`.
 It preserves the five-source training baseline. The initial branch did not
-inherit execution authority; the later bounded C2 fixture canary was separately
-authorized and completed. GPU use, training and evaluator execution remain
-unauthorized.
+inherit execution authority. C2, C3 and C4 were subsequently authorized and
+completed. The Human has now separately authorized the C5 scheme recorded
+below; evaluator expansion and the F3/F4 scientific interventions remain out
+of scope.
 
 ## Native contract that must not change
 
@@ -404,29 +405,71 @@ Material hashes:
 - plan: `fdf74be66c1125f4ef5fabed3a3de3391e4313f0f9892119bb7c3b4e0d392351`.
 
 This proves exact zero-gate technical parity for one real batch. It is not a
-model-quality result and does not authorize C5 training.
+model-quality result. C4 itself did not authorize C5; that authorization was
+provided later by the Human.
+
+## C5 authorized strict Codec-only sequence
+
+C5 starts every stage independently from the retained native
+`checkpoint-20000`; it never resumes the old optimizer and never warm-starts a
+longer stage from the profile or pilot. The accepted F2 sequence is:
+
+1. a two-step engineering profile;
+2. a 500-step pilot only after the profile closes all technical evidence;
+3. a fresh 20,000-step run only if the pilot is technically valid and its
+   measured throughput plus 25% margin fits the 28,200-second inner wall.
+
+All native weights are frozen. `tune_llm`, `tune_visual`, `tune_projector`,
+`tune_diffusion_model`, `tune_vlln` and `tune_top_llm_layers` are false. The
+only trainable closure is exactly 27
+`action_head.codec_conditioning.*` tensors containing 9,571,649 parameters;
+the realized optimizer parameter identities are checked against that same
+closure. The action-head container stays in train mode so the declared
+`state_dropout_prob=0.2` remains real, while frozen native submodules stay in
+eval mode.
+
+The profile uses `warmup_ratio=0` so its first nonzero-LR step can update the
+exact-zero gate and the second step can demonstrate finite nonzero upstream
+Codec gradients. Pilot and 20k retain the baseline `warmup_ratio=0.05`; their
+first three gradient steps are captured because the first warmup optimizer
+step has LR zero. Every stage uses seed 42, global batch 32, H40, LR `1e-4`,
+weight decay `1e-5`, two GPUs, offline local inputs and zero automatic retries.
+
+`tune_visual=false` freezes the Qwen raw-RGB visual encoder. It does not disable
+or freeze MV/RPE/I-frame/metadata Codec evidence, because that evidence enters
+only through the action-side conditioning stack.
+
+The tiny C5 preparation overlay adds the identical full-R2 `codec_evidence`
+block to five derived adapter JSON files and points the new dataset manifest at
+the accepted read-only loader views. It copies no dataset, fixture or
+checkpoint. The external supervisor records the exact input identities,
+resolved command, strict GPU conflict gate, finite loss/gradient evidence,
+gate-to-upstream gradient transition, optimizer closure, saved 27-tensor state
+digest and reload identity.
 
 ## Recommended comparison matrix
 
 - F0: native RGB reference
 - F2: full Codec evidence
-- F3: same Codec stack with zero/all-invalid evidence
-- F4: same stack with causal-window temporal shuffle
+- F3: same stack with post-validation `ZERO_VALUES_TOPOLOGY_RETAINED`
+- F4: same stack with deterministic in-window `CONTENT_TO_TIME_MISALIGNMENT`
 
 F1 decoded-RGB T8 and modality ablations should be added before any broad
 representation claim. F2-F7 must execute the same 9,571,649-parameter stack;
-F8 single-token fusion is currently unmatched cost and excluded.
+F8 single-token fusion is currently unmatched cost and excluded. F3 must not
+use all-invalid fallback, which removes the intended learning signal. A joint
+shuffle of complete T8 tuples is also invalid for F4 because the current
+cross-attention is permutation-invariant over context tokens; F4 must preserve
+time slots while misaligning value-bearing content.
 
-## Decisions still required
+## Remaining boundaries
 
-1. Initialization: continue all arms from the retained checkpoint-20000, or
-   retrain native and Codec arms from the original N1.7 base. A code baseline
-   does not decide model initialization.
-2. Trainability: Codec-only is recommended for the first attribution study;
-   every control must use the same native trainability and optimizer contract.
-
-Until those decisions are supplied, the R2 canary must not be expanded into
-full fixture generation, GPU work, training or an evaluator.
+Initialization and first-stage trainability are now resolved as retained
+`checkpoint-20000` plus strict Codec-only. F3/F4 still require their own
+schema, implementation, focused tests and scientific authorization. Evaluator
+work remains separate. GPU execution must also pass the supervisor's live
+conflict check; authorization is not permission to overlap an unrelated
+process already holding either training GPU.
 
 Before C2/C5, move the hash-only index/identity preflight ahead of 3B model
 allocation. The current C0/C1 factory validates the index before dataset batch

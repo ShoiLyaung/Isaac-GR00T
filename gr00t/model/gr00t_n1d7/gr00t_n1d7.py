@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import logging
 from typing import Any, Tuple
 
@@ -34,6 +35,73 @@ from gr00t.model.modules.embodiment_conditioned_mlp import (
 
 logger = logging.getLogger(__name__)
 _UNRESOLVED_CODEC_CONFIG = object()
+_CODEC_ONLY_PREFIX = "action_head.codec_conditioning."
+_CODEC_ONLY_TRAINABLE_NUMEL = 9_571_649
+_CODEC_ONLY_PARAMETER_SUFFIXES = (
+    "core.mv_stem.weight",
+    "core.mv_stem.bias",
+    "core.rpe_stem.weight",
+    "core.rpe_stem.bias",
+    "core.i_frame_stem.weight",
+    "core.i_frame_stem.bias",
+    "core.metadata_stem.weight",
+    "core.metadata_stem.bias",
+    "core.norm.weight",
+    "core.norm.bias",
+    "core.mlp.0.weight",
+    "core.mlp.0.bias",
+    "core.mlp.2.weight",
+    "core.mlp.2.bias",
+    "projector.projection.weight",
+    "projector.projection.bias",
+    "conditioner.gate",
+    "conditioner.query_norm.weight",
+    "conditioner.query_norm.bias",
+    "conditioner.context_norm.weight",
+    "conditioner.context_norm.bias",
+    "conditioner.attention.in_proj_weight",
+    "conditioner.attention.in_proj_bias",
+    "conditioner.attention.out_proj.weight",
+    "conditioner.attention.out_proj.bias",
+    "conditioner.output_norm.weight",
+    "conditioner.output_norm.bias",
+)
+_CODEC_ONLY_PARAMETER_NAMES = tuple(
+    f"{_CODEC_ONLY_PREFIX}{suffix}" for suffix in _CODEC_ONLY_PARAMETER_SUFFIXES
+)
+
+
+def _validate_codec_trainability_config(
+    config: Gr00tN1d7Config, codec_config: dict[str, Any] | None
+) -> str | None:
+    """Validate strict trainability before allocating the large native model."""
+
+    mode = getattr(config, "codec_trainability", None)
+    if mode is None:
+        return None
+    if mode != "codec_only":
+        raise ValueError(f"Unsupported codec_trainability: {mode!r}")
+    if codec_config is None:
+        raise ValueError("codec_only trainability requires enabled Codec evidence")
+    sizing = {
+        "d_codec": codec_config["d_codec"],
+        "conditioner_heads": codec_config["conditioner_heads"],
+        "action_width": getattr(config, "input_embedding_dim", None),
+    }
+    expected_sizing = {"d_codec": 64, "conditioner_heads": 8, "action_width": 1536}
+    if sizing != expected_sizing:
+        raise ValueError(f"codec_only sizing differs from the frozen closure: {sizing}")
+    conflicting = {
+        "tune_llm": getattr(config, "tune_llm", False),
+        "tune_visual": getattr(config, "tune_visual", False),
+        "tune_projector": getattr(config, "tune_projector", False),
+        "tune_diffusion_model": getattr(config, "tune_diffusion_model", False),
+        "tune_vlln": getattr(config, "tune_vlln", False),
+        "tune_top_llm_layers": getattr(config, "tune_top_llm_layers", 0),
+    }
+    if any(bool(value) for value in conflicting.values()):
+        raise ValueError(f"codec_only requires every native tune flag disabled: {conflicting}")
+    return mode
 
 
 def _parse_optional_codec_model_config(value: Any) -> dict[str, Any] | None:
@@ -593,6 +661,7 @@ class Gr00tN1d7(PreTrainedModel):
         """
         codec_config = _parse_optional_codec_model_config(getattr(config, "codec_evidence", None))
         config.codec_evidence = codec_config
+        codec_trainability = _validate_codec_trainability_config(config, codec_config)
         super().__init__(config)
         self.config = config
 
@@ -612,6 +681,8 @@ class Gr00tN1d7(PreTrainedModel):
 
         # Initialize action head
         self.action_head = Gr00tN1d7ActionHead(config, codec_config=codec_config)
+        self.codec_trainability = codec_trainability
+        self._apply_codec_trainability(codec_config)
         from .processing_gr00t_n1d7 import Gr00tN1d7DataCollator
 
         if self.action_head.codec_evidence_enabled:
@@ -627,6 +698,86 @@ class Gr00tN1d7(PreTrainedModel):
                 model_type=config.backbone_model_type,
                 transformers_loading_kwargs=transformers_loading_kwargs,
             )
+
+    def _apply_codec_trainability(self, codec_config: dict[str, Any] | None) -> None:
+        mode = self.codec_trainability
+        if mode is None:
+            return
+        _validate_codec_trainability_config(self.config, codec_config)
+        if self.action_head.codec_conditioning is None:
+            raise ValueError("codec_only trainability requires enabled Codec evidence")
+        self.requires_grad_(False)
+        self.action_head.codec_conditioning.requires_grad_(True)
+        trainable = [
+            (name, parameter)
+            for name, parameter in self.named_parameters()
+            if parameter.requires_grad
+        ]
+        names = tuple(name for name, _parameter in trainable)
+        numel = sum(parameter.numel() for _name, parameter in trainable)
+        if names != _CODEC_ONLY_PARAMETER_NAMES:
+            raise RuntimeError(f"codec_only trainable parameter closure drifted: {names}")
+        if numel != _CODEC_ONLY_TRAINABLE_NUMEL:
+            raise RuntimeError(
+                f"codec_only trainable numel drifted: {numel} != {_CODEC_ONLY_TRAINABLE_NUMEL}"
+            )
+
+    def validate_optimizer_trainability(self, optimizer) -> dict[str, Any] | None:
+        """Fail closed if the realized optimizer is not the strict Codec closure."""
+
+        if self.codec_trainability != "codec_only":
+            return None
+        named_parameters = dict(self.named_parameters())
+        expected = [named_parameters[name] for name in _CODEC_ONLY_PARAMETER_NAMES]
+        actual = [parameter for group in optimizer.param_groups for parameter in group["params"]]
+        actual_ids = [id(parameter) for parameter in actual]
+        expected_ids = [id(parameter) for parameter in expected]
+        if len(actual_ids) != len(set(actual_ids)):
+            raise RuntimeError("codec_only optimizer contains duplicate parameters")
+        if set(actual_ids) != set(expected_ids):
+            raise RuntimeError(
+                "codec_only optimizer parameter closure differs from the model trainable closure"
+            )
+        numel = sum(parameter.numel() for parameter in actual)
+        if numel != _CODEC_ONLY_TRAINABLE_NUMEL:
+            raise RuntimeError(
+                f"codec_only optimizer numel drifted: {numel} != {_CODEC_ONLY_TRAINABLE_NUMEL}"
+            )
+        return {
+            "mode": "codec_only",
+            "parameter_count": len(actual),
+            "trainable_numel": numel,
+            "parameter_names": list(_CODEC_ONLY_PARAMETER_NAMES),
+            "parameter_names_sha256": hashlib.sha256(
+                "\n".join(_CODEC_ONLY_PARAMETER_NAMES).encode("utf-8")
+            ).hexdigest(),
+            "optimizer_group_parameter_counts": [
+                len(group["params"]) for group in optimizer.param_groups
+            ],
+        }
+
+    def trainability_evidence_contract(self) -> dict[str, Any] | None:
+        if self.codec_trainability != "codec_only":
+            return None
+        return {
+            "mode": "codec_only",
+            "parameter_names": list(_CODEC_ONLY_PARAMETER_NAMES),
+            "gate_parameter_name": f"{_CODEC_ONLY_PREFIX}conditioner.gate",
+            "expected_numel": _CODEC_ONLY_TRAINABLE_NUMEL,
+            "required_gradient_steps": 2,
+            "gradient_capture_steps": 3,
+        }
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode and getattr(self, "codec_trainability", None) == "codec_only":
+            self.backbone.eval()
+            # Keep the action-head container in training mode so the declared
+            # state dropout remains part of the training contract. Its native
+            # frozen submodules already have an explicit eval-mode helper.
+            self.action_head.set_frozen_modules_to_eval_mode()
+            self.action_head.codec_conditioning.train()
+        return self
 
     def prepare_input(self, inputs: dict) -> Tuple[BatchFeature, BatchFeature]:
         """Prepare inputs for backbone and action head."""
