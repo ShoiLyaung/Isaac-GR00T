@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 from gr00t.model.gr00t_n1d7.gr00t_n1d7 import (
@@ -22,6 +24,35 @@ assert SPEC is not None and SPEC.loader is not None
 c5 = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = c5
 SPEC.loader.exec_module(c5)
+
+
+def test_launcher_bootstraps_source_root_without_pythonpath(tmp_path):
+    code = f"""
+import importlib.util
+import sys
+spec = importlib.util.spec_from_file_location('isolated_c5_launcher', {str(MODULE_PATH)!r})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+assert str(module.SOURCE_ROOT) in sys.path
+import gr00t.model
+print(module.SOURCE_ROOT)
+"""
+    environment = {
+        **os.environ,
+        "NO_ALBUMENTATIONS_UPDATE": "1",
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+    }
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", code],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.strip() == str(SOURCE_ROOT)
 
 
 def test_c5_commands_freeze_only_codec_and_profile_warmup(tmp_path):
@@ -84,7 +115,7 @@ def test_codec_posttrain_closes_optimizer_gradient_and_rank_state(tmp_path):
     for rank in range(2):
         datasets = [{"samples_yielded": 0} for _ in source_ids]
         datasets[rank]["samples_yielded"] = 32
-        partition = non_gate[rank::2]
+        partition = non_gate
         gradient_steps = []
         for step_index in range(2):
             nonzero_names = partition[:1] if step_index == 1 else []
@@ -92,13 +123,15 @@ def test_codec_posttrain_closes_optimizer_gradient_and_rank_state(tmp_path):
                 {
                     "step_index": step_index,
                     "gate": {
-                        "present": rank == 0,
-                        "finite": rank == 0,
-                        "nonzero": rank == 0,
+                        "present": True,
+                        "finite": True,
+                        "nonzero": True,
+                        "call_count": 1,
                     },
                     "non_gate_present_names": partition,
                     "non_gate_nonzero_names": nonzero_names,
                     "non_gate_nonfinite_names": [],
+                    "non_gate_invalid_call_names": [],
                 }
             )
         value = {
@@ -174,6 +207,16 @@ def test_codec_posttrain_closes_optimizer_gradient_and_rank_state(tmp_path):
         lambda values: values[0]["training_monitor"]["trainability"]["first_gradient_steps"][
             0
         ].update(non_gate_nonfinite_names=[non_gate[0]])
+    )
+    rejects(
+        lambda values: values[0]["training_monitor"]["trainability"]["first_gradient_steps"][0][
+            "gate"
+        ].update(call_count=2)
+    )
+    rejects(
+        lambda values: values[0]["training_monitor"]["trainability"]["first_gradient_steps"][
+            0
+        ].update(non_gate_invalid_call_names=[non_gate[0]])
     )
 
 

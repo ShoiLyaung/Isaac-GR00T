@@ -447,6 +447,36 @@ resolved command, strict GPU conflict gate, finite loss/gradient evidence,
 gate-to-upstream gradient transition, optimizer closure, saved 27-tensor state
 digest and reload identity.
 
+### C5 profile R1 retained engineering failure
+
+The first profile root
+`/home/sl/icra27-runs/codec-training/g1-all-lerobot-c5-codec-only-2step-r1`
+is preserved and must not be resumed or overwritten. Both ranks executed two
+optimizer steps over 64 samples, with finite losses `[0.02734375,
+0.022216796875]`, finite DeepSpeed global gradient norms, zero skipped/overflow
+steps, matching NCCL traces and the exact 27-tensor/9,571,649-parameter
+optimizer closure. The gate changed from exact zero to
+`-0.00012874603271484375`; both ranks agreed on initial and final Codec state
+digests. GPU/process cleanup was complete.
+
+R1 is nevertheless `technical_valid=false`. ZeRO-2 had cleared every
+`parameter.grad` before the original `on_pre_optimizer_step` observer ran, so
+the required gate-to-upstream gradient evidence was absent. The host-side
+standalone reload also lacked the repository root on `sys.path`. These are
+evidence/postprocess implementation failures, not a model-quality result and
+not proof that training gradients were non-finite. R2 uses autograd parameter
+hooks before ZeRO reduction/clearing, removes them after the first three
+captured steps, and bootstraps the repository root explicitly. R2 requires a
+new commit and output root.
+
+R1 material hashes:
+
+- attempt: `6629104adf9f405a93925384dda8081f60d53024da980ee7fd7d2a4b42185ab2`;
+- supervisor summary: `bc107b4ac085a9b6bca521cf928a2c0dfc2f9786035668d19f0d40589212921a`;
+- rank-0/rank-1 posttrain evidence: respectively
+  `be45990d2916ff1649eb57fd6ab90488e17b436de178c30dfe2009ad006d5716`
+  and `1fdae9af9a2c9109803513a2f7a7beaa84ce39bc4c0ced8551c9b8986cfdc37d`.
+
 ## Recommended comparison matrix
 
 - F0: native RGB reference

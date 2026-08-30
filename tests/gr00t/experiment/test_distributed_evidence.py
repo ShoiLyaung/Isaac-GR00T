@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from gr00t.experiment.distributed_evidence import (
+    EvidenceTrainerMixin,
     FiniteTrainingMonitor,
     _dataset_contract_summary,
     record_posttrain,
@@ -29,19 +30,41 @@ class _TrainabilityToy(torch.nn.Module):
         }
 
 
+class _BackwardTrainer:
+    def training_step(self, model, inputs):
+        loss = inputs["loss_fn"](model)
+        loss.backward()
+        return loss.detach()
+
+
+class _EvidenceBackwardTrainer(EvidenceTrainerMixin, _BackwardTrainer):
+    pass
+
+
+def _trainer_with_monitor(model, monitor):
+    trainer = _EvidenceBackwardTrainer()
+    trainer.model = model
+    trainer.args = SimpleNamespace(gradient_accumulation_steps=1)
+    monitor.bind_trainer(trainer)
+    return trainer
+
+
 def test_trainability_evidence_requires_gate_then_upstream_gradient():
     model = _TrainabilityToy()
     monitor = FiniteTrainingMonitor()
-    monitor.bind_trainer(SimpleNamespace(model=model))
+    trainer = _trainer_with_monitor(model, monitor)
 
-    model.gate.grad = torch.ones_like(model.gate)
-    model.weight.grad = torch.zeros_like(model.weight)
+    trainer.training_step(
+        model,
+        {"loss_fn": lambda value: value.gate + 0.0 * value.weight.sum()},
+    )
+    model.zero_grad(set_to_none=True)  # Simulate ZeRO clearing .grad before the callback.
     monitor.on_pre_optimizer_step(None, None, None)
     with torch.no_grad():
         model.gate.add_(0.1)
 
-    model.gate.grad = torch.ones_like(model.gate)
-    model.weight.grad = torch.ones_like(model.weight)
+    trainer.training_step(model, {"loss_fn": lambda value: value.gate + value.weight.sum()})
+    model.zero_grad(set_to_none=True)
     monitor.on_pre_optimizer_step(None, None, None)
     with torch.no_grad():
         model.gate.add_(0.1)
@@ -53,6 +76,53 @@ def test_trainability_evidence_requires_gate_then_upstream_gradient():
     assert evidence["final_gate"] == pytest.approx(0.2)
     assert evidence["first_gradient_steps"][0]["non_gate_nonzero_count"] == 0
     assert evidence["first_gradient_steps"][1]["non_gate_nonzero_count"] == 1
+    assert monitor._trainability_hook_handles == []
+
+
+def test_trainability_autograd_hook_requires_no_gradient_accumulation():
+    model = _TrainabilityToy()
+    monitor = FiniteTrainingMonitor()
+    with pytest.raises(ValueError, match="accumulation=1"):
+        monitor.bind_trainer(
+            SimpleNamespace(model=model, args=SimpleNamespace(gradient_accumulation_steps=2))
+        )
+
+
+@pytest.mark.parametrize("failure", ["duplicate", "nonfinite"])
+def test_trainability_autograd_hook_rejects_duplicate_or_nonfinite(failure):
+    model = _TrainabilityToy()
+    monitor = FiniteTrainingMonitor()
+    monitor.bind_trainer(
+        SimpleNamespace(model=model, args=SimpleNamespace(gradient_accumulation_steps=1))
+    )
+
+    monitor.begin_training_step()
+    if failure == "duplicate":
+        monitor._capture_trainability_gradient("gate", torch.ones_like(model.gate))
+    coefficient = float("nan") if failure == "nonfinite" else 1.0
+    (coefficient * model.gate + 0.0 * model.weight.sum()).backward()
+    monitor.end_training_step()
+    model.zero_grad(set_to_none=True)
+    monitor.on_pre_optimizer_step(None, None, None)
+    with torch.no_grad():
+        model.gate.add_(0.1)
+
+    monitor.begin_training_step()
+    (model.gate + model.weight.sum()).backward()
+    monitor.end_training_step()
+    model.zero_grad(set_to_none=True)
+    monitor.on_pre_optimizer_step(None, None, None)
+    with torch.no_grad():
+        model.gate.add_(0.1)
+        model.weight.add_(0.1)
+
+    evidence = monitor.summary(expected_steps=2)["trainability"]
+    assert evidence["complete"] is False
+    gate = evidence["first_gradient_steps"][0]["gate"]
+    if failure == "duplicate":
+        assert gate["call_count"] == 2
+    else:
+        assert gate["finite"] is False
 
 
 @pytest.mark.parametrize(

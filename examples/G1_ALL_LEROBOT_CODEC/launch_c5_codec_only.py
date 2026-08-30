@@ -18,6 +18,8 @@ from typing import Any
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
 BASE_SUPERVISOR_PATH = SOURCE_ROOT / "examples/G1_ALL_LEROBOT_H40/launch_joint_training.py"
 SPEC = importlib.util.spec_from_file_location("c5_base_training_supervisor", BASE_SUPERVISOR_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -366,10 +368,15 @@ def _codec_posttrain_evidence(
                 name for rank in step_ranks for name in rank["non_gate_present_names"]
             }
             if (
-                not any(gate["present"] for gate in gate_entries)
+                not all(gate["present"] for gate in gate_entries)
                 or any(gate["present"] and not gate["finite"] for gate in gate_entries)
+                or any(gate["present"] and gate["call_count"] != 1 for gate in gate_entries)
                 or non_gate_present != expected_non_gate
+                or any(
+                    set(rank["non_gate_present_names"]) != expected_non_gate for rank in step_ranks
+                )
                 or any(rank["non_gate_nonfinite_names"] for rank in step_ranks)
+                or any(rank["non_gate_invalid_call_names"] for rank in step_ranks)
             ):
                 distributed_gradients_complete = False
                 break

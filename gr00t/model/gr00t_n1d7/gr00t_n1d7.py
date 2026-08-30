@@ -766,6 +766,7 @@ class Gr00tN1d7(PreTrainedModel):
             "expected_numel": _CODEC_ONLY_TRAINABLE_NUMEL,
             "required_gradient_steps": 2,
             "gradient_capture_steps": 3,
+            "gradient_observation": "rank_local_pre_reduce_autograd_hook",
         }
 
     def train(self, mode: bool = True):

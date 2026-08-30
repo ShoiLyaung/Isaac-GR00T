@@ -228,6 +228,9 @@ class FiniteTrainingMonitor(TrainerCallback):
         self._trainability_initial_state_sha256: str | None = None
         self._trainability_initial_gate: float | None = None
         self._trainability_gradients: list[dict[str, Any]] = []
+        self._trainability_hook_handles: list[Any] = []
+        self._trainability_hook_steps: list[dict[str, dict[str, Any]]] = []
+        self._trainability_active_hook_step: int | None = None
 
     def capture_loss(self, loss: torch.Tensor) -> None:
         if torch.is_tensor(loss) and loss.numel() == 1:
@@ -264,9 +267,64 @@ class FiniteTrainingMonitor(TrainerCallback):
         provider = getattr(trainer.model, "trainability_evidence_contract", None)
         contract = provider() if callable(provider) else None
         if contract is not None:
+            if int(trainer.args.gradient_accumulation_steps) != 1:
+                raise ValueError("strict trainability gradient evidence requires accumulation=1")
             self._trainability_contract = contract
             self._trainability_initial_state_sha256 = self._trainability_state_sha256()
             self._trainability_initial_gate = self._trainability_gate_value()
+            for name, parameter in self._trainability_named_parameters():
+                self._trainability_hook_handles.append(
+                    parameter.register_hook(
+                        lambda gradient, parameter_name=name: self._capture_trainability_gradient(
+                            parameter_name, gradient
+                        )
+                    )
+                )
+
+    def begin_training_step(self) -> None:
+        if self._trainability_contract is None:
+            return
+        if self._trainability_active_hook_step is not None:
+            raise RuntimeError("trainability gradient step is already active")
+        capture_steps = int(
+            self._trainability_contract.get(
+                "gradient_capture_steps",
+                self._trainability_contract["required_gradient_steps"],
+            )
+        )
+        if len(self._trainability_hook_steps) >= capture_steps:
+            return
+        self._trainability_hook_steps.append({})
+        self._trainability_active_hook_step = len(self._trainability_hook_steps) - 1
+
+    def end_training_step(self) -> None:
+        self._trainability_active_hook_step = None
+
+    def _remove_trainability_hooks(self) -> None:
+        for handle in self._trainability_hook_handles:
+            handle.remove()
+        self._trainability_hook_handles.clear()
+
+    def _capture_trainability_gradient(self, name: str, gradient: torch.Tensor) -> torch.Tensor:
+        step_index = self._trainability_active_hook_step
+        if step_index is None:
+            return gradient
+        detached = gradient.detach()
+        summary = {
+            "name": name,
+            "call_count": 1,
+            "finite": bool(torch.isfinite(detached).all().item()),
+            "nonzero": bool(torch.count_nonzero(detached).item()),
+            "l2_norm": float(torch.linalg.vector_norm(detached.float()).item()),
+        }
+        existing = self._trainability_hook_steps[step_index].get(name)
+        if existing is not None:
+            summary["call_count"] += existing["call_count"]
+            summary["finite"] = summary["finite"] and existing["finite"]
+            summary["nonzero"] = summary["nonzero"] or existing["nonzero"]
+            summary["l2_norm"] = math.sqrt(summary["l2_norm"] ** 2 + existing["l2_norm"] ** 2)
+        self._trainability_hook_steps[step_index][name] = summary
+        return gradient
 
     def _trainability_named_parameters(self) -> list[tuple[str, torch.nn.Parameter]]:
         if self._trainer is None or self._trainability_contract is None:
@@ -313,26 +371,27 @@ class FiniteTrainingMonitor(TrainerCallback):
         )
         if len(self._trainability_gradients) >= capture_steps:
             return
+        step_index = len(self._trainability_gradients)
+        if step_index >= len(self._trainability_hook_steps):
+            raise RuntimeError("optimizer step has no matching autograd-hook evidence")
+        observed = self._trainability_hook_steps[step_index]
         gate_name = self._trainability_contract["gate_parameter_name"]
         gate_summary = None
         non_gate = []
-        for name, parameter in self._trainability_named_parameters():
-            gradient = parameter.grad
-            summary = {
-                "name": name,
-                "present": gradient is not None,
-                "finite": bool(torch.isfinite(gradient).all().item())
-                if gradient is not None
-                else False,
-                "nonzero": bool(torch.count_nonzero(gradient).item())
-                if gradient is not None
-                else False,
-                "l2_norm": (
-                    float(torch.linalg.vector_norm(gradient.detach().float()).item())
-                    if gradient is not None
-                    else None
-                ),
-            }
+        for name in self._trainability_contract["parameter_names"]:
+            captured = observed.get(name)
+            summary = (
+                {**captured, "present": True}
+                if captured is not None
+                else {
+                    "name": name,
+                    "call_count": 0,
+                    "present": False,
+                    "finite": False,
+                    "nonzero": False,
+                    "l2_norm": None,
+                }
+            )
             if name == gate_name:
                 gate_summary = summary
             else:
@@ -352,15 +411,21 @@ class FiniteTrainingMonitor(TrainerCallback):
                 "non_gate_nonfinite_names": [
                     item["name"] for item in non_gate if item["present"] and not item["finite"]
                 ],
+                "non_gate_invalid_call_names": [
+                    item["name"] for item in non_gate if item["present"] and item["call_count"] != 1
+                ],
                 "non_gate_l2_norm": math.sqrt(
                     sum((item["l2_norm"] or 0.0) ** 2 for item in non_gate)
                 ),
             }
         )
+        if len(self._trainability_gradients) >= capture_steps:
+            self._remove_trainability_hooks()
 
     def _trainability_summary(self, expected_steps: int) -> dict[str, Any] | None:
         if self._trainability_contract is None:
             return None
+        self._remove_trainability_hooks()
         required = int(self._trainability_contract["required_gradient_steps"])
         capture_steps = int(self._trainability_contract.get("gradient_capture_steps", required))
         expected_captures = min(expected_steps, capture_steps)
@@ -375,9 +440,13 @@ class FiniteTrainingMonitor(TrainerCallback):
             and final_gate != 0.0
             and final_state != self._trainability_initial_state_sha256
             and all(
-                (not item["gate"]["present"] or item["gate"]["finite"])
+                item["gate"]["present"]
+                and item["gate"]["finite"]
+                and item["gate"]["call_count"] == 1
+                and item["non_gate_present_count"] == item["non_gate_parameter_count"]
+                and item["non_gate_finite_count"] == item["non_gate_parameter_count"]
                 and not item["non_gate_nonfinite_names"]
-                and (item["gate"]["present"] or item["non_gate_present_count"] > 0)
+                and not item["non_gate_invalid_call_names"]
                 for item in gradients
             )
         )
@@ -487,7 +556,13 @@ class EvidenceTrainerMixin:
         monitor = getattr(self, "_cleanroom_finite_monitor", None)
         if monitor is not None and isinstance(inputs, Mapping):
             monitor.capture_batch(inputs)
-        loss = super().training_step(*args, **kwargs)
+        if monitor is not None:
+            monitor.begin_training_step()
+        try:
+            loss = super().training_step(*args, **kwargs)
+        finally:
+            if monitor is not None:
+                monitor.end_training_step()
         if monitor is not None:
             monitor.capture_loss(loss)
         return loss
