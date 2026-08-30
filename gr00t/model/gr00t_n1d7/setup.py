@@ -296,6 +296,26 @@ class Gr00tN1d7Pipeline(ModelPipeline):
             )
         return set()
 
+    @staticmethod
+    def _initialize_native_to_codec_gate(
+        model, load_mode: str, allowed_codec_missing: set[str]
+    ) -> None:
+        """Restore the exact-zero gate after Transformers initializes missing extension keys."""
+
+        if load_mode != "native_to_codec":
+            return
+        gate_key = "action_head.codec_conditioning.conditioner.gate"
+        if gate_key not in allowed_codec_missing:
+            raise RuntimeError("Native-to-Codec initialization did not classify the gate as new")
+        conditioning = getattr(model.action_head, "codec_conditioning", None)
+        if conditioning is None:
+            raise RuntimeError("Native-to-Codec initialization lacks the conditioning stack")
+        gate = conditioning.conditioner.gate
+        with torch.no_grad():
+            gate.zero_()
+        if gate.ndim != 0 or gate.item() != 0.0:
+            raise RuntimeError("Native-to-Codec gate failed exact-zero initialization")
+
     def _create_model(self):
         """Setup model with proper vocabulary expansion."""
         skip_weight_loading = getattr(self.config.training, "skip_weight_loading", False)
@@ -342,6 +362,11 @@ class Gr00tN1d7Pipeline(ModelPipeline):
             mismatched_keys = loading_info.get("mismatched_keys", [])
             allowed_codec_missing = self._validate_codec_missing_keys(
                 model, loading_info, codec_load_mode
+            )
+            self._initialize_native_to_codec_gate(
+                model,
+                codec_load_mode,
+                allowed_codec_missing,
             )
             other_missing = [
                 key

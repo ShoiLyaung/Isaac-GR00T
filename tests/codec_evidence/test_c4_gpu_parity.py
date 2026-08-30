@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -109,3 +110,35 @@ def test_gpu_inventory_requires_one_numeric_selector(monkeypatch):
     assert module._gpu_inventory("0")["memory_free_mib"] == 49040
     with pytest.raises(ValueError, match="one physical numeric GPU"):
         module._gpu_inventory("0,1")
+
+
+def test_native_to_codec_load_restores_exact_zero_gate_only_for_new_extension():
+    from gr00t.model.gr00t_n1d7.setup import Gr00tN1d7Pipeline
+
+    gate = torch.nn.Parameter(torch.tensor(0.37))
+    model = SimpleNamespace(
+        action_head=SimpleNamespace(
+            codec_conditioning=SimpleNamespace(
+                conditioner=SimpleNamespace(gate=gate),
+            )
+        )
+    )
+    gate_key = "action_head.codec_conditioning.conditioner.gate"
+
+    Gr00tN1d7Pipeline._initialize_native_to_codec_gate(
+        model,
+        "native_to_codec",
+        {gate_key},
+    )
+    assert gate.item() == 0.0
+
+    gate.data.fill_(0.25)
+    Gr00tN1d7Pipeline._initialize_native_to_codec_gate(model, "codec_reload", set())
+    assert gate.item() == 0.25
+
+    with pytest.raises(RuntimeError, match="did not classify the gate"):
+        Gr00tN1d7Pipeline._initialize_native_to_codec_gate(
+            model,
+            "native_to_codec",
+            set(),
+        )

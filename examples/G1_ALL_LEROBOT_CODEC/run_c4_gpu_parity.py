@@ -21,10 +21,10 @@ from typing import Any, Mapping
 import numpy as np
 
 
-SCHEMA_VERSION = "g1-all-lerobot-c4-gpu-parity-r2"
-ATTEMPT_ID = "G1-ALL-LEROBOT-C4-GPU-PARITY-R2-ATTEMPT1"
+SCHEMA_VERSION = "g1-all-lerobot-c4-gpu-parity-r3"
+ATTEMPT_ID = "G1-ALL-LEROBOT-C4-GPU-PARITY-R3-ATTEMPT1"
 REPOSITORY = Path(__file__).resolve().parents[2]
-OUTPUT_ROOT = Path("/home/sl/icra27-runs/codec-gpu-parity/g1-all-lerobot-c4-r2")
+OUTPUT_ROOT = Path("/home/sl/icra27-runs/codec-gpu-parity/g1-all-lerobot-c4-r3")
 CHECKPOINT = Path(
     "/home/sl/icra27-runs/research-control/groot-n17-all-lerobot-20k-r1/"
     "experiments/groot-n17-all-lerobot-20k-r1/runs/"
@@ -451,6 +451,7 @@ def _run_model_phase(
     device: str,
 ) -> tuple[dict[str, Any], Any, Any]:
     import gr00t.model  # noqa: F401
+    from gr00t.model.gr00t_n1d7.setup import Gr00tN1d7Pipeline
     import torch
     from transformers import AutoModel
 
@@ -467,11 +468,19 @@ def _run_model_phase(
     if codec_enabled:
         stack = model.action_head.codec_conditioning
         expected_codec = {f"action_head.codec_conditioning.{key}" for key in stack.state_dict()}
-        if not expected_codec or stack.conditioner.gate.item() != 0.0:
-            raise RuntimeError("C4 Codec module/gate identity is invalid")
+        if not expected_codec:
+            raise RuntimeError("C4 Codec module identity is invalid")
     loading = _loading_failures(info, expected_codec)
     if codec_enabled and set(loading["allowed_missing"]) != expected_codec:
         raise RuntimeError("C4 native-to-Codec load lacks the complete new module key set")
+    if codec_enabled:
+        Gr00tN1d7Pipeline._initialize_native_to_codec_gate(
+            model,
+            "native_to_codec",
+            expected_codec,
+        )
+        if stack.conditioner.gate.item() != 0.0:
+            raise RuntimeError("C4 Codec gate is not exact zero after native extension")
     if not codec_enabled and loading["allowed_missing"]:
         raise RuntimeError("C4 native load unexpectedly allows missing keys")
     model.eval()
