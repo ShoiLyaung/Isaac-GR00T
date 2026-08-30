@@ -9,7 +9,7 @@ from typing import Any, Mapping
 from .identity import canonical_json_bytes
 
 
-CODEC_CONTRACT_SCHEMA_VERSION = "codec-evidence-global-contract-v1"
+CODEC_CONTRACT_SCHEMA_VERSION = "codec-evidence-global-contract-v2"
 PRODUCTION_FIXTURE_MODE = "PRODUCTION_NATIVE_CANONICAL"
 SYNTHETIC_FIXTURE_MODE = "SYNTHETIC_CONFORMANCE"
 _FIXTURE_MODES = {PRODUCTION_FIXTURE_MODE, SYNTHETIC_FIXTURE_MODE}
@@ -42,6 +42,8 @@ _CONTRACT_KEYS = {
     "lookahead_threads",
     "sliced_threads",
     "sync_lookahead",
+    "rc_lookahead",
+    "mbtree",
     "pts_step",
     "audio",
     "metadata",
@@ -67,7 +69,7 @@ def _identity(value: Any, name: str) -> dict[str, str]:
 
 def validate_codec_contract(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != _CONTRACT_KEYS:
-        raise ValueError("codec_contract fields do not match the global v1 schema")
+        raise ValueError("codec_contract fields do not match the global v2 schema")
     if value["schema_version"] != CODEC_CONTRACT_SCHEMA_VERSION:
         raise ValueError("Unsupported global codec contract schema")
     mode = value["fixture_mode"]
@@ -99,6 +101,8 @@ def validate_codec_contract(value: Any) -> dict[str, Any]:
         "lookahead_threads": 1,
         "sliced_threads": 0,
         "sync_lookahead": 0,
+        "rc_lookahead": 0,
+        "mbtree": 0,
         "pts_step": 1000,
     }
     for name, expected in integer_expected.items():
@@ -118,17 +122,21 @@ def validate_codec_contract(value: Any) -> dict[str, Any]:
     gop_size = value["gop_size"]
     if type(gop_size) is not int or gop_size < 1:
         raise ValueError("codec_contract.gop_size must be a positive integer")
-    for name in ("keyint", "min_keyint"):
-        if type(value[name]) is not int or value[name] != gop_size:
-            raise ValueError(f"codec_contract.{name} must equal gop_size")
+    if type(value["keyint"]) is not int or value["keyint"] != gop_size:
+        raise ValueError("codec_contract.keyint must equal gop_size")
     frame_type_rule = value["frame_type_rule"]
     if mode == PRODUCTION_FIXTURE_MODE:
         if source_kind != "NATIVE_CANONICAL_DECODED_DERIVED":
             raise ValueError("Production contract requires native-canonical source_kind")
-        if gop_size != 30 or frame_type_rule != "IDR_IFF_ROW_MOD_30_ZERO_ELSE_P_REF_ROW_MINUS_1":
+        if type(value["min_keyint"]) is not int or value["min_keyint"] != 16:
+            raise ValueError("codec_contract.min_keyint must be integer 16 in production")
+        if (
+            gop_size != 30
+            or frame_type_rule != "IDR_IFF_ROW_MOD_30_ZERO_ELSE_P_REF_ROW_MINUS_1"
+        ):
             raise ValueError("Production contract requires exact causal GOP30")
-    elif frame_type_rule != "SYNTHETIC_CAUSAL_GOP":
-        raise ValueError("Synthetic contract requires explicit synthetic frame_type_rule")
+    elif value["min_keyint"] != gop_size or frame_type_rule != "SYNTHETIC_CAUSAL_GOP":
+        raise ValueError("Synthetic contract requires exact synthetic GOP semantics")
     canonical = {
         key: value[key]
         for key in (
@@ -155,6 +163,8 @@ def validate_codec_contract(value: Any) -> dict[str, Any]:
             "lookahead_threads",
             "sliced_threads",
             "sync_lookahead",
+            "rc_lookahead",
+            "mbtree",
             "pts_step",
             "audio",
             "metadata",
@@ -199,7 +209,7 @@ def make_codec_contract(
             "time_base": {"numerator": 1, "denominator": 30000},
             "gop_size": gop_size,
             "keyint": gop_size,
-            "min_keyint": gop_size,
+            "min_keyint": 16 if fixture_mode == PRODUCTION_FIXTURE_MODE else gop_size,
             "bframes": 0,
             "reference_frames": 1,
             "scene_cut": 0,
@@ -208,6 +218,8 @@ def make_codec_contract(
             "lookahead_threads": 1,
             "sliced_threads": 0,
             "sync_lookahead": 0,
+            "rc_lookahead": 0,
+            "mbtree": 0,
             "pts_step": 1000,
             "audio": False,
             "metadata": False,

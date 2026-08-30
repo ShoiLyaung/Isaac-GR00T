@@ -32,6 +32,20 @@ PTS_STEP = 1_000
 GOP = 30
 CRF = 18
 CAMERA_ID = "cam_left_high"
+X264_CAUSAL_PARAMETERS = (
+    "bframes=0",
+    "ref=1",
+    "keyint=30",
+    "min-keyint=16",
+    "scenecut=0",
+    "open-gop=0",
+    "threads=1",
+    "lookahead-threads=1",
+    "sliced-threads=0",
+    "sync-lookahead=0",
+    "rc-lookahead=0",
+    "mbtree=0",
+)
 
 PYAV_MV_NAMES = {
     "source": "source",
@@ -204,20 +218,7 @@ def _encode_once(frames: np.ndarray, output: Path, *, ffmpeg: Path) -> None:
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"Refusing to overwrite encode attempt: {output}")
     height, width = frames.shape[1:3]
-    x264_parameters = ":".join(
-        (
-            "bframes=0",
-            "ref=1",
-            "keyint=30",
-            "min-keyint=30",
-            "scenecut=0",
-            "open-gop=0",
-            "threads=1",
-            "lookahead-threads=1",
-            "sliced-threads=0",
-            "sync-lookahead=0",
-        )
-    )
+    x264_parameters = ":".join(X264_CAUSAL_PARAMETERS)
     command = (
         ffmpeg,
         "-nostdin",
@@ -249,7 +250,7 @@ def _encode_once(frames: np.ndarray, output: Path, *, ffmpeg: Path) -> None:
         "-g",
         str(GOP),
         "-keyint_min",
-        str(GOP),
+        "16",
         "-bf",
         "0",
         "-refs",
@@ -298,6 +299,68 @@ def encode_h264_twice(
     if digests[0] != digests[1]:
         raise ValueError("Two deterministic encodes produced different SHA-256 values")
     return EncodeResult(first, digests[0], digests)
+
+
+def probe_x264_encoder_options(bitstream: str | Path) -> dict[str, Any]:
+    """Fail closed unless the x264 SEI matches the effective causal profile.
+
+    This x264 build omits ``rc_lookahead`` from its user-data string when the
+    value is zero.  The returned receipt records that omission explicitly;
+    prefix-equivalence remains the independent behavioral proof that the
+    command's frozen ``rc-lookahead=0`` request took effect.
+    """
+
+    path = Path(bitstream)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("x264 option probe requires a regular non-symlink bitstream")
+    text = path.read_bytes().decode("latin1", errors="ignore")
+    observed: dict[str, int | None] = {}
+    for name in (
+        "ref",
+        "threads",
+        "lookahead_threads",
+        "sliced_threads",
+        "bframes",
+        "keyint",
+        "keyint_min",
+        "scenecut",
+        "rc_lookahead",
+        "mbtree",
+    ):
+        match = re.search(rf"\b{name}=(\d+)", text)
+        observed[name] = int(match.group(1)) if match else None
+    expected = {
+        "ref": 1,
+        "threads": 1,
+        "lookahead_threads": 1,
+        "sliced_threads": 0,
+        "bframes": 0,
+        "keyint": 30,
+        "keyint_min": 16,
+        "scenecut": 0,
+        "mbtree": 0,
+    }
+    mismatches = {
+        name: {"expected": value, "observed": observed.get(name)}
+        for name, value in expected.items()
+        if observed.get(name) != value
+    }
+    if observed["rc_lookahead"] not in {None, 0}:
+        mismatches["rc_lookahead"] = {
+            "expected": "zero_or_x264_zero_omission",
+            "observed": observed["rc_lookahead"],
+        }
+    if mismatches:
+        raise ValueError(f"x264 effective options differ from causal contract: {mismatches}")
+    return {
+        "observed": observed,
+        "expected": expected,
+        "rc_lookahead_zero_representation": (
+            "EXPLICIT_ZERO" if observed["rc_lookahead"] == 0 else "OMITTED_WHEN_ZERO"
+        ),
+        "requested_parameters": list(X264_CAUSAL_PARAMETERS),
+        "effective_options_match": True,
+    }
 
 
 def probe_packets(
@@ -1212,6 +1275,7 @@ __all__ = [
     "FPS",
     "GOP",
     "PTS_STEP",
+    "X264_CAUSAL_PARAMETERS",
     "CanonicalEpisodeInput",
     "EncodeResult",
     "ExtractedVideo",
@@ -1225,6 +1289,7 @@ __all__ = [
     "encode_h264_twice",
     "extract_mvs_and_decoded_rgb",
     "probe_packets",
+    "probe_x264_encoder_options",
     "raster_sha256",
     "sha256_path",
     "toolchain_identity",

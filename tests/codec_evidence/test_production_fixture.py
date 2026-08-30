@@ -17,6 +17,7 @@ from gr00t.data.codec_evidence.episode_bundle import (
 from gr00t.data.codec_evidence.production import (
     GOP,
     PTS_STEP,
+    X264_CAUSAL_PARAMETERS,
     CanonicalEpisodeInput,
     assert_torchcodec_pyav_exact,
     build_episode_arrays,
@@ -24,6 +25,7 @@ from gr00t.data.codec_evidence.production import (
     encode_h264_twice,
     extract_mvs_and_decoded_rgb,
     probe_packets,
+    probe_x264_encoder_options,
     raster_sha256,
     sha256_path,
     toolchain_identity,
@@ -90,6 +92,10 @@ def test_real_cpu_dynamic_pipeline_is_deterministic_causal_and_bundle_compatible
 
     encoded = encode_h264_twice(source_rgb, scratch)
     assert encoded.attempt_sha256 == (encoded.bitstream_sha256,) * 2
+    options = probe_x264_encoder_options(encoded.bitstream_path)
+    assert options["effective_options_match"] is True
+    assert options["observed"]["mbtree"] == 0
+    assert options["observed"]["rc_lookahead"] is None
     with pytest.raises(FileExistsError, match="Refusing to overwrite"):
         encode_h264_twice(source_rgb, scratch)
 
@@ -170,8 +176,104 @@ def test_real_cpu_dynamic_pipeline_is_deterministic_causal_and_bundle_compatible
         **arrays,
     )
     assert production.codec_contract["fixture_mode"] == PRODUCTION_FIXTURE_MODE
+    assert production.codec_contract["schema_version"] == "codec-evidence-global-contract-v2"
+    assert production.codec_contract["rc_lookahead"] == 0
+    assert production.codec_contract["mbtree"] == 0
+    assert production.codec_contract["min_keyint"] == 16
     assert production.num_frames == num_frames
     assert production.view(30).anchor_mask.tolist() == [True, True]
+
+
+def _scientific_prefix_mismatches(full, prefix, prefix_frames: int) -> list[str]:
+    full_encode, full_packets, full_headers, full_extracted, full_arrays = full
+    prefix_encode, prefix_packets, prefix_headers, prefix_extracted, prefix_arrays = prefix
+    del full_encode, prefix_encode
+    mismatches = []
+    for name in ("pts", "dts", "duration", "key_frame"):
+        if not np.array_equal(
+            getattr(full_packets, name)[:prefix_frames], getattr(prefix_packets, name)
+        ):
+            mismatches.append(f"packets.{name}")
+    for name in ("frame_type", "reference_index"):
+        if not np.array_equal(
+            getattr(full_headers, name)[:prefix_frames], getattr(prefix_headers, name)
+        ):
+            mismatches.append(f"headers.{name}")
+    if not np.array_equal(full_extracted.rgb[:prefix_frames], prefix_extracted.rgb):
+        mismatches.append("decoded_rgb")
+    if not np.array_equal(
+        full_extracted.mv_offsets[: prefix_frames + 1], prefix_extracted.mv_offsets
+    ):
+        mismatches.append("raw_mv_offsets")
+    full_mv_end = int(full_extracted.mv_offsets[prefix_frames])
+    prefix_mv_end = int(prefix_extracted.mv_offsets[-1])
+    for name in MV_FIELD_DTYPES:
+        if full_mv_end != prefix_mv_end or not np.array_equal(
+            full_extracted.mv_fields[name][:full_mv_end], prefix_extracted.mv_fields[name]
+        ):
+            mismatches.append(f"raw_mv_fields.{name}")
+    for name in (
+        "frame_index",
+        "pts",
+        "dts",
+        "frame_type",
+        "gop_id",
+        "gop_position",
+        "reference_index",
+        "frame_validity",
+        "frame_reason_code",
+        "mv_cell_features",
+        "mv_cell_mask",
+        "rpe",
+        "rpe_mask",
+        "camera_motion_summary",
+        "camera_motion_mask",
+        "anchor_index_per_frame",
+    ):
+        if not np.array_equal(full_arrays[name][:prefix_frames], prefix_arrays[name]):
+            mismatches.append(f"arrays.{name}")
+    prefix_anchors = prefix_arrays["anchor_frame_index"].shape[0]
+    for name in ("anchor_frame_index", "anchor_appearance"):
+        if not np.array_equal(full_arrays[name][:prefix_anchors], prefix_arrays[name]):
+            mismatches.append(f"arrays.{name}")
+    return mismatches
+
+
+def _encode_evidence(frames: np.ndarray, root: Path):
+    root.mkdir()
+    encoded = encode_h264_twice(frames, root)
+    packets = probe_packets(encoded.bitstream_path, num_frames=len(frames))
+    headers = trace_h264_headers(encoded.bitstream_path, num_frames=len(frames))
+    extracted = extract_mvs_and_decoded_rgb(encoded.bitstream_path, num_frames=len(frames))
+    arrays = build_episode_arrays(extracted, packets, headers)
+    return encoded, packets, headers, extracted, arrays
+
+
+@pytest.mark.parametrize("prefix_frames", [1, 8, 9, 29, 30, 31, 39])
+def test_causal_encoder_scientific_evidence_is_full_vs_prefix_equivalent(
+    tmp_path, prefix_frames
+):
+    frames = _moving_rgb(47, height=96, width=128)
+    full = _encode_evidence(frames, tmp_path / "full")
+    prefix = _encode_evidence(frames[:prefix_frames], tmp_path / "prefix")
+    assert _scientific_prefix_mismatches(full, prefix, prefix_frames) == []
+
+
+def test_causal_x264_parameters_are_explicit_and_complete():
+    assert set(X264_CAUSAL_PARAMETERS) == {
+        "bframes=0",
+        "ref=1",
+        "keyint=30",
+        "min-keyint=16",
+        "scenecut=0",
+        "open-gop=0",
+        "threads=1",
+        "lookahead-threads=1",
+        "sliced-threads=0",
+        "sync-lookahead=0",
+        "rc-lookahead=0",
+        "mbtree=0",
+    }
 
 
 def test_toolchain_identity_freezes_binaries_encoder_extractor_and_loaded_decoder_libraries():

@@ -39,7 +39,7 @@
         "codec_contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     },
-    "codec_contract": {"$ref": "codec-evidence-global-contract-v1.schema.json"},
+    "codec_contract": {"$ref": "codec-evidence-global-contract-v2.schema.json"},
     "bundles": {
       "type": "array",
       "minItems": 1,

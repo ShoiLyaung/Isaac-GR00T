@@ -449,7 +449,7 @@ def test_branch_owned_schemas_are_local_json_documents():
         "codec-evidence-batch-v1.schema.json",
         "codec-evidence-episode-batch-v1.schema.json",
         "codec-evidence-episode-identity-v1.schema.json",
-        "codec-evidence-global-contract-v1.schema.json",
+        "codec-evidence-global-contract-v2.schema.json",
         "codec-evidence-episode-bundle-v1.schema.json",
         "codec-evidence-episode-bundle-index-v1.schema.json",
         "codec-evidence-full-fixture-manifest-v1.schema.json",
@@ -482,7 +482,7 @@ def test_synthetic_bundle_and_index_validate_against_branch_owned_schemas(tmp_pa
     index_path = _write_bundle_index(tmp_path, manifest_path, bundle.key)
     names = (
         "codec-evidence-episode-identity-v1.schema.json",
-        "codec-evidence-global-contract-v1.schema.json",
+        "codec-evidence-global-contract-v2.schema.json",
         "codec-evidence-episode-bundle-v1.schema.json",
         "codec-evidence-episode-bundle-index-v1.schema.json",
     )
@@ -491,7 +491,7 @@ def test_synthetic_bundle_and_index_validate_against_branch_owned_schemas(tmp_pa
     index_payload = json.loads(index_path.read_text(encoding="utf-8"))
     cases = [
         ("codec-evidence-episode-identity-v1.schema.json", bundle_payload["episode_identity"]),
-        ("codec-evidence-global-contract-v1.schema.json", bundle_payload["codec_contract"]),
+        ("codec-evidence-global-contract-v2.schema.json", bundle_payload["codec_contract"]),
         ("codec-evidence-episode-bundle-v1.schema.json", bundle_payload),
         ("codec-evidence-episode-bundle-index-v1.schema.json", index_payload),
     ]
@@ -521,7 +521,7 @@ def test_bundle_schema_closes_accepted_bitstream_and_exact_raw_mv_fields(tmp_pat
     )
     names = (
         "codec-evidence-episode-identity-v1.schema.json",
-        "codec-evidence-global-contract-v1.schema.json",
+        "codec-evidence-global-contract-v2.schema.json",
         "codec-evidence-episode-bundle-v1.schema.json",
     )
     schemas = {name: json.loads(schema_path(name).read_text(encoding="utf-8")) for name in names}
@@ -602,7 +602,7 @@ def test_full_fixture_schema_validates_instance_and_rejects_synthetic_contract(t
         "producer_identity": {"implementation": "focused"},
     }
     names = (
-        "codec-evidence-global-contract-v1.schema.json",
+        "codec-evidence-global-contract-v2.schema.json",
         "codec-evidence-full-fixture-manifest-v1.schema.json",
     )
     schemas = {name: json.loads(schema_path(name).read_text()) for name in names}

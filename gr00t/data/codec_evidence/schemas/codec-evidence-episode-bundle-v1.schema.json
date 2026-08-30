@@ -10,7 +10,7 @@
     "camera_id": {"const": "cam_left_high"},
     "source_kind": {"enum": ["RAW_JPEG_DERIVED", "NATIVE_CANONICAL_DECODED_DERIVED"]},
     "episode_identity": {"$ref": "codec-evidence-episode-identity-v1.schema.json"},
-    "codec_contract": {"$ref": "codec-evidence-global-contract-v1.schema.json"},
+    "codec_contract": {"$ref": "codec-evidence-global-contract-v2.schema.json"},
     "codec_contract_sha256": {"$ref": "https://groot.local/schemas/codec-evidence-episode-bundle-v1.schema.json#/$defs/sha256"},
     "split": {"type": "string", "minLength": 1}, "cohort_id": {"type": "string", "minLength": 1}, "dataset_name": {"type": "string", "minLength": 1},
     "source_episode_index": {"type": "integer", "minimum": 0}, "num_frames": {"type": "integer", "minimum": 1}, "num_anchors": {"type": "integer", "minimum": 0},

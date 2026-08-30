@@ -42,7 +42,7 @@
     "budget_sha256": {"$ref": "https://groot.local/schemas/codec-evidence-full-fixture-manifest-v1.schema.json#/$defs/sha256"},
     "codec_contract": {
       "allOf": [
-        {"$ref": "codec-evidence-global-contract-v1.schema.json"},
+        {"$ref": "codec-evidence-global-contract-v2.schema.json"},
         {
           "required": ["fixture_mode", "camera_id", "source_kind"],
           "properties": {
