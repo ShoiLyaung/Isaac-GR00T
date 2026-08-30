@@ -1,0 +1,76 @@
+{
+  "schema_version": "g1-all-lerobot-causal-full-fixture-plan-r2-v1",
+  "status": "CAUSAL_PREFIX_EQUIVALENCE_PROVEN_RACE_SAFE_SUPERVISION",
+  "branch": "feat/groot-n17-all-lerobot-codec-causal-r1",
+  "baseline_commit": "dd86aa8deb7c5ee314ca0cf082ab9468b0b61119",
+  "causal_prefix_equivalence_proof": {
+    "path": "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-contract-r1/CAUSAL_PREFIX_EQUIVALENCE.json",
+    "sha256": "44a0e88cd1577dee942e84fc9420c111b86754957e966d39d155d87446c903c9"
+  },
+  "superseded_r1_failure_evidence": {
+    "root": "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r1",
+    "committed_objects_not_migrated": 422,
+    "attempt_1_terminal_sha256": "1253042ae6eda2fd826d82554259bb5e150c273e666330016030a26aa3151881",
+    "attempt_2_terminal_sha256": "63889a55ea14b5c498bd4bb907317b656dab58b41beecbfc69f0967e871aa457",
+    "repeated_root_cause": "SUPERVISOR_CONCURRENT_STAGING_SCAN_MULTI_STAT_RACE",
+    "attempt_3_forbidden": true
+  },
+  "input_freeze": {
+    "path": "examples/G1_ALL_LEROBOT_CODEC/c3_full_input_freeze.json",
+    "file_sha256": "f2e950071eb6187be7747658ae46598b8a3f741c37b710a6e2288c041ea7b9cd",
+    "content_sha256": "db9e78c8d7c6ada793f20ab3c41e1fb9e84550d2886646ea8b050f6c3f1de483",
+    "episode_freeze_core_sha256": "8d05f252b6ea388cb27a3155db8359ce7ea759436dfd9e9294c865fc47ea594a",
+    "budget_sha256": "5f24fb31ea766941b3861247478b97b38b62de42ae9c34b64fe56d5dc762644b"
+  },
+  "coverage": {
+    "sources": 5,
+    "episodes": 806,
+    "frames": 297340,
+    "h40_anchors": 265906,
+    "codec_gop30_anchors": 10291,
+    "maximum_episode_frames": 1163,
+    "camera_id": "cam_left_high",
+    "source_kind": "NATIVE_CANONICAL_DECODED_DERIVED"
+  },
+  "codec_delta": {
+    "global_contract_schema": "codec-evidence-global-contract-v2",
+    "rc_lookahead": 0,
+    "mbtree": 0,
+    "keyint": 30,
+    "effective_min_keyint": 16,
+    "reference_frames": 1,
+    "bframes": 0,
+    "episode_reset": true
+  },
+  "implementation_delta": {
+    "tree_scan": "ONE_LSTAT_PER_ENTRY_WITH_THREE_WHOLE_SCAN_RETRIES",
+    "resume_cleanup": "EXACT_UNCOMMITTED_TEMPORARY_TREE_USER_WRITE_RESTORATION",
+    "codec_semantics_changed": false
+  },
+  "budget": {
+    "central_projected_persistent_bytes": 22955473233,
+    "conservative_projected_persistent_bytes": 28694341542,
+    "maximum_new_bytes": 30000000000,
+    "central_projected_wall_seconds": 7192.171713566983,
+    "maximum_cumulative_wall_seconds": 10800,
+    "maximum_peak_rss_bytes": 16000000000,
+    "maximum_scratch_bytes": 256000000,
+    "max_workers": 1,
+    "automatic_retries": 0,
+    "raw_mv_mathematical_bound_bytes_not_budget": 182685696000
+  },
+  "warehouse": {
+    "candidate_root_not_created": "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r2",
+    "object_schema_version": "codec-evidence-warehouse-object-v1",
+    "object_commit_schema_version": "codec-evidence-warehouse-object-commit-v1",
+    "derivation_binding_schema_version": "codec-evidence-derivation-binding-v1",
+    "final_manifest_schema_version": "codec-evidence-full-fixture-manifest-v1",
+    "object_policy": "CONTENT_ADDRESSED_NO_OVERWRITE_FULL_BUNDLE_CLOSURE",
+    "derivation_policy": "ONE_DERIVATION_DIGEST_MUST_MAP_TO_ONE_CONTENT_DIGEST",
+    "resume_policy": "EXPLICIT_MANUAL_ATTEMPT_ID_AND_RESUME_FROM_ATTEMPT_ID_EXACT_PLAN_ONLY",
+    "automatic_resume": false,
+    "cross_plan_object_migration": false,
+    "final_manifest_policy": "HARDLINK_ATOMIC_CREATE_NO_REPLACE_AFTER_EXACT_806_OBJECT_VERIFICATION"
+  },
+  "preparation_scope": "PROVEN_CAUSAL_CONTRACT_PLUS_RACE_SAFE_SUPERVISION_AND_EXISTING_806_INPUT_FREEZE"
+}

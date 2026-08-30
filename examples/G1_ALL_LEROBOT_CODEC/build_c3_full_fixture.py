@@ -18,6 +18,7 @@ from pathlib import Path
 import resource
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -162,19 +163,43 @@ def configure_causal_full_r1() -> None:
     DERIVATION_SCHEMA_VERSION = "g1-all-lerobot-causal-episode-derivation-r1-v1"
     FIXTURE_ID = "g1-all-lerobot-causal-full-r1"
     INITIAL_ATTEMPT_ID = "G1-ALL-LEROBOT-CAUSAL-FULL-R1-ATTEMPT1"
-    EXPECTED_OUTPUT_ROOT = Path(
-        "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r1"
+    EXPECTED_OUTPUT_ROOT = Path("/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r1")
+    PREPARATION_PLAN_RELATIVE = Path("examples/G1_ALL_LEROBOT_CODEC/causal_full_fixture_plan.json")
+    PREPARATION_PLAN_FILE_SHA256 = (
+        "f982d30ecc114dd88ee8ee19e5e907456408e116d9bded63f40120c33955948a"
     )
-    PREPARATION_PLAN_RELATIVE = Path(
-        "examples/G1_ALL_LEROBOT_CODEC/causal_full_fixture_plan.json"
-    )
-    PREPARATION_PLAN_FILE_SHA256 = "f982d30ecc114dd88ee8ee19e5e907456408e116d9bded63f40120c33955948a"
     PREPARATION_SCHEMA_VERSION = "g1-all-lerobot-causal-full-fixture-plan-v1"
     PREPARATION_STATUS = "CAUSAL_PREFIX_EQUIVALENCE_PROVEN"
     CONTRACT_IDENTITY_VERSION = "causal-r1"
     CAUSAL_PROOF_REQUIRED = True
     COVERAGE_SCOPE = "EXACT_FROZEN_806_COMPLETE_EPISODES_CAUSAL_PREFIX_EQUIVALENT_FIXTURE_R1"
     PROFILE_NAME = "causal-full-r1"
+
+
+def configure_causal_full_r2() -> None:
+    """Select the race-safe no-overwrite 806-episode causal fixture profile."""
+
+    configure_causal_full_r1()
+    global SCHEMA_VERSION, DERIVATION_SCHEMA_VERSION, FIXTURE_ID, INITIAL_ATTEMPT_ID
+    global EXPECTED_OUTPUT_ROOT, PREPARATION_PLAN_RELATIVE, PREPARATION_PLAN_FILE_SHA256
+    global PREPARATION_SCHEMA_VERSION, PREPARATION_STATUS, CONTRACT_IDENTITY_VERSION
+    global COVERAGE_SCOPE, PROFILE_NAME
+    SCHEMA_VERSION = "g1-all-lerobot-causal-full-fixture-execution-r2-v1"
+    DERIVATION_SCHEMA_VERSION = "g1-all-lerobot-causal-episode-derivation-r2-v1"
+    FIXTURE_ID = "g1-all-lerobot-causal-full-r2"
+    INITIAL_ATTEMPT_ID = "G1-ALL-LEROBOT-CAUSAL-FULL-R2-ATTEMPT1"
+    EXPECTED_OUTPUT_ROOT = Path("/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r2")
+    PREPARATION_PLAN_RELATIVE = Path(
+        "examples/G1_ALL_LEROBOT_CODEC/causal_full_fixture_plan_r2.json"
+    )
+    PREPARATION_PLAN_FILE_SHA256 = (
+        "83e8ada3fd1cc206b5a1e7b72cf410b3904ee531db13285cffd25a73b0a094a2"
+    )
+    PREPARATION_SCHEMA_VERSION = "g1-all-lerobot-causal-full-fixture-plan-r2-v1"
+    PREPARATION_STATUS = "CAUSAL_PREFIX_EQUIVALENCE_PROVEN_RACE_SAFE_SUPERVISION"
+    CONTRACT_IDENTITY_VERSION = "causal-r2"
+    COVERAGE_SCOPE = "EXACT_FROZEN_806_COMPLETE_EPISODES_CAUSAL_PREFIX_EQUIVALENT_FIXTURE_R2"
+    PROFILE_NAME = "causal-full-r2"
 
 
 def _utc_now() -> str:
@@ -336,12 +361,11 @@ def _validate_causal_prefix_proof(repository: Path) -> dict[str, Any] | None:
         proof.get("schema_version") == "g1-all-lerobot-causal-prefix-equivalence-proof-v1"
         and proof.get("status") == "PASS"
         and proof.get("technical_valid") is True
-        and proof.get("tests", {}).get("legacy_negative_control", {}).get(
-            "known_noncausal_detected"
-        )
+        and proof.get("tests", {})
+        .get("legacy_negative_control", {})
+        .get("known_noncausal_detected")
         is True
-        and proof.get("rc_lookahead_zero_proof", {}).get("empirical_prefix_equivalence")
-        is True
+        and proof.get("rc_lookahead_zero_proof", {}).get("empirical_prefix_equivalence") is True
     ):
         raise RuntimeError("Causal prefix-equivalence proof is not an accepted PASS")
     detached = dict(proof)
@@ -349,7 +373,10 @@ def _validate_causal_prefix_proof(repository: Path) -> dict[str, Any] | None:
     if embedded != canonical_json_sha256(detached):
         raise RuntimeError("Causal prefix-equivalence proof digest is internally inconsistent")
     proof_head = proof.get("git", {}).get("head")
-    if not isinstance(proof_head, str) or _git(repository, "merge-base", "HEAD", proof_head) != proof_head:
+    if (
+        not isinstance(proof_head, str)
+        or _git(repository, "merge-base", "HEAD", proof_head) != proof_head
+    ):
         raise RuntimeError("Causal proof Git identity is not an ancestor of this execution")
     protected = (
         "gr00t/data/codec_evidence/codec_contract.py",
@@ -770,9 +797,7 @@ def _verify_execution_identity(plan: Mapping[str, Any], repository: Path) -> dic
     _verify_toolchain_identity(plan["toolchain"])
     if _codec_contract(plan["toolchain"]) != plan["codec_contract"]:
         raise RuntimeError("Frozen codec contract drifted from the toolchain")
-    if _validate_causal_prefix_proof(repository) != plan.get(
-        "causal_prefix_equivalence_proof"
-    ):
+    if _validate_causal_prefix_proof(repository) != plan.get("causal_prefix_equivalence_proof"):
         raise RuntimeError("Frozen causal prefix-equivalence proof drifted")
     return frozen
 
@@ -839,23 +864,54 @@ def episode_derivation(plan: Mapping[str, Any], episode: Mapping[str, Any]) -> d
 def _tree_bytes(path: Path) -> int:
     for attempt in range(3):
         try:
-            if not path.exists() and not path.is_symlink():
+            try:
+                root_stat = path.lstat()
+            except FileNotFoundError:
                 return 0
-            if path.is_symlink() or not path.is_dir():
+            if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
                 raise ValueError(f"Budget namespace must be a real directory: {path}")
             total = 0
             for item in path.rglob("*"):
-                if item.is_symlink():
+                item_stat = item.lstat()
+                if stat.S_ISLNK(item_stat.st_mode):
                     raise ValueError(f"Symlink is forbidden in the C3 warehouse: {item}")
-                if item.is_file():
-                    total += item.stat().st_size
-                elif not item.is_dir():
+                if stat.S_ISREG(item_stat.st_mode):
+                    total += item_stat.st_size
+                elif not stat.S_ISDIR(item_stat.st_mode):
                     raise ValueError(f"Special file is forbidden in the C3 warehouse: {item}")
             return total
         except FileNotFoundError:
             if attempt == 2:
                 raise RuntimeError(f"Budget namespace changed during three scans: {path}")
     raise AssertionError("unreachable")
+
+
+def _make_tree_user_writable(path: Path) -> None:
+    """Make only one exact failed-attempt temporary tree removable.
+
+    Bundle staging intentionally becomes read-only before publication.  If a
+    worker is interrupted in that interval, manual resume must be able to
+    remove the uncommitted staging inode without weakening committed objects.
+    """
+
+    if not path.exists():
+        return
+    root_stat = path.lstat()
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        raise RuntimeError(f"Resume temporary is not a real directory: {path}")
+    entries = list(path.rglob("*"))
+    for item in reversed(entries):
+        item_stat = item.lstat()
+        if stat.S_ISLNK(item_stat.st_mode):
+            raise RuntimeError(f"Resume temporary contains a symlink: {item}")
+        if not (stat.S_ISREG(item_stat.st_mode) or stat.S_ISDIR(item_stat.st_mode)):
+            raise RuntimeError(f"Resume temporary contains a special file: {item}")
+        item.chmod(
+            item_stat.st_mode
+            | stat.S_IWUSR
+            | (stat.S_IXUSR if stat.S_ISDIR(item_stat.st_mode) else 0)
+        )
+    path.chmod(root_stat.st_mode | stat.S_IWUSR | stat.S_IXUSR)
 
 
 def _persistent_bytes(root: Path) -> int:
@@ -1332,6 +1388,7 @@ def _clean_explicit_resume_temporaries(root: Path, chain: Sequence[str]) -> None
             if path.exists():
                 if path.is_symlink() or not path.is_dir():
                     raise RuntimeError("C3 lineage scratch is not a real directory")
+                _make_tree_user_writable(path)
                 shutil.rmtree(path)
     staging = root / ".staging"
     if staging.is_symlink() or not staging.is_dir():
@@ -1340,8 +1397,10 @@ def _clean_explicit_resume_temporaries(root: Path, chain: Sequence[str]) -> None
         if path.is_symlink():
             raise RuntimeError("C3 staging contains a symlink")
         if path.is_dir():
+            _make_tree_user_writable(path)
             shutil.rmtree(path)
         elif path.is_file():
+            path.chmod(path.stat().st_mode | stat.S_IWUSR)
             path.unlink()
         else:
             raise RuntimeError("C3 staging contains a special file")
@@ -2420,7 +2479,7 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--_worker-attempt", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--profile",
-        choices=("full-r2", "memory-canary-r2", "causal-full-r1"),
+        choices=("full-r2", "memory-canary-r2", "causal-full-r1", "causal-full-r2"),
         default=PROFILE_NAME,
     )
     parser.add_argument("--attempt-id")
@@ -2467,6 +2526,8 @@ def main() -> int:
         configure_memory_canary_r2()
     elif args.profile == "causal-full-r1" and PROFILE_NAME != "causal-full-r1":
         configure_causal_full_r1()
+    elif args.profile == "causal-full-r2" and PROFILE_NAME != "causal-full-r2":
+        configure_causal_full_r2()
     elif args.profile != PROFILE_NAME:
         raise ValueError(
             f"Configured R2 profile differs from CLI: {PROFILE_NAME} != {args.profile}"

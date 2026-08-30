@@ -153,6 +153,60 @@ def test_causal_full_profile_binds_proof_new_root_and_exact_encoder_contract():
     assert contract["min_keyint"] == 16
 
 
+def test_causal_r2_profile_uses_new_root_and_forbids_cross_plan_migration():
+    module = _load_cli()
+    module.configure_causal_full_r2()
+
+    assert module.PROFILE_NAME == "causal-full-r2"
+    assert module.FIXTURE_ID == "g1-all-lerobot-causal-full-r2"
+    assert module.EXPECTED_OUTPUT_ROOT == Path(
+        "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r2"
+    )
+    assert module.INITIAL_ATTEMPT_ID == "G1-ALL-LEROBOT-CAUSAL-FULL-R2-ATTEMPT1"
+    plan = json.loads((Path(__file__).parents[2] / module.PREPARATION_PLAN_RELATIVE).read_text())
+    assert plan["superseded_r1_failure_evidence"]["attempt_3_forbidden"] is True
+    assert plan["warehouse"]["cross_plan_object_migration"] is False
+
+
+def test_tree_bytes_retries_one_lstat_race_without_misclassifying_special_file(
+    tmp_path, monkeypatch
+):
+    module = _load_cli()
+    root = tmp_path / "tree"
+    root.mkdir()
+    payload = root / "payload.npy"
+    payload.write_bytes(b"abc")
+    original = Path.lstat
+    raised = False
+
+    def racing_lstat(path):
+        nonlocal raised
+        if path == payload and not raised:
+            raised = True
+            raise FileNotFoundError(path)
+        return original(path)
+
+    monkeypatch.setattr(Path, "lstat", racing_lstat)
+    assert module._tree_bytes(root) == 3
+    assert raised is True
+
+
+def test_resume_cleanup_removes_interrupted_read_only_staging(tmp_path):
+    module = _load_cli()
+    root = ensure_warehouse_layout(tmp_path / "warehouse")
+    stage = root / ".staging" / "object-interrupted" / "bundle" / "arrays"
+    stage.mkdir(parents=True)
+    payload = stage / "dts.npy"
+    payload.write_bytes(b"partial")
+    payload.chmod(0o444)
+    for directory in (stage, stage.parent, stage.parent.parent):
+        directory.chmod(0o555)
+
+    module._clean_explicit_resume_temporaries(root, [])
+
+    assert list((root / ".staging").iterdir()) == []
+
+
 def test_rusage_high_water_is_diagnostic_not_a_worker_limit(tmp_path, monkeypatch):
     module = _load_cli()
     root = ensure_warehouse_layout(tmp_path / "warehouse")
