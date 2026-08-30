@@ -42,6 +42,7 @@ from gr00t.data.codec_evidence.production import (
     CAMERA_ID,
     CRF,
     GOP,
+    X264_CAUSAL_PARAMETERS,
     CanonicalEpisodeInput,
     assert_torchcodec_pyav_exact,
     build_episode_arrays,
@@ -49,6 +50,7 @@ from gr00t.data.codec_evidence.production import (
     encode_h264_twice,
     extract_mvs_and_decoded_rgb,
     probe_packets,
+    probe_x264_encoder_options,
     raster_sha256,
     sha256_path,
     toolchain_identity,
@@ -81,6 +83,15 @@ INPUT_FREEZE_RELATIVE = Path("examples/G1_ALL_LEROBOT_CODEC/c3_full_input_freeze
 PREPARATION_PLAN_FILE_SHA256 = "1e9e34e3134429792e4b8bd2573a3b68e2a30a6349accc6b60aedc52c86749cb"
 INPUT_FREEZE_FILE_SHA256 = "f2e950071eb6187be7747658ae46598b8a3f741c37b710a6e2288c041ea7b9cd"
 EXPECTED_BASELINE = "dd86aa8deb7c5ee314ca0cf082ab9468b0b61119"
+PREPARATION_SCHEMA_VERSION = "g1-all-lerobot-c3-full-fixture-plan-v1"
+PREPARATION_STATUS = "C3_PREPARATION"
+CONTRACT_IDENTITY_VERSION = "c3-r2"
+CAUSAL_PROOF_REQUIRED = False
+CAUSAL_PROOF_PATH = Path(
+    "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-contract-r1/"
+    "CAUSAL_PREFIX_EQUIVALENCE.json"
+)
+CAUSAL_PROOF_FILE_SHA256 = "44a0e88cd1577dee942e84fc9420c111b86754957e966d39d155d87446c903c9"
 FROZEN_EPISODES = 806
 FROZEN_FRAMES = 297_340
 FROZEN_CODEC_ANCHORS = 10_291
@@ -138,6 +149,32 @@ def configure_memory_canary_r2() -> None:
     PROFILE_NAME = "memory-canary-r2"
     MAX_WALL_SECONDS = 7_200
     MAX_NEW_BYTES = 5_000_000_000
+
+
+def configure_causal_full_r1() -> None:
+    """Select the new no-overwrite 806-episode causal fixture profile."""
+
+    global SCHEMA_VERSION, DERIVATION_SCHEMA_VERSION, FIXTURE_ID, INITIAL_ATTEMPT_ID
+    global EXPECTED_OUTPUT_ROOT, PREPARATION_PLAN_RELATIVE, PREPARATION_PLAN_FILE_SHA256
+    global PREPARATION_SCHEMA_VERSION, PREPARATION_STATUS, CONTRACT_IDENTITY_VERSION
+    global CAUSAL_PROOF_REQUIRED, COVERAGE_SCOPE, PROFILE_NAME
+    SCHEMA_VERSION = "g1-all-lerobot-causal-full-fixture-execution-r1-v1"
+    DERIVATION_SCHEMA_VERSION = "g1-all-lerobot-causal-episode-derivation-r1-v1"
+    FIXTURE_ID = "g1-all-lerobot-causal-full-r1"
+    INITIAL_ATTEMPT_ID = "G1-ALL-LEROBOT-CAUSAL-FULL-R1-ATTEMPT1"
+    EXPECTED_OUTPUT_ROOT = Path(
+        "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r1"
+    )
+    PREPARATION_PLAN_RELATIVE = Path(
+        "examples/G1_ALL_LEROBOT_CODEC/causal_full_fixture_plan.json"
+    )
+    PREPARATION_PLAN_FILE_SHA256 = "f982d30ecc114dd88ee8ee19e5e907456408e116d9bded63f40120c33955948a"
+    PREPARATION_SCHEMA_VERSION = "g1-all-lerobot-causal-full-fixture-plan-v1"
+    PREPARATION_STATUS = "CAUSAL_PREFIX_EQUIVALENCE_PROVEN"
+    CONTRACT_IDENTITY_VERSION = "causal-r1"
+    CAUSAL_PROOF_REQUIRED = True
+    COVERAGE_SCOPE = "EXACT_FROZEN_806_COMPLETE_EPISODES_CAUSAL_PREFIX_EQUIVALENT_FIXTURE_R1"
+    PROFILE_NAME = "causal-full-r1"
 
 
 def _utc_now() -> str:
@@ -288,6 +325,57 @@ def _git_identity(repository: Path, preparation: Mapping[str, Any]) -> dict[str,
     }
 
 
+def _validate_causal_prefix_proof(repository: Path) -> dict[str, Any] | None:
+    if not CAUSAL_PROOF_REQUIRED:
+        return None
+    identity = _file_identity(CAUSAL_PROOF_PATH)
+    if identity["sha256"] != CAUSAL_PROOF_FILE_SHA256:
+        raise RuntimeError("Frozen causal prefix-equivalence proof identity drifted")
+    proof = _load_json(CAUSAL_PROOF_PATH)
+    if not (
+        proof.get("schema_version") == "g1-all-lerobot-causal-prefix-equivalence-proof-v1"
+        and proof.get("status") == "PASS"
+        and proof.get("technical_valid") is True
+        and proof.get("tests", {}).get("legacy_negative_control", {}).get(
+            "known_noncausal_detected"
+        )
+        is True
+        and proof.get("rc_lookahead_zero_proof", {}).get("empirical_prefix_equivalence")
+        is True
+    ):
+        raise RuntimeError("Causal prefix-equivalence proof is not an accepted PASS")
+    detached = dict(proof)
+    embedded = detached.pop("proof_payload_sha256", None)
+    if embedded != canonical_json_sha256(detached):
+        raise RuntimeError("Causal prefix-equivalence proof digest is internally inconsistent")
+    proof_head = proof.get("git", {}).get("head")
+    if not isinstance(proof_head, str) or _git(repository, "merge-base", "HEAD", proof_head) != proof_head:
+        raise RuntimeError("Causal proof Git identity is not an ancestor of this execution")
+    protected = (
+        "gr00t/data/codec_evidence/codec_contract.py",
+        "gr00t/data/codec_evidence/production.py",
+        "gr00t/data/codec_evidence/schemas/codec-evidence-global-contract-v2.schema.json",
+        "examples/G1_ALL_LEROBOT_CODEC/prove_causal_prefix_equivalence.py",
+        "tests/codec_evidence/test_production_fixture.py",
+        "tests/codec_evidence/test_episode_bundle.py",
+        "tests/codec_evidence/test_dataset_protocol.py",
+    )
+    changed = _git(repository, "diff", "--name-only", f"{proof_head}..HEAD", "--", *protected)
+    if changed:
+        raise RuntimeError(f"Causal proof-protected implementation changed after proof: {changed}")
+    if proof.get("x264_requested_parameters") != list(X264_CAUSAL_PARAMETERS):
+        raise RuntimeError("Causal proof x264 request differs from the production implementation")
+    contract = make_codec_contract(
+        fixture_mode=PRODUCTION_FIXTURE_MODE,
+        source_kind=SOURCE_KIND_NATIVE_CANONICAL,
+    )
+    if proof.get("contract") != contract or proof.get("contract_sha256") != codec_contract_sha256(
+        contract
+    ):
+        raise RuntimeError("Causal proof semantic contract differs from the current contract")
+    return identity
+
+
 def _check_dataset_markers() -> None:
     present = [str(path) for path in MARKERS if path.exists() or path.is_symlink()]
     if present:
@@ -333,10 +421,15 @@ def _validate_preparation_and_freeze(
         raise RuntimeError("Tracked C3 input freeze file identity drifted")
     preparation = _load_json(preparation_path)
     frozen = _load_json(freeze_path)
-    if preparation.get("schema_version") != "g1-all-lerobot-c3-full-fixture-plan-v1":
+    if preparation.get("schema_version") != PREPARATION_SCHEMA_VERSION:
         raise ValueError("Unsupported C3 preparation plan schema")
-    if preparation.get("status") != "C3_PREPARATION":
+    if preparation.get("status") != PREPARATION_STATUS:
         raise ValueError("C3 preparation plan is not frozen preparation state")
+    if CAUSAL_PROOF_REQUIRED and preparation.get("causal_prefix_equivalence_proof") != {
+        "path": str(CAUSAL_PROOF_PATH),
+        "sha256": CAUSAL_PROOF_FILE_SHA256,
+    }:
+        raise ValueError("Causal preparation plan does not bind the accepted prefix proof")
     if preparation.get("input_freeze") != {
         "path": INPUT_FREEZE_RELATIVE.as_posix(),
         "file_sha256": INPUT_FREEZE_FILE_SHA256,
@@ -452,6 +545,12 @@ def _implementation_closure(repository: Path) -> dict[str, dict[str, Any]]:
         "warehouse": "gr00t/data/codec_evidence/warehouse.py",
         "episode_bundle_writer": "gr00t/data/codec_evidence/episode_bundle.py",
         "codec_contract": "gr00t/data/codec_evidence/codec_contract.py",
+        "global_codec_contract_schema": (
+            "gr00t/data/codec_evidence/schemas/codec-evidence-global-contract-v2.schema.json"
+        ),
+        "causal_prefix_proof_cli": (
+            "examples/G1_ALL_LEROBOT_CODEC/prove_causal_prefix_equivalence.py"
+        ),
         "episode_identity": "gr00t/data/codec_evidence/identity.py",
         "adapter_identity": "gr00t/data/dataset/g1_all_lerobot_h40_adapter.py",
         "mv_normalization_reference": "gr00t/model/gr00t_n1d7/codec_dynamics.py",
@@ -472,7 +571,11 @@ def _implementation_closure(repository: Path) -> dict[str, dict[str, Any]]:
 
 
 def _compact_identity(name: str, value: Any) -> dict[str, str]:
-    return {"name": name, "version": "c3-r2", "sha256": canonical_json_sha256(value)}
+    return {
+        "name": name,
+        "version": CONTRACT_IDENTITY_VERSION,
+        "sha256": canonical_json_sha256(value),
+    }
 
 
 def _codec_contract(toolchain: Mapping[str, Any]) -> dict[str, Any]:
@@ -486,9 +589,16 @@ def _codec_contract(toolchain: Mapping[str, Any]) -> dict[str, Any]:
             "preset": "medium",
             "crf": CRF,
             "gop": GOP,
+            "keyint": GOP,
+            "min_keyint": 16,
             "bframes": 0,
             "refs": 1,
             "threads": 1,
+            "lookahead_threads": 1,
+            "sliced_threads": 0,
+            "sync_lookahead": 0,
+            "rc_lookahead": 0,
+            "mbtree": 0,
             "time_base": "1/30000",
             "pts_step": 1000,
         },
@@ -571,6 +681,7 @@ def build_execution_plan(repository: Path) -> dict[str, Any]:
     }
     tools["identity_sha256"] = canonical_json_sha256(tools)
     contract = _codec_contract(tools)
+    causal_proof = _validate_causal_prefix_proof(repository)
     _verify_all_frozen_inputs(frozen)
     expected_lengths = sorted(
         (
@@ -616,6 +727,7 @@ def build_execution_plan(repository: Path) -> dict[str, Any]:
         "implementation_identity_sha256": canonical_json_sha256(implementation),
         "codec_contract": contract,
         "codec_contract_sha256": codec_contract_sha256(contract),
+        "causal_prefix_equivalence_proof": causal_proof,
         "scope": COVERAGE_SCOPE,
         "episode_selection": (
             None
@@ -658,6 +770,10 @@ def _verify_execution_identity(plan: Mapping[str, Any], repository: Path) -> dic
     _verify_toolchain_identity(plan["toolchain"])
     if _codec_contract(plan["toolchain"]) != plan["codec_contract"]:
         raise RuntimeError("Frozen codec contract drifted from the toolchain")
+    if _validate_causal_prefix_proof(repository) != plan.get(
+        "causal_prefix_equivalence_proof"
+    ):
+        raise RuntimeError("Frozen causal prefix-equivalence proof drifted")
     return frozen
 
 
@@ -918,6 +1034,7 @@ def _materialize_episode(
     ffmpeg_path = plan["toolchain"]["ffmpeg"]["path"]
     ffprobe_path = plan["toolchain"]["ffprobe"]["path"]
     encoded = encode_h264_twice(canonical_rgb, scratch, ffmpeg=ffmpeg_path)
+    encoder_options = probe_x264_encoder_options(encoded.bitstream_path)
     budget.check()
     packets = probe_packets(
         encoded.bitstream_path,
@@ -1011,6 +1128,7 @@ def _materialize_episode(
         "torchcodec_pyav_exact": parity,
         "deterministic_encode_sha256": list(encoded.attempt_sha256),
         "deterministic_encode_equal": len(set(encoded.attempt_sha256)) == 1,
+        "x264_encoder_options": encoder_options,
         "accepted_bitstream": _file_identity(retained),
         "packet_stream": dict(packets.stream),
         "header_proof_sha256": headers.normalized_trace_sha256,
@@ -2302,7 +2420,7 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--_worker-attempt", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--profile",
-        choices=("full-r2", "memory-canary-r2"),
+        choices=("full-r2", "memory-canary-r2", "causal-full-r1"),
         default=PROFILE_NAME,
     )
     parser.add_argument("--attempt-id")
@@ -2347,6 +2465,8 @@ def main() -> int:
     args = _parser().parse_args()
     if args.profile == "memory-canary-r2" and PROFILE_NAME != "memory-canary-r2":
         configure_memory_canary_r2()
+    elif args.profile == "causal-full-r1" and PROFILE_NAME != "causal-full-r1":
+        configure_causal_full_r1()
     elif args.profile != PROFILE_NAME:
         raise ValueError(
             f"Configured R2 profile differs from CLI: {PROFILE_NAME} != {args.profile}"

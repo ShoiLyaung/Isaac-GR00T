@@ -122,6 +122,37 @@ def test_r2_memory_canary_profile_freezes_exact_order_and_new_root():
     assert selected["total_codec_anchors"] == 83
 
 
+def test_causal_full_profile_binds_proof_new_root_and_exact_encoder_contract():
+    module = _load_cli()
+    module.configure_causal_full_r1()
+
+    assert module.PROFILE_NAME == "causal-full-r1"
+    assert module.FIXTURE_ID == "g1-all-lerobot-causal-full-r1"
+    assert module.EXPECTED_OUTPUT_ROOT == Path(
+        "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r1"
+    )
+    assert module.INITIAL_ATTEMPT_ID == "G1-ALL-LEROBOT-CAUSAL-FULL-R1-ATTEMPT1"
+    assert module.CAUSAL_PROOF_REQUIRED is True
+    assert module.MAX_WALL_SECONDS == 10_800
+    assert module.MAX_NEW_BYTES == 30_000_000_000
+    proof = module._validate_causal_prefix_proof(Path(__file__).parents[2])
+    assert proof["sha256"] == module.CAUSAL_PROOF_FILE_SHA256
+
+    toolchain = {
+        "ffmpeg": {"sha256": "1" * 64},
+        "libx264": {"sha256": "2" * 64},
+        "pyav": {"sha256": "3" * 64},
+        "torchcodec": {"sha256": "4" * 64},
+        "motion_vector_extractor": {"sha256": "5" * 64},
+        "implementation": {"mv_normalization_reference": {"sha256": "6" * 64}},
+    }
+    contract = module._codec_contract(toolchain)
+    assert contract["schema_version"] == "codec-evidence-global-contract-v2"
+    assert contract["rc_lookahead"] == 0
+    assert contract["mbtree"] == 0
+    assert contract["min_keyint"] == 16
+
+
 def test_rusage_high_water_is_diagnostic_not_a_worker_limit(tmp_path, monkeypatch):
     module = _load_cli()
     root = ensure_warehouse_layout(tmp_path / "warehouse")
