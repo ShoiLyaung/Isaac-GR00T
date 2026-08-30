@@ -22,7 +22,7 @@ SPEC.loader.exec_module(causal)
 
 def test_causal_launcher_requires_manifest_and_preserves_historical_schedule(tmp_path):
     assert causal.FIXTURE_ROOT == Path(
-        "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r1"
+        "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r2"
     )
     assert causal.RETAINED_CHECKPOINT == causal.history.RETAINED_CHECKPOINT
     assert causal.CHECKPOINT_HASHES == causal.history.CHECKPOINT_HASHES

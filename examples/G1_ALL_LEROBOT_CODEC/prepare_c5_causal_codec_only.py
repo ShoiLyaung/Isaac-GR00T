@@ -44,8 +44,13 @@ NATIVE_PREPARATION = Path(
 )
 NATIVE_MANIFEST_SHA256 = "57769ef4469e3f094240299ae4f2c5935f7c9c452a06ff2349122f509776bdbe"
 NATIVE_CLOSURE_SHA256 = "3fe4d1625920032d5242bcfec298552314f2b9cac3917db4cdf734d2cfd51974"
-FIXTURE_ROOT = Path("/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r1")
-EXPECTED_FIXTURE_ID = "g1-all-lerobot-causal-full-r1"
+FIXTURE_ROOT = Path("/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r2")
+EXPECTED_FIXTURE_ID = "g1-all-lerobot-causal-full-r2"
+SOURCE_ROOT = Path(__file__).resolve().parents[2]
+PREFIX_FACTORY_PATH = SOURCE_ROOT / "gr00t/data/codec_evidence/prefix_materializer.py"
+PREFIX_FACTORY_SHA256 = "88c29c9f288651d05b691ac5b5648168742c44a4eaf113ee2a5b400f09ad2f0a"
+PRODUCTION_MODULE_PATH = SOURCE_ROOT / "gr00t/data/codec_evidence/production.py"
+PRODUCTION_MODULE_SHA256 = "526a1439e5fe240290d144b3b601de7e7e232fc0edc83eea2ff912d8ded5c04a"
 EXPECTED_EPISODES = 806
 EXPECTED_TOTAL_FRAMES = 297_340
 EXPECTED_H40_ANCHORS = 265_906
@@ -434,6 +439,10 @@ def validate_inputs(
 
 def resolved_plan(output_root: Path, fixture_manifest_sha256: str) -> dict[str, Any]:
     native_manifest, fixture_identity = validate_inputs(fixture_manifest_sha256)
+    if sha256_file(PREFIX_FACTORY_PATH) != PREFIX_FACTORY_SHA256:
+        raise RuntimeError("causal prefix factory identity drifted")
+    if sha256_file(PRODUCTION_MODULE_PATH) != PRODUCTION_MODULE_SHA256:
+        raise RuntimeError("causal production module identity drifted")
     evidence = codec_evidence_config(fixture_manifest_sha256)
     datasets = []
     for source_id, entry in zip(SOURCE_IDS, native_manifest["datasets"]):
@@ -459,6 +468,14 @@ def resolved_plan(output_root: Path, fixture_manifest_sha256: str) -> dict[str, 
         "native_cpu_mixture_closure_sha256": NATIVE_CLOSURE_SHA256,
         "native_adapter_sha256": NATIVE_ADAPTER_SHA256,
         "fixture_root": str(FIXTURE_ROOT),
+        "online_prefix_factory": {
+            "path": str(PREFIX_FACTORY_PATH.resolve(strict=True)),
+            "sha256": PREFIX_FACTORY_SHA256,
+            "production_module_path": str(PRODUCTION_MODULE_PATH.resolve(strict=True)),
+            "production_module_sha256": PRODUCTION_MODULE_SHA256,
+            "source_kind": "NATIVE_CANONICAL_DECODED_DERIVED",
+            "execution_location": "HOST_POLICY_SERVER_EXACT_TRAINING_TOOLCHAIN",
+        },
         **fixture_identity,
         "codec_evidence": evidence,
         "datasets": datasets,

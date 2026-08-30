@@ -135,6 +135,15 @@ def validate_materials(preparation_root: Path, fixture_manifest_sha256: str) -> 
         and plan.get("fixture_root") == str(FIXTURE_ROOT)
         and plan.get("fixture_manifest_sha256") == manifest_sha256
         and plan.get("covered_episode_uid_digest") == preparation.EXPECTED_EPISODE_UID_DIGEST
+        and plan.get("online_prefix_factory")
+        == {
+            "path": str(preparation.PREFIX_FACTORY_PATH.resolve(strict=True)),
+            "sha256": preparation.PREFIX_FACTORY_SHA256,
+            "production_module_path": str(preparation.PRODUCTION_MODULE_PATH.resolve(strict=True)),
+            "production_module_sha256": preparation.PRODUCTION_MODULE_SHA256,
+            "source_kind": "NATIVE_CANONICAL_DECODED_DERIVED",
+            "execution_location": "HOST_POLICY_SERVER_EXACT_TRAINING_TOOLCHAIN",
+        }
     ):
         raise RuntimeError("causal C5 preparation provenance closure drift")
 
@@ -231,6 +240,7 @@ def validate_materials(preparation_root: Path, fixture_manifest_sha256: str) -> 
         "retained_checkpoint": str(RETAINED_CHECKPOINT),
         "retained_checkpoint_hashes": CHECKPOINT_HASHES,
         "retained_native_index": retained_index_identity,
+        "online_prefix_factory": dict(plan["online_prefix_factory"]),
         "source_ids": source_ids,
         "mix_ratios": mix_ratios,
     }
@@ -410,6 +420,7 @@ def run(args: argparse.Namespace) -> int:
         "run_dir": str(args.run_dir),
         "source": source,
         "materials": materials,
+        "online_prefix_factory": materials["online_prefix_factory"],
         "training": {
             "max_steps": mode.max_steps,
             "fresh_optimizer": True,
@@ -637,6 +648,13 @@ def run(args: argparse.Namespace) -> int:
             "dataset_manifest_sha256": materials["dataset_manifest_sha256"],
             "fixture_manifest_sha256": fixture_manifest_sha256,
             "codec_contract_sha256": materials["codec_contract_sha256"],
+            "causal_fixture_identity": {
+                "input_snapshot_sha256": materials["input_snapshot_sha256"],
+                "budget_sha256": materials["budget_sha256"],
+                "producer_identity": materials["producer_identity"],
+                "causal_prefix_equivalence_proof": materials["causal_prefix_equivalence_proof"],
+            },
+            "online_prefix_factory": materials["online_prefix_factory"],
             "model_output": str(train_output),
         }
         base.atomic_json(args.run_dir / "SUPERVISOR_SUMMARY.json", summary)

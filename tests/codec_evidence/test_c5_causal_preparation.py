@@ -160,7 +160,7 @@ def _arrange_inputs(tmp_path: Path, monkeypatch):
 
 def test_causal_preparation_requires_explicit_manifest_sha_and_fixed_root():
     assert causal.FIXTURE_ROOT == Path(
-        "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r1"
+        "/home/sl/icra27-runs/codec-fixtures/g1-all-lerobot-causal-full-r2"
     )
     with pytest.raises(SystemExit):
         causal._parser().parse_args(["--output-root", "/tmp/output"])
