@@ -55,11 +55,26 @@ class EagleBackbone(torch.nn.Module):
         self.select_layer = select_layer
         self.set_trainable_parameters(tune_llm, tune_visual, tune_top_llm_layers)
         if load_bf16 and trainable_params_fp32:
-            # cast trainable parameters to fp32
+            # Keep attention projection weights in bf16 when using FlashAttention.
+            # Otherwise hidden states can be upcast to fp32, which FlashAttention cannot consume.
+            keep_bf16_keywords = (
+                "self_attn.q_proj",
+                "self_attn.k_proj",
+                "self_attn.v_proj",
+                "self_attn.o_proj",
+                "self_attn.q_norm",
+                "self_attn.k_norm",
+                "input_layernorm",
+                "post_attention_layernorm",
+            )
             for n, p in self.named_parameters():
-                if p.requires_grad:
-                    p.data = p.data.to(torch.float32)
-                    print(f"Casting trainable parameter {n} to fp32")
+                if not p.requires_grad:
+                    continue
+                if use_flash_attention and any(k in n for k in keep_bf16_keywords):
+                    print(f"Keeping trainable parameter {n} in bf16 for FlashAttention compatibility")
+                    continue
+                p.data = p.data.to(torch.float32)
+                print(f"Casting trainable parameter {n} to fp32")
 
     def set_trainable_parameters(self, tune_llm: bool, tune_visual: bool, tune_top_llm_layers: int):
         self.tune_llm = tune_llm

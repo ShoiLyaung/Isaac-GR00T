@@ -66,6 +66,20 @@ class Gr00tN1d6Config(PretrainedConfig):
     # Diffusion model type selection
     use_alternate_vl_dit: bool = True  # True for AlternateVLDiT, False for DiT
     attend_text_every_n_blocks: int = 2
+    # System1 backbone selection.
+    # "dit": existing DiT flow-matching System1
+    # "mamba": new Mamba-style System1 (I/O compatible with DiT System1)
+    system1_type: str = "dit"
+    # Print System1 input/output key + shape logs once at runtime.
+    system1_debug_shapes: bool = True
+    # Register backward hooks on key System1 intermediates and log non-finite gradients once.
+    system1_debug_gradients: bool = False
+    # Debug mode for isolating the robot_mamba stack.
+    # "full": normal execution
+    # "skip": bypass the stack entirely
+    # "norm_only": apply only per-layer LayerNorm and final_norm
+    # "core_only": apply only the sequence mixers, skipping LayerNorm/final_norm
+    debug_robot_mamba_mode: str = "full"
 
     # Diffusion model configuration with 32 layers (main difference from N15)
     diffusion_model_cfg: dict = field(
@@ -88,6 +102,41 @@ class Gr00tN1d6Config(PretrainedConfig):
     noise_beta_beta: float = 1.0
     noise_s: float = 0.999
     num_timestep_buckets: int = 1000
+
+    # Mamba System1 parameters
+    mamba_num_layers: int = 8
+    mamba_d_state: int = 16
+    mamba_d_conv: int = 3
+    mamba_expand: int = 2
+    mamba_dropout: float = 0.1
+    # Fail fast if mamba_ssm cannot be imported and the code would otherwise
+    # silently fall back to the lightweight local mixer.
+    require_real_mamba_backend: bool = False
+    # Phase-2 video path: VideoMamba + unidirectional Video->Robot injection.
+    mamba_enable_video_injection: bool = False
+    mamba_video_num_layers: int = 2
+
+    # Inference-only action alignment for Mamba checkpoints.
+    # This is applied after decode_action() in Gr00tPolicy and does not affect training loss.
+    mamba_inference_align_actions: bool = True
+    mamba_inference_action_scales: dict = field(
+        default_factory=lambda: {
+            "left_arm": 1.0,
+            "right_arm": 1.0,
+            "right_hand": 1.0,
+            "navigate_command": 1.0,
+            "waist": 1.0,
+        }
+    )
+    mamba_inference_action_clip_abs: dict = field(
+        default_factory=lambda: {
+            "left_arm": 0.2,
+            "right_arm": 0.2,
+            "right_hand": 1.5,
+            "navigate_command": 0.35,
+            "waist": 0.12,
+        }
+    )
 
     # Training parameters
     tune_projector: bool = True

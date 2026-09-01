@@ -1,5 +1,6 @@
 # Finetune config used for single node post-training.
 from dataclasses import dataclass
+from typing import Literal
 
 from gr00t.data.embodiment_tags import EmbodimentTag
 
@@ -32,6 +33,11 @@ class FinetuneConfig:
     """
 
     # --- Model Tuning Flags ---
+    backbone_substitute: str = "Qwen/Qwen3-VL-2B-Instruct"
+    """Public Qwen3-VL substitute for the gated ``nvidia/Cosmos-Reason2-2B``
+    (same Qwen3-VL architecture). Only used by the N1.7 finetune launcher
+    (``launch_finetune_n1d7.py``); ignored by N1.6."""
+
     tune_llm: bool = False
     """If True, fine-tune the language model (LLM) backbone during training."""
 
@@ -43,6 +49,27 @@ class FinetuneConfig:
 
     tune_diffusion_model: bool = True
     """If True, fine-tune the diffusion-based action decoder (if present in the model)."""
+
+    system1_type: Literal["dit", "mamba"] = "dit"
+    """System1 backbone type. Keep `dit` for full backward compatibility; use `mamba` to enable MambaSystem1."""
+
+    mamba_enable_video_injection: bool = False
+    """Enable Phase-2 VideoMamba + unidirectional Video->Robot injection when system1_type='mamba'."""
+
+    require_real_mamba_backend: bool = False
+    """If True, fail before training when `mamba_ssm` cannot be imported and the code would fall back."""
+
+    system1_debug_shapes: bool = True
+    """Print System1 input/output keys and tensor shapes once during train/inference for debugging."""
+
+    system1_debug_gradients: bool = False
+    """Register backward hooks on key System1 tensors and log non-finite gradients once."""
+
+    debug_robot_mamba_mode: Literal["full", "skip", "norm_only", "core_only"] = "full"
+    """Isolation mode for the robot_mamba stack."""
+
+    backbone_trainable_params_fp32: bool = True
+    """Whether to cast trainable backbone params to fp32. Disable when running FlashAttention dtype-sensitive smoke tests."""
 
     state_dropout_prob: float = 0.0
     """
@@ -77,6 +104,9 @@ class FinetuneConfig:
     learning_rate: float = 1e-4
     """Initial learning rate for optimizer."""
 
+    bf16: bool = True
+    """Enable bfloat16 mixed precision training."""
+
     gradient_accumulation_steps: int = 1
     """Number of forward passes to accumulate before performing a backward/update step."""
 
@@ -88,6 +118,15 @@ class FinetuneConfig:
 
     save_total_limit: int = 5
     """Maximum number of checkpoints to keep before older ones are deleted."""
+
+    finite_check_every_steps: int = 0
+    """If > 0, inspect model parameters every N optimizer steps and log the first non-finite tensors."""
+
+    stop_on_non_finite_params: bool = False
+    """If True, stop training as soon as non-finite parameters are detected by the finite monitor."""
+
+    detect_anomaly: bool = False
+    """If True, enable torch autograd anomaly detection during training."""
 
     num_gpus: int = 1
     """Number of GPUs available for distributed or single-node training."""

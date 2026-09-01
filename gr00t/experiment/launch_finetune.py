@@ -58,6 +58,12 @@ if __name__ == "__main__":
     config.model.tune_visual = ft_config.tune_visual
     config.model.tune_projector = ft_config.tune_projector
     config.model.tune_diffusion_model = ft_config.tune_diffusion_model
+    config.model.system1_type = ft_config.system1_type
+    config.model.mamba_enable_video_injection = ft_config.mamba_enable_video_injection
+    config.model.require_real_mamba_backend = ft_config.require_real_mamba_backend
+    config.model.system1_debug_shapes = ft_config.system1_debug_shapes
+    config.model.system1_debug_gradients = ft_config.system1_debug_gradients
+    config.model.debug_robot_mamba_mode = ft_config.debug_robot_mamba_mode
     config.model.state_dropout_prob = ft_config.state_dropout_prob
     config.model.random_rotation_angle = ft_config.random_rotation_angle
     config.model.color_jitter_params = ft_config.color_jitter_params
@@ -66,7 +72,7 @@ if __name__ == "__main__":
     config.model.reproject_vision = False
     config.model.eagle_collator = True
     config.model.model_name = "nvidia/Eagle-Block2A-2B-v2"
-    config.model.backbone_trainable_params_fp32 = True
+    config.model.backbone_trainable_params_fp32 = ft_config.backbone_trainable_params_fp32
     config.model.use_relative_action = True
 
     config.training.start_from_checkpoint = ft_config.base_model_path
@@ -74,10 +80,14 @@ if __name__ == "__main__":
     config.training.global_batch_size = ft_config.global_batch_size
     config.training.dataloader_num_workers = ft_config.dataloader_num_workers
     config.training.learning_rate = ft_config.learning_rate
+    config.training.bf16 = ft_config.bf16
     config.training.gradient_accumulation_steps = ft_config.gradient_accumulation_steps
     config.training.output_dir = ft_config.output_dir
     config.training.save_steps = ft_config.save_steps
     config.training.save_total_limit = ft_config.save_total_limit
+    config.training.finite_check_every_steps = ft_config.finite_check_every_steps
+    config.training.stop_on_non_finite_params = ft_config.stop_on_non_finite_params
+    config.training.detect_anomaly = ft_config.detect_anomaly
     config.training.num_gpus = ft_config.num_gpus
     config.training.use_wandb = ft_config.use_wandb
     config.training.max_steps = ft_config.max_steps

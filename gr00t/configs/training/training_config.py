@@ -61,7 +61,10 @@ class TrainingConfig:
 
     # DeepSpeed (default)
     deepspeed_stage: int = 2  # ZeRO stage (1, 2, or 3)
-    gradient_checkpointing: bool = False
+    # Default to True to support low-VRAM single-GPU finetune (e.g., RTX 6000 Ada
+    # with 8 GB free when other users' evals are running). Disable for full-speed
+    # multi-GPU runs by setting `gradient_checkpointing=False` in the config.
+    gradient_checkpointing: bool = True
 
     # Transformers loading parameters
     transformers_trust_remote_code: bool = True
@@ -86,6 +89,12 @@ class TrainingConfig:
 
     # Profiling
     enable_profiling: bool = False
+
+    # Numerical stability debugging
+    finite_check_every_steps: int = 0
+    stop_on_non_finite_params: bool = False
+    finite_check_module_prefix: str = "action_head"
+    detect_anomaly: bool = False
 
     # Max number of retries in training for fault tolerance
     max_retries: int = 3

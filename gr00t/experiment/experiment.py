@@ -4,6 +4,7 @@ import logging
 import os
 from pathlib import Path
 import warnings
+from contextlib import nullcontext
 
 from omegaconf import OmegaConf
 import torch
@@ -15,7 +16,11 @@ from gr00t.configs.base_config import Config
 
 # Use custom trainer that profiles data loading & forward times
 from gr00t.experiment.trainer import Gr00tTrainer, ProfCallback
-from gr00t.experiment.utils import BestMetricCheckpointCallback, CheckpointFormatCallback
+from gr00t.experiment.utils import (
+    BestMetricCheckpointCallback,
+    CheckpointFormatCallback,
+    FiniteParameterCallback,
+)
 from gr00t.model import MODEL_REGISTRY
 from gr00t.utils.initial_actions import INITIAL_ACTIONS_FILENAME, save_initial_actions
 
@@ -238,6 +243,15 @@ def run(config: Config):
         )
     )
 
+    if config.training.finite_check_every_steps > 0:
+        trainer.add_callback(
+            FiniteParameterCallback(
+                every_steps=config.training.finite_check_every_steps,
+                module_prefix=config.training.finite_check_module_prefix,
+                stop_on_non_finite=config.training.stop_on_non_finite_params,
+            )
+        )
+
     if config.training.save_best_eval_metric_name != "":
         trainer.add_callback(
             BestMetricCheckpointCallback(
@@ -280,8 +294,15 @@ def run(config: Config):
             on_trace_ready=partial(on_trace_ready_handler, trainer, profile_dir),
         ) as prof:
             trainer.add_callback(ProfCallback(prof=prof))
-            trainer.train(resume_from_checkpoint=True)
     else:
+        prof = None
+
+    detect_anomaly_ctx = (
+        torch.autograd.detect_anomaly()
+        if config.training.detect_anomaly
+        else nullcontext()
+    )
+    with detect_anomaly_ctx:
         trainer.train(resume_from_checkpoint=True)
 
     # Save final model

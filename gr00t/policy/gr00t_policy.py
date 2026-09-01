@@ -5,6 +5,7 @@ This module provides the core policy classes for running Gr00t models:
 - Gr00tSimPolicyWrapper: Wrapper for compatibility with existing Gr00t simulation environments
 """
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,38 @@ from gr00t.data.interfaces import BaseProcessor
 from gr00t.data.types import MessageType, ModalityConfig, VLAStepData
 
 from .policy import BasePolicy, PolicyWrapper
+
+_LEGACY_MAMBA_ACTION_SCALES = {
+    "left_arm": 0.2,
+    "right_arm": 0.15,
+    "right_hand": 0.03,
+    "navigate_command": 0.2,
+    "waist": 0.35,
+}
+
+_LEGACY_MAMBA_ACTION_CLIPS = {
+    "left_arm": 0.2,
+    "right_arm": 0.2,
+    "right_hand": 0.05,
+    "navigate_command": 0.35,
+    "waist": 0.12,
+}
+
+_WEAK_MAMBA_ACTION_SCALES = {
+    "left_arm": 1.0,
+    "right_arm": 1.0,
+    "right_hand": 1.0,
+    "navigate_command": 1.0,
+    "waist": 1.0,
+}
+
+_WEAK_MAMBA_ACTION_CLIPS = {
+    "left_arm": 0.2,
+    "right_arm": 0.2,
+    "right_hand": 1.5,
+    "navigate_command": 0.35,
+    "waist": 0.12,
+}
 
 
 def _rec_to_dtype(x: Any, dtype: torch.dtype) -> Any:
@@ -92,6 +125,9 @@ class Gr00tPolicy(BasePolicy):
         self.embodiment_tag = embodiment_tag
         self.modality_configs = self.processor.get_modality_configs()[self.embodiment_tag.value]
         self.collate_fn = self.processor.collator
+        self.system1_type = getattr(self.model.config, "system1_type", "dit")
+        self._maybe_upgrade_legacy_mamba_alignment()
+        self._logged_mamba_alignment = False
 
         # Extract and validate language configuration
         # Currently only supports single language input per timestep
@@ -100,6 +136,24 @@ class Gr00tPolicy(BasePolicy):
         assert len(language_delta_indices) == 1, "Only one language delta index is supported"
         assert len(language_keys) == 1, "Only one language key is supported"
         self.language_key = language_keys[0]
+
+    def _maybe_upgrade_legacy_mamba_alignment(self) -> None:
+        if self.system1_type != "mamba":
+            return
+
+        scales = getattr(self.model.config, "mamba_inference_action_scales", None)
+        clips = getattr(self.model.config, "mamba_inference_action_clip_abs", None)
+        if scales != _LEGACY_MAMBA_ACTION_SCALES or clips != _LEGACY_MAMBA_ACTION_CLIPS:
+            return
+
+        self.model.config.mamba_inference_action_scales = dict(_WEAK_MAMBA_ACTION_SCALES)
+        self.model.config.mamba_inference_action_clip_abs = dict(_WEAK_MAMBA_ACTION_CLIPS)
+        message = (
+            "[Mamba inference alignment] Upgraded legacy checkpoint alignment config "
+            "to weak alignment defaults."
+        )
+        print(message, flush=True)
+        logging.info(message)
 
     def _unbatch_observation(self, value: dict[str, Any]) -> list[dict[str, Any]]:
         """Unbatch a batched observation into a list of single observations.
@@ -140,6 +194,71 @@ class Gr00tPolicy(BasePolicy):
             text=observation["language"][self.language_key][0],
             embodiment=self.embodiment_tag,
         )
+
+    def _align_mamba_action_distribution(
+        self, action: dict[str, np.ndarray]
+    ) -> dict[str, np.ndarray]:
+        if self.system1_type != "mamba":
+            return action
+        if not getattr(self.model.config, "mamba_inference_align_actions", True):
+            return action
+
+        scales = getattr(self.model.config, "mamba_inference_action_scales", {}) or {}
+        clip_abs = getattr(self.model.config, "mamba_inference_action_clip_abs", {}) or {}
+        aligned_action = dict(action)
+        alignment_debug = []
+
+        for key, value in action.items():
+            scale = scales.get(key, 1.0)
+            clip = clip_abs.get(key)
+
+            if isinstance(scale, (list, tuple)):
+                scale_arr = np.asarray(scale, dtype=np.float32)
+                assert value.shape[-1] == scale_arr.shape[0], (
+                    f"Mamba alignment scale for '{key}' must match action dim {value.shape[-1]}. "
+                    f"Got {scale_arr.shape[0]}"
+                )
+                aligned = value * scale_arr.reshape((1,) * (value.ndim - 1) + (-1,))
+                scale_debug = scale_arr.tolist()
+            else:
+                scale_value = float(scale)
+                aligned = value * scale_value
+                scale_debug = scale_value
+
+            if clip is not None:
+                if isinstance(clip, (list, tuple)):
+                    clip_arr = np.asarray(clip, dtype=np.float32)
+                    assert value.shape[-1] == clip_arr.shape[0], (
+                        f"Mamba alignment clip for '{key}' must match action dim {value.shape[-1]}. "
+                        f"Got {clip_arr.shape[0]}"
+                    )
+                    clip_bound = clip_arr.reshape((1,) * (value.ndim - 1) + (-1,))
+                    aligned = np.clip(aligned, -clip_bound, clip_bound)
+                    clip_debug = clip_arr.tolist()
+                else:
+                    clip_value = float(clip)
+                    aligned = np.clip(aligned, -clip_value, clip_value)
+                    clip_debug = clip_value
+            else:
+                clip_debug = None
+
+            aligned = aligned.astype(np.float32, copy=False)
+            aligned_action[key] = aligned
+
+            if not self._logged_mamba_alignment and (key in scales or key in clip_abs):
+                alignment_debug.append(
+                    f"{key}: scale={scale_debug} clip_abs={clip_debug} "
+                    f"before_abs_max={float(np.abs(value).max()):.4f} "
+                    f"after_abs_max={float(np.abs(aligned).max()):.4f}"
+                )
+
+        if alignment_debug and not self._logged_mamba_alignment:
+            message = "[Mamba inference alignment] " + " | ".join(alignment_debug)
+            print(message, flush=True)
+            logging.info(message)
+            self._logged_mamba_alignment = True
+
+        return aligned_action
 
     def check_observation(self, observation: dict[str, Any]) -> None:
         """Validate that the observation has the correct structure and types.
@@ -350,6 +469,7 @@ class Gr00tPolicy(BasePolicy):
         unnormalized_action = self.processor.decode_action(
             normalized_action.cpu().numpy(), self.embodiment_tag, batched_states
         )
+        unnormalized_action = self._align_mamba_action_distribution(unnormalized_action)
 
         # Cast all actions to float32 for consistency
         casted_action = {
@@ -536,9 +656,11 @@ class Gr00tSimPolicyWrapper(PolicyWrapper):
         # Check language modalities (special handling for DC environment compatibility)
         for language_key in modality_configs["language"].modality_keys:
             # PATCH: Legacy compatibility for DC environments
-            # DC envs use 'annotation.human.coarse_action' instead of 'task'
+            # DC envs may use different language keys instead of 'task'
             if language_key == "task" and "annotation.human.coarse_action" in observation:
                 language_key = "annotation.human.coarse_action"
+            elif language_key == "task" and "annotation.human.task_description" in observation:
+                language_key = "annotation.human.task_description"
             # /PATCH
 
             # Check that the expected language key exists
@@ -591,6 +713,8 @@ class Gr00tSimPolicyWrapper(PolicyWrapper):
                     # PATCH: Legacy compatibility for DC environments
                     if key == "task" and "annotation.human.coarse_action" in observation:
                         parsed_key = "annotation.human.coarse_action"
+                    elif key == "task" and "annotation.human.task_description" in observation:
+                        parsed_key = "annotation.human.task_description"
                     # /PATCH
                     else:
                         parsed_key = key

@@ -13,6 +13,7 @@ from gr00t.model.registry import register_model
 import numpy as np
 from termcolor import colored
 import torch
+from torch import nn
 from transformers import AutoModel, AutoProcessor
 
 
@@ -66,6 +67,7 @@ class Gr00tN1d6Pipeline(ModelPipeline):
         # Build transformers loading kwargs from training config
 
         if self.config.training.start_from_checkpoint is not None:
+            ignore_mismatched_sizes = self.config.model.system1_type == "mamba"
             model, loading_info = AutoModel.from_pretrained(
                 self.config.training.start_from_checkpoint,
                 tune_llm=self.config.model.tune_llm,
@@ -73,11 +75,36 @@ class Gr00tN1d6Pipeline(ModelPipeline):
                 tune_projector=self.config.model.tune_projector,
                 tune_diffusion_model=self.config.model.tune_diffusion_model,
                 tune_vlln=self.config.model.tune_vlln,
+                system1_type=self.config.model.system1_type,
+                system1_debug_shapes=self.config.model.system1_debug_shapes,
+                system1_debug_gradients=self.config.model.system1_debug_gradients,
+                debug_robot_mamba_mode=self.config.model.debug_robot_mamba_mode,
+                mamba_num_layers=self.config.model.mamba_num_layers,
+                mamba_d_state=self.config.model.mamba_d_state,
+                mamba_d_conv=self.config.model.mamba_d_conv,
+                mamba_expand=self.config.model.mamba_expand,
+                mamba_dropout=self.config.model.mamba_dropout,
+                require_real_mamba_backend=self.config.model.require_real_mamba_backend,
+                mamba_enable_video_injection=self.config.model.mamba_enable_video_injection,
+                mamba_video_num_layers=self.config.model.mamba_video_num_layers,
                 state_dropout_prob=self.config.model.state_dropout_prob,
                 backbone_trainable_params_fp32=self.config.model.backbone_trainable_params_fp32,
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
+                ignore_mismatched_sizes=ignore_mismatched_sizes,
                 output_loading_info=True,
                 **self.transformers_loading_kwargs,
+            )
+
+            if ignore_mismatched_sizes:
+                logging.info(
+                    "System1 type is mamba; checkpoint loading uses ignore_mismatched_sizes=True "
+                    "(equivalent to non-strict for shape-mismatched keys)."
+                )
+            logging.info(
+                "Checkpoint load summary: missing=%d unexpected=%d mismatched=%d",
+                len(loading_info.get("missing_keys", [])),
+                len(loading_info.get("unexpected_keys", [])),
+                len(loading_info.get("mismatched_keys", [])),
             )
 
             # Initialize mask_tokens if they are not present in the base checkpoint
@@ -91,6 +118,9 @@ class Gr00tN1d6Pipeline(ModelPipeline):
                         0.02 * torch.randn_like(model.action_head.mask_token)
                     )
                 logging.info("mask_token not in checkpoint - initialized")
+
+            if self.config.model.system1_type == "mamba":
+                self._reinitialize_mamba_action_head_parameters(model, loading_info)
 
         else:
             model = self.model_class(
@@ -111,6 +141,58 @@ class Gr00tN1d6Pipeline(ModelPipeline):
         print("Model: ", model)
 
         return model
+
+    def _reinitialize_mamba_action_head_parameters(self, model, loading_info: dict):
+        named_modules = dict(model.named_modules())
+        modules_to_reset = set()
+
+        for key in loading_info.get("missing_keys", []):
+            if key.startswith("action_head."):
+                modules_to_reset.add(key.rsplit(".", 1)[0])
+
+        for name, param in model.named_parameters():
+            if name.startswith("action_head.") and not torch.isfinite(param).all():
+                modules_to_reset.add(name.rsplit(".", 1)[0])
+
+        reset_count = 0
+        for module_name in sorted(modules_to_reset, key=lambda x: x.count(".")):
+            module = named_modules.get(module_name)
+            if module is None:
+                continue
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+                reset_count += 1
+            elif hasattr(module, "_reset_parameters"):
+                module._reset_parameters()
+                reset_count += 1
+
+        remaining_non_finite = []
+        for name, param in model.named_parameters():
+            if not name.startswith("action_head.") or torch.isfinite(param).all():
+                continue
+            remaining_non_finite.append(name)
+            with torch.no_grad():
+                if name.endswith(".bias"):
+                    param.zero_()
+                elif param.ndim == 1 and "norm" in name:
+                    param.fill_(1.0)
+                elif param.ndim == 1:
+                    param.zero_()
+                else:
+                    nn.init.normal_(param, mean=0.0, std=0.02)
+
+        final_non_finite = [
+            name
+            for name, param in model.named_parameters()
+            if name.startswith("action_head.") and not torch.isfinite(param).all()
+        ]
+        logging.info(
+            "Reinitialized Mamba action head parameters: reset_modules=%d remaining_non_finite_after_manual=%d",
+            reset_count,
+            len(final_non_finite),
+        )
+        if final_non_finite:
+            logging.warning("Still non-finite after Mamba reinit: sample=%s", final_non_finite[:20])
 
     def _get_statistics(self) -> dict[str, dict[str, dict[str, dict[str, list[float]]]]] | None:
         return None

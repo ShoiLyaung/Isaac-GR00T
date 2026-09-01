@@ -1,9 +1,11 @@
 from pathlib import Path
 import shutil
+import logging
 
 from transformers import TrainerCallback
 from transformers.trainer_callback import TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
+import torch
 
 
 class CheckpointFormatCallback(TrainerCallback):
@@ -110,3 +112,81 @@ class BestMetricCheckpointCallback(TrainerCallback):
                         shutil.rmtree(self._best_checkpoint_dir)
 
                     self._best_checkpoint_dir = str(best_checkpoint_dir)
+
+
+class FiniteParameterCallback(TrainerCallback):
+    """Periodically inspect model parameters and report the first non-finite tensors."""
+
+    def __init__(
+        self,
+        every_steps: int,
+        module_prefix: str = "action_head",
+        stop_on_non_finite: bool = False,
+    ):
+        self.every_steps = every_steps
+        self.module_prefix = module_prefix
+        self.stop_on_non_finite = stop_on_non_finite
+        self._reported_bad_params = False
+        self._reported_bad_grads = False
+
+    def _collect_non_finite_names(self, model, check_grad: bool) -> list[str]:
+        bad = []
+        for name, param in model.named_parameters():
+            if self.module_prefix and not name.startswith(self.module_prefix):
+                continue
+            tensor = param.grad if check_grad else param
+            if tensor is None:
+                continue
+            if not torch.isfinite(tensor).all():
+                bad.append(name)
+                if len(bad) >= 20:
+                    break
+        return bad
+
+    def on_pre_optimizer_step(self, args, state, control, model=None, **kwargs):
+        if model is None or self.every_steps <= 0:
+            return control
+        pending_step = state.global_step + 1
+        if pending_step % self.every_steps != 0:
+            return control
+
+        bad_grads = self._collect_non_finite_names(model, check_grad=True)
+        if bad_grads and not self._reported_bad_grads:
+            logging.error(
+                "Detected non-finite gradients before optimizer step=%s prefix=%s count=%d sample=%s",
+                pending_step,
+                self.module_prefix,
+                len(bad_grads),
+                bad_grads,
+            )
+            self._reported_bad_grads = True
+        return control
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        if model is None or self.every_steps <= 0:
+            return control
+        if state.global_step <= 0 or state.global_step % self.every_steps != 0:
+            return control
+
+        bad = self._collect_non_finite_names(model, check_grad=False)
+        if not bad:
+            return control
+
+        if not self._reported_bad_params:
+            logging.error(
+                "Detected non-finite parameters at global_step=%s prefix=%s count=%d sample=%s",
+                state.global_step,
+                self.module_prefix,
+                len(bad),
+                bad,
+            )
+            self._reported_bad_params = True
+
+        if self.stop_on_non_finite:
+            logging.error(
+                "Stopping training at global_step=%s because stop_on_non_finite_params=True",
+                state.global_step,
+            )
+            control.should_training_stop = True
+
+        return control

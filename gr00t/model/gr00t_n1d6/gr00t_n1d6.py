@@ -1,6 +1,8 @@
+import logging
 from typing import Tuple
 
 from gr00t.configs.model.gr00t_n1d6 import Gr00tN1d6Config
+from gr00t.model.gr00t_n1d6.mamba_system1 import MambaSystem1ActionHead
 from gr00t.model.modules.dit import AlternateVLDiT, DiT
 from gr00t.model.modules.eagle_backbone import EagleBackbone
 from gr00t.model.modules.embodiment_conditioned_mlp import (
@@ -14,6 +16,14 @@ import torch.nn.functional as F
 from transformers import AutoConfig, AutoModel, PreTrainedModel
 from transformers.feature_extraction_utils import BatchFeature
 import tree
+
+
+def _shape(x):
+    if x is None:
+        return "None"
+    if torch.is_tensor(x):
+        return str(tuple(x.shape))
+    return str(type(x))
 
 
 class Gr00tN1d6ActionHead(nn.Module):
@@ -83,6 +93,9 @@ class Gr00tN1d6ActionHead(nn.Module):
 
         self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
         self.num_timestep_buckets = config.num_timestep_buckets
+        self.system1_debug_shapes = config.system1_debug_shapes
+        self._logged_train_contract = False
+        self._logged_infer_contract = False
         self.set_trainable_parameters(
             config.tune_projector, config.tune_diffusion_model, config.tune_vlln
         )
@@ -141,9 +154,113 @@ class Gr00tN1d6ActionHead(nn.Module):
 
     def process_backbone_output(self, backbone_output: BatchFeature) -> BatchFeature:
         backbone_features = backbone_output["backbone_features"]
-        backbone_features = self.vlln(backbone_features)
+        if isinstance(self.vlln, nn.LayerNorm):
+            norm_dtype = self.vlln.weight.dtype
+            backbone_features = self.vlln(backbone_features.to(dtype=norm_dtype))
+        else:
+            backbone_features = self.vlln(backbone_features)
         backbone_output["backbone_features"] = backbone_features
         return backbone_output
+
+    def _assert_contract(
+        self, backbone_output: BatchFeature, action_input: BatchFeature, require_action: bool
+    ):
+        required_backbone_keys = ["backbone_features", "backbone_attention_mask"]
+        required_action_keys = ["state", "embodiment_id"]
+        if require_action:
+            required_action_keys.extend(["action", "action_mask"])
+
+        missing_backbone = [k for k in required_backbone_keys if k not in backbone_output]
+        missing_action = [k for k in required_action_keys if k not in action_input]
+        if missing_backbone:
+            raise KeyError(f"DiT System1 missing backbone keys: {missing_backbone}")
+        if missing_action:
+            raise KeyError(f"DiT System1 missing action_input keys: {missing_action}")
+
+        backbone_features = backbone_output["backbone_features"]
+        backbone_attention_mask = backbone_output["backbone_attention_mask"]
+        state = action_input["state"]
+        embodiment_id = action_input["embodiment_id"]
+
+        assert backbone_features.ndim == 3, (
+            f"Expected backbone_features [B,L,C], got {_shape(backbone_features)}"
+        )
+        assert backbone_attention_mask.ndim == 2, (
+            "Expected backbone_attention_mask [B,L], "
+            f"got {_shape(backbone_attention_mask)}"
+        )
+        assert backbone_attention_mask.shape[:2] == backbone_features.shape[:2], (
+            f"Mask/backbone mismatch: {_shape(backbone_attention_mask)} "
+            f"vs {_shape(backbone_features)}"
+        )
+        assert state.ndim == 3, f"Expected state [B,S,D], got {_shape(state)}"
+        assert embodiment_id.ndim == 1, f"Expected embodiment_id [B], got {_shape(embodiment_id)}"
+        assert state.shape[0] == backbone_features.shape[0], (
+            f"Batch mismatch state/backbone: {_shape(state)} vs {_shape(backbone_features)}"
+        )
+        assert embodiment_id.shape[0] == state.shape[0], (
+            f"Batch mismatch embodiment/state: {_shape(embodiment_id)} vs {_shape(state)}"
+        )
+
+        if "image_mask" in backbone_output:
+            image_mask = backbone_output["image_mask"]
+            assert image_mask.ndim == 2, f"Expected image_mask [B,L], got {_shape(image_mask)}"
+            assert image_mask.shape[:2] == backbone_features.shape[:2], (
+                f"image_mask/backbone mismatch: {_shape(image_mask)} vs {_shape(backbone_features)}"
+            )
+
+        if require_action:
+            action = action_input["action"]
+            action_mask = action_input["action_mask"]
+            assert action.ndim == 3, f"Expected action [B,T,D], got {_shape(action)}"
+            assert action_mask.ndim == 3, (
+                f"Expected action_mask [B,T,D], got {_shape(action_mask)}"
+            )
+            assert action.shape == action_mask.shape, (
+                f"action/action_mask mismatch: {_shape(action)} vs {_shape(action_mask)}"
+            )
+            assert action.shape[0] == state.shape[0], (
+                f"Batch mismatch action/state: {_shape(action)} vs {_shape(state)}"
+            )
+
+    def _log_contract_once(
+        self,
+        mode: str,
+        backbone_output: BatchFeature,
+        action_input: BatchFeature,
+        action: torch.Tensor | None = None,
+        action_mask: torch.Tensor | None = None,
+    ):
+        if not self.system1_debug_shapes:
+            return
+        if mode == "train" and self._logged_train_contract:
+            return
+        if mode == "infer" and self._logged_infer_contract:
+            return
+
+        logging.info(
+            "[System1:dit][%s] action_input keys=%s backbone_output keys=%s",
+            mode,
+            sorted(action_input.keys()),
+            sorted(backbone_output.keys()),
+        )
+        logging.info(
+            "[System1:dit][%s] shapes: state=%s embodiment_id=%s action=%s action_mask=%s "
+            "backbone_features=%s backbone_attention_mask=%s image_mask=%s",
+            mode,
+            _shape(action_input.get("state")),
+            _shape(action_input.get("embodiment_id")),
+            _shape(action),
+            _shape(action_mask),
+            _shape(backbone_output.get("backbone_features")),
+            _shape(backbone_output.get("backbone_attention_mask")),
+            _shape(backbone_output.get("image_mask")),
+        )
+
+        if mode == "train":
+            self._logged_train_contract = True
+        if mode == "infer":
+            self._logged_infer_contract = True
 
     def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
         """
@@ -154,7 +271,7 @@ class Gr00tN1d6ActionHead(nn.Module):
                 - backbone_features: [B, seq_len, backbone_embedding_dim]
                 - backbone_attention_mask: [B, seq_len]
             action_input: Input containing:
-                - state: [B, state_dim]
+                - state: [B, state_horizon, state_dim]
                 - action: [B, action_horizon, action_dim] (during training)
                 - embodiment_id: [B] (embodiment IDs)
                 - action_mask: [B, action_horizon, action_dim]
@@ -167,16 +284,24 @@ class Gr00tN1d6ActionHead(nn.Module):
         self.set_frozen_modules_to_eval_mode()
 
         backbone_output = self.process_backbone_output(backbone_output)
+        self._assert_contract(backbone_output, action_input, require_action=True)
+        self._log_contract_once(
+            mode="train",
+            backbone_output=backbone_output,
+            action_input=action_input,
+            action=action_input["action"],
+            action_mask=action_input["action_mask"],
+        )
 
         # Get vision and language embeddings.
-        vl_embeds = backbone_output.backbone_features
+        vl_embeds = backbone_output["backbone_features"]
         device = vl_embeds.device
 
         # Get embodiment ID.
-        embodiment_id = action_input.embodiment_id
+        embodiment_id = action_input["embodiment_id"]
 
         # Embed state.
-        state_features = self.state_encoder(action_input.state, embodiment_id)
+        state_features = self.state_encoder(action_input["state"], embodiment_id)
 
         # Dropout state features.
         if self.state_dropout_prob > 0:
@@ -196,7 +321,7 @@ class Gr00tN1d6ActionHead(nn.Module):
             state_features = state_features + noise
 
         # Embed noised action trajectory.
-        actions = action_input.action
+        actions = action_input["action"]
         noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
         t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
         t = t[:, None, None]  # shape (B,1,1) for broadcast
@@ -216,11 +341,11 @@ class Gr00tN1d6ActionHead(nn.Module):
 
         # Join vision, language, state and action embedding along sequence dimension.
         sa_embs = torch.cat((state_features, action_features), dim=1)
-        vl_attn_mask = backbone_output.backbone_attention_mask
+        vl_attn_mask = backbone_output["backbone_attention_mask"]
 
         if self.config.use_alternate_vl_dit:
-            image_mask = backbone_output.image_mask
-            backbone_attention_mask = backbone_output.backbone_attention_mask
+            image_mask = backbone_output["image_mask"]
+            backbone_attention_mask = backbone_output["backbone_attention_mask"]
             model_output, _ = self.model(
                 hidden_states=sa_embs,
                 encoder_hidden_states=vl_embeds,
@@ -243,7 +368,7 @@ class Gr00tN1d6ActionHead(nn.Module):
         pred_actions = pred[:, -actions.shape[1] :]
 
         # Slice out only the action portion of pred and target.
-        action_mask = action_input.action_mask
+        action_mask = action_input["action_mask"]
         action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
         loss = action_loss.sum() / (action_mask.sum() + 1e-6)
 
@@ -266,7 +391,7 @@ class Gr00tN1d6ActionHead(nn.Module):
                 - backbone_features: [B, seq_len, backbone_embedding_dim]
                 - backbone_attention_mask: [B, seq_len]
             action_input: Input containing:
-                - state: [B, state_dim]
+                - state: [B, state_horizon, state_dim]
                 - embodiment_id: [B] (embodiment IDs)
 
         Returns:
@@ -275,13 +400,19 @@ class Gr00tN1d6ActionHead(nn.Module):
                 - state_features: [B, state_horizon, input_embedding_dim]
         """
         backbone_output = self.process_backbone_output(backbone_output)
+        self._assert_contract(backbone_output, action_input, require_action=False)
+        self._log_contract_once(
+            mode="infer",
+            backbone_output=backbone_output,
+            action_input=action_input,
+        )
 
         # Get vision and language embeddings.
-        vl_embeds = backbone_output.backbone_features
-        embodiment_id = action_input.embodiment_id
+        vl_embeds = backbone_output["backbone_features"]
+        embodiment_id = action_input["embodiment_id"]
 
         # Embed state.
-        state_features = self.state_encoder(action_input.state, embodiment_id)
+        state_features = self.state_encoder(action_input["state"], embodiment_id)
 
         return BatchFeature(data={"backbone_features": vl_embeds, "state_features": state_features})
 
@@ -373,7 +504,7 @@ class Gr00tN1d6ActionHead(nn.Module):
                 - backbone_features: [B, seq_len, backbone_embedding_dim]
                 - backbone_attention_mask: [B, seq_len]
             action_input: Input containing:
-                - state: [B, state_dim]
+                - state: [B, state_horizon, state_dim]
                 - embodiment_id: [B] (embodiment IDs)
 
         Returns:
@@ -384,7 +515,7 @@ class Gr00tN1d6ActionHead(nn.Module):
         return self.get_action_with_features(
             backbone_features=features.backbone_features,
             state_features=features.state_features,
-            embodiment_id=action_input.embodiment_id,
+            embodiment_id=action_input["embodiment_id"],
             backbone_output=backbone_output,
         )
 
@@ -451,8 +582,17 @@ class Gr00tN1d6(PreTrainedModel):
             transformers_loading_kwargs=transformers_loading_kwargs,
         )
 
-        # Initialize action head
-        self.action_head = Gr00tN1d6ActionHead(config)
+        # Initialize System1 action head
+        if config.system1_type == "dit":
+            self.action_head = Gr00tN1d6ActionHead(config)
+        elif config.system1_type == "mamba":
+            self.action_head = MambaSystem1ActionHead(config)
+        else:
+            raise ValueError(
+                f"Unsupported system1_type={config.system1_type}. "
+                "Expected one of ['dit', 'mamba']."
+            )
+        logging.info("Initialized System1 type: %s", config.system1_type)
         from .processing_gr00t_n1d6 import Gr00tN1d6DataCollator
 
         self.collator = Gr00tN1d6DataCollator(
@@ -481,17 +621,50 @@ class Gr00tN1d6(PreTrainedModel):
         backbone_inputs = self.backbone.prepare_input(inputs)
         action_inputs = self.action_head.prepare_input(inputs)
 
+        # In DataParallel replicas, parameters can be materialized as plain tensors,
+        # so iter(self.parameters()) may be empty. Fall back to keeping tensor device/dtype.
+        model_device, model_dtype = self._get_target_device_dtype()
+        preferred_input_dtype = self._get_preferred_input_dtype()
+
         # Move to device and dtype
         def to_device_with_dtype(x):
+            if not torch.is_tensor(x):
+                return x
+            target_device = model_device if model_device is not None else x.device
             if torch.is_floating_point(x):
-                return x.to(self.device, dtype=self.dtype)
+                target_dtype = preferred_input_dtype or model_dtype or x.dtype
+                return x.to(target_device, dtype=target_dtype)
             else:
-                return x.to(self.device)
+                return x.to(target_device)
 
         backbone_inputs = tree.map_structure(to_device_with_dtype, backbone_inputs)
         action_inputs = tree.map_structure(to_device_with_dtype, action_inputs)
 
         return backbone_inputs, action_inputs
+
+    def _get_target_device_dtype(self):
+        for p in self.parameters():
+            return p.device, p.dtype
+        # DataParallel replicas may move parameters into `_former_parameters`.
+        for module in self.modules():
+            former = getattr(module, "_former_parameters", None)
+            if former:
+                for p in former.values():
+                    if p is not None and torch.is_tensor(p):
+                        return p.device, p.dtype
+        for b in self.buffers():
+            return b.device, b.dtype
+        return None, None
+
+    def _get_preferred_input_dtype(self):
+        model_dtype = str(getattr(self.config, "model_dtype", "")).lower()
+        if model_dtype in ("bf16", "bfloat16"):
+            return torch.bfloat16
+        if model_dtype in ("fp16", "float16", "half"):
+            return torch.float16
+        if model_dtype in ("fp32", "float32"):
+            return torch.float32
+        return None
 
     def forward(self, inputs: dict) -> BatchFeature:
         """
@@ -527,11 +700,20 @@ class Gr00tN1d6(PreTrainedModel):
 
     @property
     def device(self):
-        return next(iter(self.parameters())).device
+        for p in self.parameters():
+            return p.device
+        for b in self.buffers():
+            return b.device
+        return torch.device("cpu")
 
     @property
     def dtype(self):
-        return next(iter(self.parameters())).dtype
+        for p in self.parameters():
+            return p.dtype
+        for b in self.buffers():
+            if torch.is_floating_point(b):
+                return b.dtype
+        return torch.get_default_dtype()
 
 
 # Register the model with HuggingFace

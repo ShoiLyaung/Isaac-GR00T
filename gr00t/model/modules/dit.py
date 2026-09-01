@@ -16,7 +16,9 @@ class TimestepEncoder(nn.Module):
         self.timestep_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=embedding_dim)
 
     def forward(self, timesteps):
-        dtype = next(self.parameters()).dtype
+        # Be robust when modules are wrapped/sharded and parameter iterators can be empty.
+        param = next(self.parameters(), None)
+        dtype = param.dtype if param is not None else torch.float32
         timesteps_proj = self.time_proj(timesteps).to(dtype)
         timesteps_emb = self.timestep_embedder(timesteps_proj)  # (N, D)
         return timesteps_emb

@@ -61,6 +61,8 @@ class CategorySpecificLinear(nn.Module):
         """
         selected_W = self.W[cat_ids]
         selected_b = self.b[cat_ids]
+        if x.dtype != selected_W.dtype:
+            x = x.to(dtype=selected_W.dtype)
         return torch.bmm(x, selected_W) + selected_b.unsqueeze(1)
 
     def expand_action_dimension(

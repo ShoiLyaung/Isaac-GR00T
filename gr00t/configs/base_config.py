@@ -129,6 +129,14 @@ class Config:
             assert self.model.backbone_model_type in [
                 "eagle",
             ], f"Invalid backbone model type: {self.model.backbone_model_type}"
+            assert self.model.system1_type in [
+                "dit",
+                "mamba",
+            ], f"Invalid system1_type: {self.model.system1_type}"
+            if self.model.system1_type != "mamba" and self.model.mamba_enable_video_injection:
+                warnings.warn(
+                    "mamba_enable_video_injection=True is ignored when system1_type is not 'mamba'."
+                )
 
         # Validate precision settings
         if self.training.fp16 and self.training.bf16:
