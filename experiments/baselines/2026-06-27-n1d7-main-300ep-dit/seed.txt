@@ -1,0 +1,3 @@
+seed: 42
+source: experiment_cfg/config.yaml → training.seed
+applied via: HF TrainingArguments (passed to trainer.seed in launch_finetune_n1d7.py)

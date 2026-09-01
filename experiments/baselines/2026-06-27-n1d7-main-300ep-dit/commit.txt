@@ -1,0 +1,11 @@
+=== git ===
+ae17468d611fb46934d4e9353354f9952dc8e2d9
+main
+dirty=57
+
+=== diff vs HEAD (excluding untracked) ===
+ gr00t/policy/gr00t_policy.py                      | 126 +++++++++++-
+ pyproject.toml                                    |   2 +-
+ scripts/eval/check_sim_eval_ready.py              |  62 ++++++
+ scripts/lerobot_conversion/README.md              |  96 ++++++++-
+ 23 files changed, 1067 insertions(+), 81 deletions(-)

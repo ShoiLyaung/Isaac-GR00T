@@ -1,0 +1,126 @@
+{
+  "experiment_id": "n1d7_main_300ep_baseline_2026-06-27",
+  "run_tag": "n1d7_main_300ep_baseline_20260627_151214",
+  "audit_agent": "baseline",
+  "audit_date": "2026-06-27",
+  "verdict": "baseline_certified",
+  "verdict_reason": "全部 6 项可复现性检查项齐全；config / commit / dataset / seed / env / commands 全部冻结。",
+  "git": {
+    "commit": "ae17468d611fb46934d4e9353354f9952dc8e2d9",
+    "branch": "main",
+    "dirty_at_runtime": 57,
+    "dirty_note": "Working tree had 57 dirty files at run time; pin commit ae17468 to reproduce. Major dirty files include gr00t/policy/gr00t_policy.py (model code), scripts/eval/check_sim_eval_ready.py (eval script), scripts/lerobot_conversion/README.md, pyproject.toml."
+  },
+  "data": {
+    "dataset_path": "/home/sl/datasets/insertion_shaft_main_300ep_groot",
+    "raw_path": "/home/yuqi/.../groot_datasets/raw/insertion_shaft/2026_06_02_main_300ep_NEWEST/",
+    "stage1_cache": "/home/sl/.cache/huggingface/lerobot/yuqi/insertion_shaft_main_300ep",
+    "episodes": 300,
+    "frames": 87944,
+    "fps": 30,
+    "cameras": ["cam_left_high", "cam_left_wrist", "cam_right_wrist"],
+    "state_dim_per_stream": {"left_arm": 7, "right_arm": 7, "left_hand": 6, "right_hand": 6},
+    "action_dim_per_stream": {"left_arm": 7, "right_arm": 7, "left_hand": 6, "right_hand": 6},
+    "missing_streams_vs_env": ["left_leg", "right_leg", "waist", "base_height_command", "navigate_command"]
+  },
+  "model": {
+    "architecture": "Gr00tN1d7",
+    "backbone_substitute": "Qwen/Qwen3-VL-2B-Instruct",
+    "system1_type": "dit",
+    "action_horizon": 40,
+    "max_state_dim": 132,
+    "max_action_dim": 132,
+    "tune_llm": false,
+    "tune_visual": false,
+    "load_bf16": true,
+    "use_flash_attention": true,
+    "diffusion_model_cfg": {
+      "num_layers": 16,
+      "num_attention_heads": 32,
+      "attention_head_dim": 48,
+      "dropout": 0.2,
+      "use_alternate_vl_dit": true,
+      "attend_text_every_n_blocks": 2
+    }
+  },
+  "training": {
+    "max_steps": 5000,
+    "global_batch_size": 4,
+    "batch_size": null,
+    "gradient_accumulation_steps": 1,
+    "learning_rate": 1e-4,
+    "lr_scheduler_type": "cosine",
+    "warmup_ratio": 0.05,
+    "warmup_steps": 0,
+    "weight_decay": 1e-5,
+    "max_grad_norm": 1.0,
+    "optim": "adamw_torch",
+    "tf32": true,
+    "bf16": true,
+    "gradient_checkpointing": true,
+    "save_steps": 500,
+    "save_total_limit": 3,
+    "use_wandb": false,
+    "seed": 42
+  },
+  "runtime": {
+    "wallclock_train_sec": 1557.98,
+    "wallclock_train_human": "25 min 57 s",
+    "throughput_steps_per_sec": 3.21,
+    "throughput_samples_per_sec": 12.84,
+    "train_runtime_field": "1557.9803",
+    "train_loss_final": 0.0424,
+    "train_loss_initial": 1.2938,
+    "train_loss_avg": 0.1932,
+    "final_checkpoint_step": 5000
+  },
+  "checkpoint": {
+    "primary": "/home/sl/Isaac-GR00T/outputs/n1d7_main_300ep_baseline_20260627_151214/checkpoint-5000",
+    "size_gb_estimate": 22,
+    "kept_checkpoints": ["checkpoint-4000", "checkpoint-4500", "checkpoint-5000"]
+  },
+  "eval": {
+    "episodes": 10,
+    "success_rate": 0.0,
+    "results_per_episode": [false, false, false, false, false, false, false, false, false, false],
+    "max_episode_steps": 800,
+    "n_action_steps": 20,
+    "wallclock_sec": 613,
+    "wallclock_human": "10 min 13 s",
+    "seconds_per_episode": 61.22,
+    "env_name": "unitree_g1_isaaclab/Isaac-Insertion-Shaft-G129-Inspire-Joint-Play",
+    "embodiment_tag": "UNITREE_G1",
+    "host": "127.0.0.1",
+    "port": 5756,
+    "unitree_sim_hand_dim": 6,
+    "videos_dir": "/home/sl/Isaac-GR00T/outputs/eval_videos/insertion_shaft/n1d7_main_300ep_eval_v3_20260627_155924",
+    "eval_log": "/home/sl/Isaac-GR00T/outputs/logs/baseline_20260627/eval/n1d7_main_300ep_eval_v3_20260627_155924"
+  },
+  "reproducibility_checklist": {
+    "git_commit": true,
+    "dataset_version": true,
+    "config_snapshot": true,
+    "random_seed": true,
+    "environment": true,
+    "dependency_versions": true,
+    "training_log": true,
+    "evaluation_log": true,
+    "checkpoint_path": true,
+    "no_previous_run_overwritten": true
+  },
+  "known_drift_vs_v1": {
+    "data": "33 ep → 300 ep (9x more episodes)",
+    "steps": "500 → 5000 (10x more steps)",
+    "env_hand_dim": "7 → 6 (fixed policy.py ENV_ACTION_DIMS to match dataset)",
+    "gradient_checkpointing_default": "False → True (set in training_config.py)"
+  },
+  "files": {
+    "config_snapshot": "config_snapshot.yaml",
+    "conf_snapshot": "conf_snapshot.yaml",
+    "commit": "commit.txt",
+    "seed": "seed.txt",
+    "env": "env.txt",
+    "commands": "commands.sh",
+    "audit_report": "README.md"
+  }
+}
