@@ -8,7 +8,7 @@ from typing import Any
 import uuid
 
 from gr00t.data.embodiment_tags import EmbodimentTag
-from gr00t.eval.sim.env_utils import get_embodiment_tag_from_env_name
+from gr00t.eval.sim.env_utils import get_embodiment_tag_from_env_name, is_unitree_isaaclab_env
 from gr00t.eval.sim.wrapper.multistep_wrapper import MultiStepWrapper
 from gr00t.policy import BasePolicy
 import gymnasium as gym
@@ -119,6 +119,34 @@ def get_groot_locomanip_env_fn(
     return env_fn
 
 
+def get_unitree_isaaclab_env_fn(
+    env_name: str,
+    total_n_envs: int,
+):
+    def env_fn():
+        import os
+
+        from gr00t.eval.sim.UnitreeIsaacLab.insertion_env import (
+            create_unitree_isaaclab_insertion_env,
+        )
+
+        if total_n_envs != 1:
+            raise ValueError(
+                "unitree_g1_isaaclab environments currently support only n_envs=1."
+            )
+
+        # Format: unitree_g1_isaaclab/<IsaacLab-task-id>
+        task_name = env_name.split("/", 1)[1] if "/" in env_name else ""
+        if not task_name:
+            task_name = os.environ.get(
+                "UNITREE_SIM_TASK", "Isaac-Insertion-Shaft-G129-Inspire-Joint-Play"
+            )
+
+        return create_unitree_isaaclab_insertion_env(task_name=task_name)
+
+    return env_fn
+
+
 def get_simpler_env_fn(
     env_name: str,
 ):
@@ -162,7 +190,10 @@ def get_gym_env(env_name: str, env_idx: int, total_n_envs: int):
 
     env_embodiment = get_embodiment_tag_from_env_name(env_name)
 
-    if env_embodiment in (
+    if is_unitree_isaaclab_env(env_name):
+        env_fn = get_unitree_isaaclab_env_fn(env_name, total_n_envs)
+
+    elif env_embodiment in (
         EmbodimentTag.GR1,
         EmbodimentTag.ROBOCASA_PANDA_OMRON,
     ):
@@ -290,9 +321,58 @@ def run_rollout_gymnasium_policy(
     policy.reset()
     i = 0
 
+    def _fill_missing_action_keys(
+        action_dict: dict[str, np.ndarray], action_space: gym.Space
+    ) -> dict[str, np.ndarray]:
+        """Backfill missing action keys with zeros for schema-compatible rollout."""
+        if not isinstance(action_space, gym.spaces.Dict):
+            return action_dict
+
+        completed = dict(action_dict)
+        for key, subspace in action_space.spaces.items():
+            assert isinstance(subspace, gym.spaces.Box), (
+                f"Only Box subspaces are supported for action fallback, got {type(subspace)}"
+            )
+
+            if key in completed:
+                value = np.asarray(completed[key], dtype=subspace.dtype)
+                if value.shape != subspace.shape:
+                    # Align sequence length mismatches (e.g., model outputs 16 while env expects 20).
+                    if (
+                        value.ndim == len(subspace.shape)
+                        and value.ndim >= 2
+                        and value.shape[:-2] == subspace.shape[:-2]
+                        and value.shape[-1] == subspace.shape[-1]
+                    ):
+                        target = np.zeros(subspace.shape, dtype=subspace.dtype)
+                        copy_n = min(value.shape[-2], subspace.shape[-2])
+                        if copy_n > 0:
+                            target[..., :copy_n, :] = value[..., :copy_n, :]
+                        if value.shape[-2] < subspace.shape[-2] and copy_n > 0:
+                            pad_n = subspace.shape[-2] - copy_n
+                            target[..., copy_n:, :] = np.repeat(
+                                value[..., copy_n - 1 : copy_n, :], pad_n, axis=-2
+                            )
+                        value = target
+                    else:
+                        value = np.resize(value, subspace.shape).astype(subspace.dtype, copy=False)
+
+                    print(
+                        f"[rollout] Reshaped action key '{key}' from {completed[key].shape} to "
+                        f"{subspace.shape}.",
+                        flush=True,
+                    )
+
+                completed[key] = value
+            else:
+                completed[key] = np.zeros(subspace.shape, dtype=subspace.dtype)
+                print(f"[rollout] Filled missing action key '{key}' with zeros.", flush=True)
+        return completed
+
     pbar = tqdm(total=n_episodes, desc="Episodes")
     while completed_episodes < n_episodes:
         actions, _ = policy.get_action(observations)
+        actions = _fill_missing_action_keys(actions, env.action_space)
         next_obs, rewards, terminations, truncations, env_infos = env.step(actions)
         # NOTE (FY): Currently we don't properly handle policy reset. For now, our policy are stateless,
         # but in the future if we need policy to be stateful, we need to detect env reset and call policy.reset()
@@ -390,13 +470,13 @@ def create_gr00t_sim_policy(
     policy_client_host: str = "",
     policy_client_port: int | None = None,
 ) -> BasePolicy:
-    from gr00t.policy.gr00t_policy import Gr00tPolicy, Gr00tSimPolicyWrapper
-
     if policy_client_host and policy_client_port:
         from gr00t.policy.server_client import PolicyClient
 
         policy = PolicyClient(host=policy_client_host, port=policy_client_port)
     else:
+        from gr00t.policy.gr00t_policy import Gr00tPolicy, Gr00tSimPolicyWrapper
+
         policy = Gr00tSimPolicyWrapper(
             Gr00tPolicy(
                 embodiment_tag=embodiment_tag,
@@ -416,15 +496,17 @@ def run_gr00t_sim_policy(
     policy_client_port: int | None = None,
     n_envs: int = 8,
     n_action_steps: int = 8,
+    video_dir: str = "",
 ):
     embodiment_tag = get_embodiment_tag_from_env_name(env_name)
 
-    if model_path:
-        video_dir = (
-            f"/tmp/sim_eval_videos_{model_path.split('/')[-3]}_ac{n_action_steps}_{uuid.uuid4()}"
-        )
-    else:
-        video_dir = f"/tmp/sim_eval_videos_{env_name}_ac{n_action_steps}_{uuid.uuid4()}"
+    if not video_dir:
+        if model_path:
+            video_dir = (
+                f"/tmp/sim_eval_videos_{model_path.split('/')[-3]}_ac{n_action_steps}_{uuid.uuid4()}"
+            )
+        else:
+            video_dir = f"/tmp/sim_eval_videos_{env_name}_ac{n_action_steps}_{uuid.uuid4()}"
     if env_name.startswith("sim_behavior_r1_pro"):
         # BEHAVIOR sim will crash if decord is imported in video_utils.py
         video_dir = None
@@ -473,6 +555,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--n_envs", type=int, default=8)
     parser.add_argument("--n_action_steps", type=int, default=8)
+    parser.add_argument("--video_dir", type=str, default="")
 
     args = parser.parse_args()
 
@@ -495,6 +578,7 @@ if __name__ == "__main__":
         policy_client_port=args.policy_client_port,
         n_envs=args.n_envs,
         n_action_steps=args.n_action_steps,
+        video_dir=args.video_dir,
     )
     print("results: ", results)
     print("success rate: ", np.mean(results[1]))

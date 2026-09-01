@@ -254,6 +254,61 @@ def check_libero_environments():
     print("✓ LIBERO environment is installed")
 
 
+def check_unitree_isaaclab_insertion_environment():
+    """Lightweight readiness check for Unitree IsaacLab insertion task.
+
+    This check validates module registration/config parsing only.
+    It does not launch the simulator app.
+    """
+
+    unitree_root = os.environ.get("UNITREE_SIM_ROOT", "/home/sl/humanoid-lfd/unitree_sim_isaaclab")
+    python_exec = os.environ.get("UNITREE_SIM_PYTHON", "python3")
+    task_name = os.environ.get(
+        "UNITREE_SIM_TASK", "Isaac-Insertion-Shaft-G129-Inspire-Joint-Play"
+    )
+    assert Path(unitree_root).exists(), (
+        f"Unitree IsaacLab root does not exist: {unitree_root}. "
+        "Set UNITREE_SIM_ROOT to your unitree_sim_isaaclab path."
+    )
+
+    python_script = (
+        "import os, sys\n"
+        f"root = {unitree_root!r}\n"
+        f"task_name = {task_name!r}\n"
+        "os.environ.setdefault('PROJECT_ROOT', root)\n"
+        "sys.path.insert(0, root)\n"
+        "import tasks  # noqa: F401\n"
+        "import gymnasium as gym\n"
+        "assert task_name in gym.registry, f'Task not registered: {task_name}'\n"
+        "from isaaclab_tasks.utils.parse_cfg import parse_env_cfg\n"
+        "cfg = parse_env_cfg(task_name, device='cpu', num_envs=1)\n"
+        "print('Env OK:', type(cfg))\n"
+    )
+    env = dict(os.environ)
+    groot_path = os.path.join(os.path.dirname(__file__), "../..")
+    env["PYTHONPATH"] = f"{unitree_root}:{groot_path}:{env.get('PYTHONPATH', '')}".rstrip(":")
+    env["MPLCONFIGDIR"] = env.get("MPLCONFIGDIR", "/tmp/matplotlib")
+    result = subprocess.run(
+        [python_exec, "-c", python_script],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        raise RuntimeError(
+            "Failed to validate Unitree IsaacLab insertion environment.\n"
+            f"python={python_exec}\nroot={unitree_root}\ntask={task_name}\n"
+            f"stderr:\n{stderr}"
+        )
+    output = result.stdout
+    assert "Env OK:" in output, (
+        "Failed to validate Unitree IsaacLab insertion environment. "
+        f"python={python_exec}, root={unitree_root}, task={task_name}"
+    )
+    print("✓ Unitree IsaacLab insertion environment is installed")
+
+
 if __name__ == "__main__":
     check_uv_installation()
     check_vulkan_installation()
@@ -263,3 +318,10 @@ if __name__ == "__main__":
     check_g1_locomanipulation_environment()
     check_simpler_env_environments()
     check_libero_environments()
+    if os.environ.get("CHECK_UNITREE_ISAACLAB", "0") == "1":
+        check_unitree_isaaclab_insertion_environment()
+    else:
+        print(
+            "i Skipping Unitree IsaacLab insertion check. "
+            "Set CHECK_UNITREE_ISAACLAB=1 to enable."
+        )

@@ -5,6 +5,10 @@ def is_groot_locomanip_env(env_name: str) -> bool:
     return env_name.startswith("gr00tlocomanip")
 
 
+def is_unitree_isaaclab_env(env_name: str) -> bool:
+    return env_name.startswith("unitree_g1_isaaclab")
+
+
 def is_behavior_env(env_name: str) -> bool:
     return env_name.startswith("sim_behavior_r1_pro")
 
@@ -22,6 +26,9 @@ def get_embodiment_tag_from_env_name(env_name: str) -> EmbodimentTag:
             "gr00tlocomanip_g1_new": EmbodimentTag.UNITREE_G1,
         }
         return groot_locomanip_mappings[env_name.split("/")[0]]
+
+    if is_unitree_isaaclab_env(env_name):
+        return EmbodimentTag.UNITREE_G1
 
     if is_behavior_env(env_name):
         return EmbodimentTag.BEHAVIOR_R1_PRO
