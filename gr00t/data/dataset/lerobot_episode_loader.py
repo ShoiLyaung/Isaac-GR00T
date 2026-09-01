@@ -48,6 +48,31 @@ DEFAULT_COLUMN_NAMES = {
 LANG_KEYS = ["task", "sub_task"]
 
 
+# Fallback dims for datasets that do not provide a full-body Unitree_G1 schema.
+_FALLBACK_GROUP_DIMS = {
+    "state": {
+        "left_leg": 6,
+        "right_leg": 6,
+        "waist": 3,
+        "left_arm": 7,
+        "right_arm": 7,
+        "left_hand": 7,
+        "right_hand": 7,
+    },
+    "action": {
+        "left_leg": 6,
+        "right_leg": 6,
+        "waist": 3,
+        "left_arm": 7,
+        "right_arm": 7,
+        "left_hand": 7,
+        "right_hand": 7,
+        "base_height_command": 1,
+        "navigate_command": 3,
+    },
+}
+
+
 def _rec_defaultdict() -> defaultdict:
     """Factory that creates an infinitely nestable defaultdict."""
     return defaultdict(_rec_defaultdict)
@@ -114,6 +139,8 @@ class LeRobotEpisodeLoader:
         self.dataset_path = Path(dataset_path)
         self.video_backend = video_backend
         self.video_backend_kwargs = video_backend_kwargs
+        self._warned_video_aliases: set[str] = set()
+        self._warned_missing_joints: set[str] = set()
 
         if not self.dataset_path.is_dir():
             raise FileNotFoundError(f"Dataset path does not exist: {self.dataset_path}")
@@ -271,12 +298,41 @@ class LeRobotEpisodeLoader:
                 # Slice the array data for this joint group
                 if isinstance(df[original_key].iloc[0], np.ndarray):
                     joint_data[group_name] = df[original_key].map(lambda x: x[start_idx:end_idx])
+                    # Align hand dimensions to 7 for Unitree-compatible inference paths.
+                    expected_dim = _FALLBACK_GROUP_DIMS.get(modality_type, {}).get(group_name)
+                    if expected_dim is not None:
+                        observed_dim = int(joint_data[group_name].iloc[0].shape[0])
+                        if observed_dim < expected_dim:
+                            joint_data[group_name] = joint_data[group_name].map(
+                                lambda x: np.pad(
+                                    x.astype(np.float32),
+                                    (0, expected_dim - x.shape[0]),
+                                    mode="constant",
+                                )
+                            )
+                        elif observed_dim > expected_dim:
+                            joint_data[group_name] = joint_data[group_name].map(
+                                lambda x: x[:expected_dim].astype(np.float32)
+                            )
                 else:
                     joint_data[group_name] = df[original_key]  # for strings and scalars
             else:
-                print(
-                    f"Warning: Joint group '{group_name}' not found in {modality_type} modality. Available groups: {list(modality_info.keys())}"
-                )
+                fallback_dim = _FALLBACK_GROUP_DIMS.get(modality_type, {}).get(group_name)
+                if fallback_dim is not None:
+                    warn_key = f"{modality_type}.{group_name}"
+                    if warn_key not in self._warned_missing_joints:
+                        print(
+                            f"Warning: Joint group '{group_name}' missing in {modality_type}; using zero fallback with dim={fallback_dim}."
+                        )
+                        self._warned_missing_joints.add(warn_key)
+                    joint_data[group_name] = [np.zeros(fallback_dim, dtype=np.float32)] * len(df)
+                else:
+                    warn_key = f"{modality_type}.{group_name}:missing_no_fallback"
+                    if warn_key not in self._warned_missing_joints:
+                        print(
+                            f"Warning: Joint group '{group_name}' not found in {modality_type} modality. Available groups: {list(modality_info.keys())}"
+                        )
+                        self._warned_missing_joints.add(warn_key)
 
         return joint_data
 
@@ -297,8 +353,11 @@ class LeRobotEpisodeLoader:
         """
         # Load raw parquet data using chunking pattern
         chunk_idx = episode_index // self.chunk_size
+        # Support both legacy ({episode_chunk}) and LeRobot-v3 ({chunk_index}) path templates.
         parquet_filename = self.data_path_pattern.format(
-            episode_chunk=chunk_idx, episode_index=episode_index
+            episode_chunk=chunk_idx,
+            chunk_index=chunk_idx,
+            episode_index=episode_index,
         )
         parquet_path = self.dataset_path / parquet_filename
         original_df = pd.read_parquet(parquet_path)
@@ -316,9 +375,20 @@ class LeRobotEpisodeLoader:
                     f"Key {subkey} not found in language modality"
                 )
                 original_key = self.modality_meta["annotation"][subkey].get("original_key", key)
-                loaded_df[f"language.{key}"] = original_df[original_key].apply(
-                    lambda x: self.tasks_map[x]
-                )
+                # Some converted datasets already store raw text in annotation fields
+                # instead of task indices. Fall back to string passthrough in that case.
+                def _resolve_language(x):
+                    if x in self.tasks_map:
+                        return self.tasks_map[x]
+                    try:
+                        xi = int(x)
+                        if xi in self.tasks_map:
+                            return self.tasks_map[xi]
+                    except (TypeError, ValueError):
+                        pass
+                    return str(x)
+
+                loaded_df[f"language.{key}"] = original_df[original_key].apply(_resolve_language)
 
         # Extract joint groups for state and action modalities
         for modality_type in ["state", "action"]:
@@ -355,17 +425,33 @@ class LeRobotEpisodeLoader:
         image_keys = self.modality_configs["video"].modality_keys
 
         for image_key in image_keys:
-            # Resolve the original key used in video file naming
-            original_key = self.modality_meta["video"][image_key].get(
-                "original_key", f"observation.images.{image_key}"
+            # Resolve the original key used in video file naming.
+            # If requested key is missing, alias to the first available camera.
+            if image_key in self.modality_meta["video"]:
+                source_video_key = image_key
+            else:
+                source_video_key = next(iter(self.modality_meta["video"].keys()))
+                warn_key = f"{image_key}->{source_video_key}"
+                if warn_key not in self._warned_video_aliases:
+                    print(
+                        f"Warning: Video key '{image_key}' missing in dataset; aliasing to '{source_video_key}'."
+                    )
+                    self._warned_video_aliases.add(warn_key)
+
+            original_key = self.modality_meta["video"][source_video_key].get(
+                "original_key", f"observation.images.{source_video_key}"
             )
             assert original_key in self.feature_config, (
                 f"Original key {original_key} not found in feature config"
             )
 
             # Construct video file path using pattern
+            # Support both legacy ({episode_chunk}) and LeRobot-v3 ({chunk_index}) path templates.
             video_filename = self.video_path_pattern.format(
-                episode_chunk=chunk_idx, video_key=original_key, episode_index=episode_index
+                episode_chunk=chunk_idx,
+                chunk_index=chunk_idx,
+                video_key=original_key,
+                episode_index=episode_index,
             )
             video_path = self.dataset_path / video_filename
 
@@ -395,21 +481,42 @@ class LeRobotEpisodeLoader:
 
         for modality in mapping.keys():  # state, action
             for joint_key in self.modality_configs[modality].modality_keys:
-                # Determine which statistics key to use
-                if self.modality_meta[modality][joint_key].get("original_key", None) is not None:
-                    stats_key = self.modality_meta[modality][joint_key]["original_key"]
-                else:
-                    stats_key = mapping[modality]
+                if joint_key in self.modality_meta[modality]:
+                    # Determine which statistics key to use
+                    if self.modality_meta[modality][joint_key].get("original_key", None) is not None:
+                        stats_key = self.modality_meta[modality][joint_key]["original_key"]
+                    else:
+                        stats_key = mapping[modality]
 
-                # Extract the relevant slice of statistics
-                start_idx, end_idx = (
-                    self.modality_meta[modality][joint_key]["start"],
-                    self.modality_meta[modality][joint_key]["end"],
-                )
-                for stat_type in self.stats[stats_key].keys():  # mean, std, min, max, q01, q99
-                    dataset_statistics[modality][joint_key][stat_type] = self.stats[stats_key][
-                        stat_type
-                    ][start_idx:end_idx]
+                    # Extract the relevant slice of statistics
+                    start_idx, end_idx = (
+                        self.modality_meta[modality][joint_key]["start"],
+                        self.modality_meta[modality][joint_key]["end"],
+                    )
+                    for stat_type in self.stats[stats_key].keys():  # mean, std, min, max, q01, q99
+                        values = self.stats[stats_key][stat_type][start_idx:end_idx]
+                        expected_dim = _FALLBACK_GROUP_DIMS.get(modality, {}).get(joint_key)
+                        if expected_dim is not None and len(values) < expected_dim:
+                            if stat_type == "std":
+                                values = list(values) + [1.0] * (expected_dim - len(values))
+                            else:
+                                values = list(values) + [0.0] * (expected_dim - len(values))
+                        dataset_statistics[modality][joint_key][stat_type] = values
+                else:
+                    fallback_dim = _FALLBACK_GROUP_DIMS.get(modality, {}).get(joint_key)
+                    if fallback_dim is None:
+                        raise KeyError(
+                            f"{joint_key} missing in modality metadata and no fallback dim is registered for modality={modality}"
+                        )
+                    print(
+                        f"Warning: Statistics for missing key '{modality}.{joint_key}' are synthesized with neutral defaults."
+                    )
+                    dataset_statistics[modality][joint_key]["mean"] = [0.0] * fallback_dim
+                    dataset_statistics[modality][joint_key]["std"] = [1.0] * fallback_dim
+                    dataset_statistics[modality][joint_key]["min"] = [-1.0] * fallback_dim
+                    dataset_statistics[modality][joint_key]["max"] = [1.0] * fallback_dim
+                    dataset_statistics[modality][joint_key]["q01"] = [-1.0] * fallback_dim
+                    dataset_statistics[modality][joint_key]["q99"] = [1.0] * fallback_dim
         stats = _to_plain_dict(dataset_statistics)
         # Directly add relative action stats
         if "relative_action" in self.stats:
