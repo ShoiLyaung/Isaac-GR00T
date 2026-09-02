@@ -67,9 +67,6 @@ HORIZON = 40
 SOURCE_SPAN = 40
 STAT_NAMES = ("mean", "std", "min", "max", "q01", "q99")
 
-RIGHT_INSPIRE_SIM_INDICES = (36, 37, 35, 34, 48, 38)
-LEFT_INSPIRE_SIM_INDICES = (31, 32, 30, 29, 43, 33)
-
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -495,51 +492,6 @@ def resolve_decoded_action_26d(
     return active, clamp_count
 
 
-def inspire_u_to_rad(u: np.ndarray) -> np.ndarray:
-    u = np.asarray(u, dtype=np.float32)
-    if u.shape[-1] != 6 or not np.isfinite(u).all():
-        raise ValueError("Inspire u must be finite [...,6]")
-    if np.any(u < 0.0) or np.any(u > 1.0):
-        raise ValueError("Inspire u must be within [0,1]")
-    result = np.empty_like(u)
-    result[..., :4] = 1.7 * (1.0 - u[..., :4])
-    result[..., 4] = 0.5 * (1.0 - u[..., 4])
-    result[..., 5] = 1.3 - 1.4 * u[..., 5]
-    return result
-
-
-def inspire_rad_to_u(rad: np.ndarray) -> np.ndarray:
-    rad = np.asarray(rad, dtype=np.float32)
-    if rad.shape[-1] != 6 or not np.isfinite(rad).all():
-        raise ValueError("Inspire radians must be finite [...,6]")
-    result = np.empty_like(rad)
-    result[..., :4] = (1.7 - rad[..., :4]) / 1.7
-    result[..., 4] = (0.5 - rad[..., 4]) / 0.5
-    result[..., 5] = (1.3 - rad[..., 5]) / 1.4
-    return result
-
-
-def scatter_inspire_u_to_sim_joint_targets(
-    full_joint_targets: np.ndarray,
-    left_u: np.ndarray,
-    right_u: np.ndarray,
-) -> np.ndarray:
-    """Apply the frozen Inspire-6 order exactly once at simulator ingress."""
-
-    targets = np.asarray(full_joint_targets, dtype=np.float32)
-    maximum_index = max(*LEFT_INSPIRE_SIM_INDICES, *RIGHT_INSPIRE_SIM_INDICES)
-    if targets.ndim != 1 or targets.shape[0] <= maximum_index:
-        raise ValueError("Full simulator joint target vector is too short")
-    result = targets.copy()
-    left_rad = inspire_u_to_rad(left_u)
-    right_rad = inspire_u_to_rad(right_u)
-    if left_rad.shape != (6,) or right_rad.shape != (6,):
-        raise ValueError("Simulator ingress expects one six-dimensional command per hand")
-    result[list(LEFT_INSPIRE_SIM_INDICES)] = left_rad
-    result[list(RIGHT_INSPIRE_SIM_INDICES)] = right_rad
-    return result
-
-
 def _stats_for_trajectories(values: np.ndarray) -> dict[str, list[list[float]]]:
     if values.ndim != 3 or values.shape[1:] != (HORIZON, 7):
         raise ValueError(f"Expected [N,40,7], got {values.shape}")
@@ -649,9 +601,6 @@ __all__ = [
     "build_metadata_loader_view",
     "compute_h40_relative_statistics",
     "h40_native30_offsets",
-    "inspire_rad_to_u",
-    "inspire_u_to_rad",
     "load_adapter_config",
     "resolve_decoded_action_26d",
-    "scatter_inspire_u_to_sim_joint_targets",
 ]
