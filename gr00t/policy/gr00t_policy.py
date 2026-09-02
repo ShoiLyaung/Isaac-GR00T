@@ -416,7 +416,9 @@ class Gr00tPolicy(BasePolicy):
 
         Args:
             observation: Batched observation dictionary
-            options: Optional parameters (currently unused)
+            options: Optional model parameters plus an in-process
+                ``codec_evidence_sample`` value. EpisodeT8View objects are not a stock
+                ZMQ wire format; an external runtime wrapper must materialize them.
 
         Returns:
             Tuple of (actions_dict, info_dict)
@@ -425,13 +427,29 @@ class Gr00tPolicy(BasePolicy):
         unbatched_observations = self._unbatch_observation(observation)
         processed_inputs = []
 
+        model_options = dict(options or {})
+        codec_samples = model_options.pop("codec_evidence_sample", None)
+        processor_codec_enabled = bool(getattr(self.processor, "codec_evidence_enabled", False))
+        if codec_samples is not None and not processor_codec_enabled:
+            raise ValueError("Codec evidence was supplied to a native processor")
+        if processor_codec_enabled and codec_samples is None:
+            raise KeyError("Codec-enabled policy requires options['codec_evidence_sample']")
+        if codec_samples is not None:
+            if not isinstance(codec_samples, list):
+                codec_samples = [codec_samples]
+            if len(codec_samples) != len(unbatched_observations):
+                raise ValueError("codec_evidence_sample count must equal policy batch size")
+
         # Step 2: Process each observation through the VLA processor
         states = []
-        for obs in unbatched_observations:
+        for index, obs in enumerate(unbatched_observations):
             vla_step_data = self._to_vla_step_data(obs)
             states.append(vla_step_data.states)  # dict[str, np.ndarray[np.float32, (T, D)]]
             messages = [{"type": MessageType.EPISODE_STEP.value, "content": vla_step_data}]
-            processed_inputs.append(self.processor(messages))
+            processed = self.processor(messages)
+            if codec_samples is not None:
+                processed["codec_evidence_sample"] = codec_samples[index]
+            processed_inputs.append(processed)
 
         # Step 3: Collate processed inputs into a single batch for model
         collated_inputs = self.collate_fn(processed_inputs)
@@ -439,7 +457,10 @@ class Gr00tPolicy(BasePolicy):
 
         # Step 4: Run model inference to predict actions
         with torch.inference_mode():
-            model_pred = self.model.get_action(**collated_inputs)
+            model_pred = self.model.get_action(
+                **collated_inputs,
+                options=model_options or None,
+            )
         normalized_action = model_pred["action_pred"].float()
 
         # Step 5: Decode actions from normalized space back to physical units

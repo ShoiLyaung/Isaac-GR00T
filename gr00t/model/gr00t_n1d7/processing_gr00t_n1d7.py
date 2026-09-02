@@ -129,6 +129,20 @@ def build_processor(model_name: str, transformers_loading_kwargs: dict) -> Qwen3
     return Qwen3VLProcessor.from_pretrained(model_name, **transformers_loading_kwargs)
 
 
+def _parse_optional_codec_model_config(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if type(value) is not dict:
+        raise TypeError("codec_evidence must be a dict or None")
+    if type(value.get("enabled", False)) is not bool:
+        raise TypeError("codec_evidence.enabled must be boolean")
+    if not value.get("enabled", False):
+        return None
+    from gr00t.data.codec_evidence.config import parse_codec_model_config
+
+    return parse_codec_model_config(value)
+
+
 def validate_action_horizons(modality_configs, max_action_horizon: int) -> None:
     """Fail at processor construction if any configured embodiment's action horizon
     (the number of action ``delta_indices``) exceeds ``max_action_horizon``.
@@ -162,6 +176,7 @@ class Gr00tN1d7DataCollator:
         model_name: str,
         model_type: str = "qwen",
         transformers_loading_kwargs: dict = {},
+        codec_evidence_enabled: bool = False,
     ):
         ### We need to use the same processor for padding input ids and concat
         self.processor = build_processor(model_name, transformers_loading_kwargs)
@@ -169,6 +184,11 @@ class Gr00tN1d7DataCollator:
         self.processor.tokenizer.padding_side = "left"
         self.model_type = model_type
         self.model_name = model_name
+        self.codec_evidence_enabled = codec_evidence_enabled
+        if codec_evidence_enabled:
+            from gr00t.data.codec_evidence.torch_backend import TorchCodecEvidenceCollator
+
+            self.codec_evidence_collator = TorchCodecEvidenceCollator()
 
     def __call__(self, features: list[Dict[str, Any]]) -> BatchFeature:
         batch = {}
@@ -195,6 +215,14 @@ class Gr00tN1d7DataCollator:
                 )
                 for k, v in vlm_inputs.items():
                     batch[k] = v
+            elif key == "codec_evidence_sample":
+                if not getattr(self, "codec_evidence_enabled", False):
+                    raise ValueError("Codec evidence was emitted while the collator is disabled")
+                if len(values) != len(features):
+                    raise ValueError("Codec evidence is missing from one or more batch elements")
+                batch["codec_evidence"] = self.codec_evidence_collator(values)
+            elif key == "codec_evidence":
+                raise ValueError("Only codec_evidence_sample may enter the collator")
             elif key in (
                 "pixel_values",
                 "image_grid_thw",
@@ -243,6 +271,7 @@ class Gr00tN1d7Processor(BaseProcessor):
         state_dropout_prob: float = 0.0,
         # Normalization
         use_mean_std: bool = False,
+        codec_evidence: dict[str, Any] | None = None,
         letter_box_transform: bool = False,
     ):
         self.modality_configs = parse_modality_configs(modality_configs)
@@ -260,6 +289,10 @@ class Gr00tN1d7Processor(BaseProcessor):
         # Save state action processor settings
         self.use_percentiles = use_percentiles
         self.use_mean_std = use_mean_std
+        parsed_codec_evidence = _parse_optional_codec_model_config(codec_evidence)
+        self.codec_evidence_enabled = parsed_codec_evidence is not None
+        if parsed_codec_evidence is not None:
+            self.codec_evidence = parsed_codec_evidence
         self.clip_outliers = clip_outliers
         self.apply_sincos_state_encoding = apply_sincos_state_encoding
         self.use_relative_action = use_relative_action
@@ -323,11 +356,14 @@ class Gr00tN1d7Processor(BaseProcessor):
                 color_jitter_params,
                 letter_box_transform=self.letter_box_transform,
             )
-        self._collator = self.data_collator_class(
-            model_name=model_name,
-            model_type=model_type,
-            transformers_loading_kwargs=transformers_loading_kwargs,
-        )
+        collator_kwargs = {
+            "model_name": model_name,
+            "model_type": model_type,
+            "transformers_loading_kwargs": transformers_loading_kwargs,
+        }
+        if self.codec_evidence_enabled:
+            collator_kwargs["codec_evidence_enabled"] = True
+        self._collator = self.data_collator_class(**collator_kwargs)
         self.train()
 
     @property
@@ -402,6 +438,30 @@ class Gr00tN1d7Processor(BaseProcessor):
         return self.state_action_processor.unapply_action(
             out_dict, embodiment_tag.value, state=state
         )
+
+    def _collate_codec_evidence_observation(
+        self, observation: dict[str, Any], batch_size: int
+    ) -> dict[str, Any]:
+        samples = observation.get("codec_evidence_sample")
+        if samples is None:
+            raise KeyError("Enabled Codec evidence requires codec_evidence_sample")
+        if not isinstance(samples, list):
+            samples = [samples]
+        if len(samples) != batch_size:
+            raise ValueError("codec_evidence_sample count must equal batch size")
+        from gr00t.data.codec_evidence.episode_bundle import EpisodeT8View
+
+        for sample in samples:
+            if not isinstance(sample, EpisodeT8View):
+                raise TypeError("Only causal EpisodeT8View evidence is supported")
+            if sample.key.camera_id != self.codec_evidence["camera_id"]:
+                raise ValueError("Codec evidence camera_id differs from processor config")
+            if sample.key.source_kind != self.codec_evidence["source_kind"]:
+                raise ValueError("Codec evidence source_kind differs from processor config")
+        collator = getattr(self._collator, "codec_evidence_collator", None)
+        if collator is None:
+            raise RuntimeError("Enabled Codec processor has no evidence collator")
+        return collator(samples)
 
     def unapply(
         self,
@@ -540,6 +600,10 @@ class Gr00tN1d7Processor(BaseProcessor):
         if action_horizon > 0:
             action_mask[:, :action_horizon] = 1.0
         transformed_observation["action_mask"] = action_mask
+        if self.codec_evidence_enabled:
+            transformed_observation["codec_evidence"] = self._collate_codec_evidence_observation(
+                observation, B
+            )
 
         return BatchFeature(transformed_observation)
 
@@ -790,6 +854,8 @@ class Gr00tN1d7Processor(BaseProcessor):
                 "state_dropout_prob": self.state_dropout_prob,
             },
         }
+        if getattr(self, "codec_evidence_enabled", False):
+            config["processor_kwargs"]["codec_evidence"] = dict(self.codec_evidence)
         with open(main_config_file, "w") as f:
             json.dump(config, f, indent=2)
         # Save statistics
@@ -877,6 +943,7 @@ class Gr00tN1d7Processor(BaseProcessor):
                 "max_action_horizon",
                 "max_state_dim",
                 "max_action_dim",
+                "codec_evidence",
             ]
             for key in override_keys:
                 if key in kwargs:

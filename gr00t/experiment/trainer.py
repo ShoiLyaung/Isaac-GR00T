@@ -166,6 +166,13 @@ class Gr00tTrainer(Trainer):
         self.multiprocessing_context = kwargs.pop("multiprocessing_context", "fork")
         super().__init__(*args, **kwargs)
 
+    def create_optimizer(self):
+        optimizer = super().create_optimizer()
+        validator = getattr(self.model, "validate_optimizer_trainability", None)
+        if callable(validator):
+            self.optimizer_trainability_summary = validator(optimizer)
+        return optimizer
+
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
         # Hide epoch from logged metrics as it's misleading for Iterable datasets.
         epoch = self.state.epoch

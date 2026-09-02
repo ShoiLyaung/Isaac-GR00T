@@ -122,6 +122,10 @@ class Gr00tN1d7Config(PretrainedConfig):
     # Multi-embodiment parameters
     max_num_embodiments: int = 32
 
+    # Optional additive action-side Codec evidence. Absence preserves native behavior.
+    codec_evidence: dict | None = None
+    codec_trainability: str | None = None
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         for key, value in kwargs.items():
@@ -156,6 +160,11 @@ class Gr00tN1d7Config(PretrainedConfig):
                 "crop_fraction",
             }
             cfg = {k: v for k, v in cfg.items() if k not in exclude_keys}
+
+        if cfg.get("codec_evidence") is None:
+            cfg.pop("codec_evidence", None)
+        if cfg.get("codec_trainability") is None:
+            cfg.pop("codec_trainability", None)
 
         return cfg
 

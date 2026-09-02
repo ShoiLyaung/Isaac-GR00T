@@ -67,6 +67,12 @@ class FinetuneConfig:
     tune_diffusion_model: bool = True
     """If True, fine-tune the diffusion-based action decoder (if present in the model)."""
 
+    tune_vlln: bool = True
+    """If True, fine-tune VLLN and optional visual-language self-attention modules."""
+
+    codec_trainability: str | None = None
+    """Optional strict trainability mode; the Codec branch supports ``codec_only``."""
+
     state_dropout_prob: float = 0.2
     """
     Dropout probability applied to state inputs for regularization during training.
@@ -130,6 +136,9 @@ class FinetuneConfig:
     """
 
     # --- Training Configuration ---
+    seed: int = 42
+    """Explicit data/model seed recorded in the resolved configuration."""
+
     global_batch_size: int = 64
     """Total batch summed across all GPUs in one forward/backward, BEFORE
     gradient accumulation."""
