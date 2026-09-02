@@ -28,3 +28,8 @@ Pass the generated manifest with
 and set `--codec-trainability codec_only`. Historical C5 20k results remain
 bound to source commit `0696eaa`; this branch does not relabel them as new
 training or evaluator evidence.
+
+`checkpoint_smoke.py` is a bounded compatibility probe for a retained causal
+checkpoint. It strictly compares model/processor Codec identity and requests
+one public-policy action with one in-process `EpisodeT8View`; it does not run a
+simulator or establish task quality.
