@@ -25,6 +25,65 @@ from gr00t.data.stats import generate_rel_stats, generate_stats
 from gr00t.utils.dist_utils import run_or_wait_on_rank0
 
 
+def _resolve_all_lerobot_codec_config(dataset_specs):
+    """Require one identical optional Codec config across all joint-data leaves."""
+
+    from gr00t.data.dataset.g1_all_lerobot_h40_adapter import (
+        load_adapter_config,
+        parse_adapter_codec_evidence_config,
+    )
+
+    resolved = []
+    for dataset_spec in dataset_specs:
+        if getattr(dataset_spec, "dataset_adapter", None) != "g1_all_lerobot_h40_v1":
+            continue
+        adapter_config_path = getattr(dataset_spec, "adapter_config_path", None)
+        if adapter_config_path is None:
+            raise ValueError("G1 all-LeRobot H40 adapter requires adapter_config_path")
+        resolved.append(
+            parse_adapter_codec_evidence_config(load_adapter_config(adapter_config_path))
+        )
+    if not resolved:
+        return None
+    enabled = [config for config in resolved if config is not None]
+    if not enabled:
+        return None
+    if len(enabled) != len(resolved):
+        raise ValueError("Every G1 all-LeRobot leaf must enable Codec evidence together")
+    expected = enabled[0]
+    if any(config != expected for config in enabled[1:]):
+        raise ValueError("Every G1 all-LeRobot leaf must share one Codec config")
+    return expected
+
+
+def _validate_all_lerobot_codec_store_coverage(codec_config, identities_by_uid, store):
+    """Require exact selected-episode coverage and identity before training."""
+
+    from gr00t.data.codec_evidence.codec_contract import PRODUCTION_FIXTURE_MODE
+    from gr00t.data.codec_evidence.episode_bundle import EpisodeBundleKey
+    from gr00t.data.codec_evidence.identity import validate_episode_identity_preimage
+
+    expected_keys = frozenset(
+        EpisodeBundleKey(uid, codec_config.camera_id, codec_config.source_kind)
+        for uid in identities_by_uid
+    )
+    if store.keys != expected_keys:
+        raise ValueError(
+            "G1 all-LeRobot Codec fixture coverage differs from selected episodes: "
+            f"missing={len(expected_keys - store.keys)}, extra={len(store.keys - expected_keys)}"
+        )
+    for key in expected_keys:
+        expected_identity = dict(identities_by_uid[key.episode_uid])
+        expected_identity.pop("episode_uid")
+        observed = store.identity(key)
+        if observed["codec_contract"]["fixture_mode"] != PRODUCTION_FIXTURE_MODE:
+            raise ValueError("G1 all-LeRobot training requires a production Codec fixture")
+        if validate_episode_identity_preimage(
+            observed["episode_identity"]
+        ) != validate_episode_identity_preimage(expected_identity):
+            raise ValueError("Codec bundle episode identity differs from the adapter")
+
+
 class DatasetFactory:
     """
     Factory class for building training datasets. Model-agnostic.
@@ -40,6 +99,20 @@ class DatasetFactory:
         assert self.config.training.eval_strategy == "no", (
             "Sharded dataset does not support evaluation sets"
         )
+
+        codec_config = _resolve_all_lerobot_codec_config(self.config.data.datasets)
+        codec_identities: dict[str, dict] = {}
+        codec_uids: set[str] = set()
+        codec_store = None
+        if codec_config is not None:
+            from gr00t.data.codec_evidence.dataset import episode_bundle_store_from_index_manifest
+
+            codec_store = episode_bundle_store_from_index_manifest(
+                codec_config.fixture_root,
+                fixture_manifest_sha256=codec_config.fixture_manifest_sha256,
+                camera_id=codec_config.camera_id,
+                source_kind=codec_config.source_kind,
+            )
 
         all_datasets = []
         all_weights = []
@@ -97,6 +170,30 @@ class DatasetFactory:
                         **common_kwargs,
                         adapter_config_path=adapter_config_path,
                     )
+                    if codec_config is not None:
+                        episode_uids = tuple(dataset.episode_loader.selected_episode_uids)
+                        identities = tuple(dataset.episode_loader.codec_episode_identities)
+                        if len(identities) != len(episode_uids):
+                            raise ValueError("Codec episode identity coverage is incomplete")
+                        if duplicate_uids := codec_uids.intersection(episode_uids):
+                            raise ValueError(
+                                f"Codec episode UIDs collide across sources: {len(duplicate_uids)}"
+                            )
+                        codec_uids.update(episode_uids)
+                        for episode_uid, identity in zip(episode_uids, identities, strict=True):
+                            if identity.get("episode_uid") != episode_uid:
+                                raise ValueError("Codec identity UID differs from its index")
+                            codec_identities[episode_uid] = identity
+                        from gr00t.data.codec_evidence.dataset import (
+                            maybe_wrap_codec_evidence_dataset,
+                        )
+
+                        dataset = maybe_wrap_codec_evidence_dataset(
+                            dataset,
+                            adapter_config_path,
+                            store=codec_store,
+                            config=codec_config,
+                        )
                 else:
                     raise ValueError(f"Unknown dataset adapter: {adapter}")
                 datasets.append(dataset)
@@ -106,6 +203,13 @@ class DatasetFactory:
                 weight = relative_length * dataset_spec.mix_ratio
                 all_datasets.append(dataset)
                 all_weights.append(weight)
+
+        if codec_config is not None:
+            _validate_all_lerobot_codec_store_coverage(
+                codec_config,
+                codec_identities,
+                codec_store,
+            )
 
         alpha = getattr(self.config.data, "ds_weights_alpha", None)
         if alpha is not None and len(all_datasets) > 1:

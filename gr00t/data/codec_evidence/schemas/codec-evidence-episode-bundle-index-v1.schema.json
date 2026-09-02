@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://groot.local/schemas/codec-evidence-episode-bundle-index-v1.schema.json",
+  "title": "Codec Evidence Episode Bundle Index v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "complete",
+    "camera_id",
+    "source_kind",
+    "identity",
+    "codec_contract",
+    "bundles"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "codec-evidence-episode-bundle-index-v1"
+    },
+    "complete": {
+      "const": true
+    },
+    "camera_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_kind": {
+      "enum": [
+        "RAW_JPEG_DERIVED",
+        "NATIVE_CANONICAL_DECODED_DERIVED"
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["episode_identity_schema_version", "codec_contract_sha256"],
+      "properties": {
+        "episode_identity_schema_version": {"const": "codec-evidence-episode-identity-v1"},
+        "codec_contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "codec_contract": {"$ref": "codec-evidence-global-contract-v2.schema.json"},
+    "bundles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "episode_uid",
+          "camera_id",
+          "source_kind",
+          "relative_path",
+          "sha256",
+          "bytes"
+        ],
+        "properties": {
+          "episode_uid": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "camera_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_kind": {
+            "enum": [
+              "RAW_JPEG_DERIVED",
+              "NATIVE_CANONICAL_DECODED_DERIVED"
+            ]
+          },
+          "relative_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

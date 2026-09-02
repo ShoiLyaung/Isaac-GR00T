@@ -347,6 +347,7 @@ def test_factory_adapter_never_writes_canonical_stats():
     with (
         patch("gr00t.data.dataset.factory.generate_stats") as generate_stats,
         patch("gr00t.data.dataset.factory.generate_rel_stats") as generate_rel_stats,
+        patch("gr00t.data.dataset.factory._resolve_all_lerobot_codec_config", return_value=None),
         patch(
             "gr00t.data.dataset.g1_all_lerobot_h40_adapter.G1AllLerobotH40SingleStepDataset",
             return_value=fake_dataset,
