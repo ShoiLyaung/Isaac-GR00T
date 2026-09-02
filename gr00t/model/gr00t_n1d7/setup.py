@@ -71,13 +71,50 @@ class Gr00tN1d7Pipeline(ModelPipeline):
         return self.config.model
 
     def setup(self):
+        self.codec_evidence_config = self._resolve_codec_evidence_config()
+        if self.codec_evidence_config is not None:
+            self.model_config.codec_evidence = self.codec_evidence_config.to_model_dict()
         self.model = self._create_model()
         self.train_dataset, self.eval_dataset = self._create_dataset(self.save_cfg_dir)
         self.data_collator = self._create_collator()
 
+    def _resolve_codec_evidence_config(self):
+        resolved = []
+        for dataset_spec in self.config.data.datasets:
+            if dataset_spec.dataset_adapter != "g1_id10_h40_native30_v1":
+                continue
+            if dataset_spec.adapter_config_path is None:
+                raise ValueError("G1 ID10/H40/native30 adapter requires adapter_config_path")
+            with Path(dataset_spec.adapter_config_path).open("r", encoding="utf-8") as stream:
+                adapter_config = json.load(stream)
+            codec_block = adapter_config.get("codec_evidence")
+            if codec_block is None:
+                resolved.append(None)
+                continue
+            if not isinstance(codec_block, dict):
+                raise TypeError("codec_evidence must be an object")
+            enabled = codec_block.get("enabled", False)
+            if not isinstance(enabled, bool):
+                raise TypeError("codec_evidence.enabled must be boolean")
+            if not enabled:
+                resolved.append(None)
+                continue
+            from gr00t.data.codec_evidence.config import parse_codec_evidence_config
+
+            resolved.append(parse_codec_evidence_config(codec_block))
+        if not resolved:
+            return None
+        first = resolved[0]
+        if any(item != first for item in resolved[1:]):
+            raise ValueError("Every dataset in one run must use identical codec_evidence config")
+        return first
+
     def _create_model(self):
         """Setup model with proper vocabulary expansion."""
         skip_weight_loading = getattr(self.config.training, "skip_weight_loading", False)
+        codec_model_kwargs = {}
+        if self.codec_evidence_config is not None:
+            codec_model_kwargs["codec_evidence"] = self.codec_evidence_config.to_model_dict()
         if self.config.training.start_from_checkpoint is not None and not skip_weight_loading:
             model, loading_info = AutoModel.from_pretrained(
                 self.config.training.start_from_checkpoint,
@@ -92,6 +129,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 load_bf16=self.config.model.load_bf16,
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
                 output_loading_info=True,
+                **codec_model_kwargs,
                 **self.transformers_loading_kwargs,
             )
 
@@ -106,7 +144,17 @@ class Gr00tN1d7Pipeline(ModelPipeline):
 
             unexpected_keys = loading_info.get("unexpected_keys", [])
             mismatched_keys = loading_info.get("mismatched_keys", [])
-            other_missing = [k for k in missing_keys if "mask_token" not in k]
+            allowed_missing_prefixes = (
+                ("action_head.codec_conditioning.",)
+                if self.codec_evidence_config is not None
+                else ()
+            )
+            other_missing = [
+                key
+                for key in missing_keys
+                if "mask_token" not in key
+                and not key.startswith(allowed_missing_prefixes)
+            ]
             errors = []
             if other_missing:
                 errors.append(f"Missing keys ({len(other_missing)}): {other_missing}")
@@ -151,6 +199,11 @@ class Gr00tN1d7Pipeline(ModelPipeline):
 
     def _create_dataset(self, save_cfg_dir: Path):
         """Create appropriate dataset based on task and mode."""
+        codec_processor_kwargs = {}
+        if self.codec_evidence_config is not None:
+            codec_processor_kwargs["codec_evidence"] = (
+                self.codec_evidence_config.to_model_dict()
+            )
         if self.config.training.start_from_checkpoint is not None:
             processor = AutoProcessor.from_pretrained(
                 self.config.training.start_from_checkpoint,
@@ -177,6 +230,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 exclude_state=self.model_config.exclude_state,
                 state_dropout_prob=self.model_config.state_dropout_prob,
                 use_mean_std=self.model_config.use_mean_std,
+                **codec_processor_kwargs,
                 **self.transformers_loading_kwargs,
             )
         else:
@@ -205,6 +259,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 exclude_state=self.model_config.exclude_state,
                 state_dropout_prob=self.model_config.state_dropout_prob,
                 use_mean_std=self.model_config.use_mean_std,
+                **codec_processor_kwargs,
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
             )
 

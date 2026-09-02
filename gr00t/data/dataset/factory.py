@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
+
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -74,9 +76,7 @@ class DatasetFactory:
                         allow_padding=self.config.data.allow_padding,
                     )
                 elif dataset_spec.dataset_adapter == "g1_id25_h50_synthetic_zoh_v1":
-                    from gr00t.data.dataset.g1_id25_h50_adapter import (
-                        G1Id25H50SingleStepDataset,
-                    )
+                    from gr00t.data.dataset.g1_id25_h50_adapter import G1Id25H50SingleStepDataset
 
                     if dataset_spec.adapter_config_path is None:
                         raise ValueError("G1 ID25/H50 adapter requires adapter_config_path")
@@ -94,9 +94,7 @@ class DatasetFactory:
                         adapter_config_path=dataset_spec.adapter_config_path,
                     )
                 elif dataset_spec.dataset_adapter == "g1_id10_h50_synthetic_zoh_v1":
-                    from gr00t.data.dataset.g1_id10_h50_adapter import (
-                        G1Id10H50SingleStepDataset,
-                    )
+                    from gr00t.data.dataset.g1_id10_h50_adapter import G1Id10H50SingleStepDataset
 
                     if dataset_spec.adapter_config_path is None:
                         raise ValueError("G1 ID10/H50 adapter requires adapter_config_path")
@@ -133,6 +131,16 @@ class DatasetFactory:
                         allow_padding=self.config.data.allow_padding,
                         adapter_config_path=dataset_spec.adapter_config_path,
                     )
+                    adapter_config = dataset.episode_loader.adapter_config
+                    codec_block = adapter_config.get("codec_evidence")
+                    if isinstance(codec_block, dict) and codec_block.get("enabled") is True:
+                        from gr00t.data.codec_evidence.dataset import (
+                            maybe_wrap_codec_evidence_dataset,
+                        )
+
+                        dataset = maybe_wrap_codec_evidence_dataset(
+                            dataset, dataset_spec.adapter_config_path
+                        )
                 else:
                     raise ValueError(f"Unknown dataset adapter: {dataset_spec.dataset_adapter}")
                 datasets.append(dataset)

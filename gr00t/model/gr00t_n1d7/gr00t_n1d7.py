@@ -62,6 +62,21 @@ class Gr00tN1d7ActionHead(nn.Module):
         self.action_dim = config.max_action_dim
         self.action_horizon = config.action_horizon
         self.num_inference_timesteps = config.num_inference_timesteps
+        codec_config = getattr(config, "codec_evidence", None) or {}
+        self.codec_evidence_enabled = codec_config.get("enabled", False)
+        if not isinstance(self.codec_evidence_enabled, bool):
+            raise TypeError("codec_evidence.enabled must be boolean")
+        self.codec_conditioning = None
+        if self.codec_evidence_enabled:
+            from .codec_dynamics import Gr00tCodecConditioningStack
+
+            self.codec_conditioning = Gr00tCodecConditioningStack(
+                action_width=self.input_embedding_dim,
+                d_codec=int(codec_config.get("d_codec", 64)),
+                conditioner_heads=int(codec_config.get("conditioner_heads", 8)),
+                gate_init=float(codec_config.get("gate_init", 0.0)),
+                modalities=tuple(codec_config.get("modalities", ("mv", "rpe", "i_frame", "metadata"))),
+            )
 
         self.state_encoder = CategorySpecificMLP(
             num_categories=config.max_num_embodiments,
@@ -165,6 +180,29 @@ class Gr00tN1d7ActionHead(nn.Module):
         backbone_output["backbone_features"] = backbone_features
         return backbone_output
 
+    def _encode_codec_context(
+        self, action_input: BatchFeature
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if not self.codec_evidence_enabled:
+            return None
+        if self.codec_conditioning is None:
+            raise RuntimeError("Enabled codec evidence has no conditioning module")
+        if "codec_evidence" not in action_input:
+            raise KeyError("Enabled codec evidence requires action_input['codec_evidence']")
+        return self.codec_conditioning.encode(action_input["codec_evidence"])
+
+    def _condition_action_features(
+        self,
+        action_features: torch.Tensor,
+        codec_context: tuple[torch.Tensor, torch.Tensor] | None,
+    ) -> torch.Tensor:
+        if not self.codec_evidence_enabled:
+            return action_features
+        if self.codec_conditioning is None or codec_context is None:
+            raise RuntimeError("Enabled codec evidence requires encoded context")
+        context, context_mask = codec_context
+        return self.codec_conditioning.condition(action_features, context, context_mask)
+
     def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
         """
         Forward pass through the action head.
@@ -229,6 +267,8 @@ class Gr00tN1d7ActionHead(nn.Module):
             pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
             pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
             action_features = action_features + pos_embs
+        codec_context = self._encode_codec_context(action_input)
+        action_features = self._condition_action_features(action_features, codec_context)
 
         # Join vision, language, state and action embedding along sequence dimension.
         sa_embs = torch.cat((state_features, action_features), dim=1)
@@ -380,6 +420,7 @@ class Gr00tN1d7ActionHead(nn.Module):
             ] = ramp[None, :, None].to(device)
 
         # Run denoising steps.
+        codec_context = self._encode_codec_context(action_input)
         for t in range(self.num_inference_timesteps):
             t_cont = t / float(self.num_inference_timesteps)  # e.g. goes 0, 1/N, 2/N, ...
             t_discretized = int(t_cont * self.num_timestep_buckets)
@@ -394,6 +435,7 @@ class Gr00tN1d7ActionHead(nn.Module):
                 pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
                 pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
                 action_features = action_features + pos_embs
+            action_features = self._condition_action_features(action_features, codec_context)
 
             # Join vision, language, state and action embedding along sequence dimension.
             sa_embs = torch.cat((state_features, action_features), dim=1)
@@ -534,6 +576,9 @@ class Gr00tN1d7(PreTrainedModel):
             model_name=config.model_name,
             model_type=config.backbone_model_type,
             transformers_loading_kwargs=transformers_loading_kwargs,
+            codec_evidence_enabled=(getattr(config, "codec_evidence", None) or {}).get(
+                "enabled", False
+            ),
         )
 
     def prepare_input(self, inputs: dict) -> Tuple[BatchFeature, BatchFeature]:
