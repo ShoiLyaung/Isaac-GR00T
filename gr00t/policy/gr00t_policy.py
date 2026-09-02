@@ -395,7 +395,7 @@ class Gr00tPolicy(BasePolicy):
         states = []
         for obs in unbatched_observations:
             vla_step_data = self._to_vla_step_data(obs)
-            states.append(vla_step_data.states)  # dict[str, np.ndarray[np.float32, (T, D)]]
+            states.append(vla_step_data.states)  # dict[str, np.ndarray[np.float32, (T, D))]
             messages = [{"type": MessageType.EPISODE_STEP.value, "content": vla_step_data}]
             processed_inputs.append(self.processor(messages))
 
@@ -420,7 +420,44 @@ class Gr00tPolicy(BasePolicy):
         casted_action = {
             key: value.astype(np.float32) for key, value in unnormalized_action.items()
         }
+        # Diagnostic: log per-step action mean/std/magnitude. Cheap (one
+        # scalar per key) and gated to every 50 calls so it does not
+        # affect inference timing.
+        self._log_action_magnitude(casted_action)
         return casted_action, {}
+
+    def _log_action_magnitude(
+        self,
+        action: dict[str, Any],
+        log_path: str = "/tmp/gr00t_action_magnitude.log",
+        every_n_steps: int = 50,
+    ) -> None:
+        """Append per-step action statistics to ``log_path``.
+
+        Only logs every ``every_n_steps`` calls to keep the per-call
+        overhead negligible. Never raises — diagnostic logging must not
+        be able to crash inference.
+        """
+        try:
+            if not hasattr(self, "_step_count"):
+                self._step_count = 0
+            self._step_count += 1
+            if self._step_count % every_n_steps != 0:
+                return
+            lines = [f"step={self._step_count}"]
+            for k, v in action.items():
+                arr = np.asarray(v)
+                if arr.size == 0:
+                    continue
+                lines.append(
+                    f"  {k}: mean={arr.mean():.4f} std={arr.std():.4f} "
+                    f"min={arr.min():.4f} max={arr.max():.4f} "
+                    f"abs_mean={np.abs(arr).mean():.4f} shape={arr.shape}"
+                )
+            with open(log_path, "a") as _f:
+                _f.write("\n".join(lines) + "\n")
+        except Exception:
+            pass
 
     def check_action(self, action: dict[str, Any]) -> None:
         """Validate that the action has the correct structure and types.

@@ -125,6 +125,23 @@ def get_libero_env_fn(
     return env_fn
 
 
+def get_unitree_g1_env_fn(env_name: str):
+    """Factory closure that registers UnitreeG1 envs and creates one.
+
+    The UnitreeG1 env wrapper starts IsaacLab AppLauncher on first call and
+    imports the unitree_sim_isaaclab tasks package to populate gym registry.
+    Both are idempotent so calling this repeatedly is safe.
+    """
+
+    def env_fn():
+        from gr00t.eval.sim.UnitreeG1.unitree_g1_env import register_unitree_g1_envs
+
+        register_unitree_g1_envs()
+        return gym.make(env_name)
+
+    return env_fn
+
+
 def get_gym_env(env_name: str, env_idx: int, total_n_envs: int):
     """Create Ray environment factory function without wrappers."""
 
@@ -135,6 +152,9 @@ def get_gym_env(env_name: str, env_idx: int, total_n_envs: int):
 
     elif env_embodiment in (EmbodimentTag.LIBERO_PANDA,):
         env_fn = get_libero_env_fn(env_name)
+
+    elif env_embodiment in (EmbodimentTag.UNITREE_G1,):
+        env_fn = get_unitree_g1_env_fn(env_name)
 
     else:
         raise ValueError(f"Invalid environment name: {env_name}")
@@ -329,6 +349,58 @@ def run_rollout_gymnasium_policy(
                 # Accumulate results
                 episode_lengths.append(current_lengths[env_idx])
                 episode_successes.append(current_successes[env_idx])
+                # Diagnostic dump: per-episode shaft_housing_distance trajectory.
+                # This lets the supervisor split failure modes A (no motion)
+                # vs B (wrong direction) vs C (close but not inserted).
+                try:
+                    import json
+
+                    _DIAG_DIR = Path(
+                        "/home/sl/Isaac-GR00T-m0-clean/outputs/logs/m0_d/eval_diagnostic"
+                    )
+                    _DIAG_DIR.mkdir(parents=True, exist_ok=True)
+                    _DIAG_FILE = _DIAG_DIR / "eval_diagnostic.jsonl"
+                    _hist_field = env_infos.get(
+                        "shaft_housing_distance_history", []
+                    )
+                    # Vectorized env wraps each env's value as a list; pick
+                    # out this env_idx. ``env_infos[k]`` may also be the raw
+                    # array if n_envs == 1.
+                    if isinstance(_hist_field, list) and len(_hist_field) > env_idx:
+                        _ep_dist = _hist_field[env_idx]
+                    else:
+                        _ep_dist = _hist_field
+                    if _ep_dist is None:
+                        _ep_dist = []
+                    _min_field = env_infos.get("shaft_housing_min", float("nan"))
+                    if isinstance(_min_field, list) and len(_min_field) > env_idx:
+                        _ep_min = _min_field[env_idx]
+                    else:
+                        _ep_min = _min_field
+                    with open(_DIAG_FILE, "a") as _f:
+                        _f.write(
+                            json.dumps(
+                                {
+                                    "episode_index": len(episode_successes) - 1,
+                                    "success": bool(episode_successes[-1]),
+                                    "shaft_housing_min": float(_ep_min)
+                                    if _ep_min is not None
+                                    else float("nan"),
+                                    "shaft_housing_distance_history": [
+                                        float(x) if x is not None else float("nan")
+                                        for x in _ep_dist
+                                    ],
+                                    "terminations": env_infos.get("final_info", [None])
+                                    if isinstance(env_infos.get("final_info"), list)
+                                    else env_infos.get("final_info", {}),
+                                    "episode_length": current_lengths[env_idx],
+                                }
+                            )
+                            + "\n"
+                        )
+                except Exception:
+                    # Never let diagnostic logging break a rollout.
+                    pass
                 # Reset trackers for this environment.
                 current_successes[env_idx] = False
                 # only update completed_episodes if valid

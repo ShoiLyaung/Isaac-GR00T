@@ -1,0 +1,57 @@
+ M .gitignore
+ M examples/GR00T-WholeBodyControl/finetune_g1.sh
+ M external_dependencies/GR00T-WholeBodyControl
+ M gr00t/configs/base_config.py
+ M gr00t/configs/finetune_config.py
+ M gr00t/configs/model/gr00t_n1d6.py
+ M gr00t/configs/training/training_config.py
+ M gr00t/data/dataset/lerobot_episode_loader.py
+ M gr00t/eval/rollout_policy.py
+ M gr00t/eval/sim/env_utils.py
+ M gr00t/experiment/experiment.py
+ M gr00t/experiment/launch_finetune.py
+ M gr00t/experiment/utils.py
+ M gr00t/model/__init__.py
+ M gr00t/model/gr00t_n1d6/gr00t_n1d6.py
+ M gr00t/model/gr00t_n1d6/setup.py
+ M gr00t/model/modules/dit.py
+ M gr00t/model/modules/eagle_backbone.py
+ M gr00t/model/modules/embodiment_conditioned_mlp.py
+ M gr00t/policy/gr00t_policy.py
+ M pyproject.toml
+ M scripts/eval/check_sim_eval_ready.py
+ M scripts/lerobot_conversion/README.md
+?? .codex
+?? evaluation/
+?? examples/GR00T-WholeBodyControl/finetune_g1_mamba.sh
+?? examples/GR00T-WholeBodyControl/modality_config_100_with_tau.py
+?? examples/GR00T-WholeBodyControl/modality_config_g1_shaft_n1d7.py
+?? examples/GR00T-WholeBodyControl/modality_config_insertion_shaft_n1d7.py
+?? examples/GR00T-WholeBodyControl/modality_config_lerobot_v3_notau.py
+?? experiments/
+?? external_dependencies/unitree_lerobot/
+?? gr00t/configs/model/gr00t_n1d7.py
+?? gr00t/eval/sim/UnitreeIsaacLab/
+?? gr00t/experiment/launch_finetune_n1d7.py
+?? gr00t/model/gr00t_n1d6/SYSTEM1_IO_CONTRACT.md
+?? gr00t/model/gr00t_n1d6/mamba_system1.py
+?? gr00t/model/gr00t_n1d7/
+?? reports/
+?? scripts/baselines/
+?? scripts/compare_rollout_joint_trace.py
+?? scripts/eval/README_unitree_isaaclab_insertion.md
+?? scripts/eval/run_gr00t_wholebody_client.sh
+?? scripts/eval/run_gr00t_wholebody_server.sh
+?? scripts/eval/run_insertion_shaft_client.sh
+?? scripts/eval/run_insertion_shaft_server.sh
+?? scripts/eval/run_insertion_shaft_server_n1d7.sh
+?? scripts/lerobot_conversion/convert_all_insertion_shaft.sh
+?? scripts/lerobot_conversion/convert_insertion_shaft_to_lerobot.sh
+?? scripts/lerobot_conversion/convert_lerobot_to_groot.sh
+?? scripts/probe_mamba_alignment_effect.py
+?? scripts/probe_right_hand_prediction.py
+?? scripts/probe_right_hand_sampling.py
+?? scripts/teleop/
+?? scripts/train/
+?? template.md
+?? weekly_update_mamba_system1_20260326.md

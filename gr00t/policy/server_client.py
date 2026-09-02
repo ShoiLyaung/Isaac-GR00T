@@ -132,9 +132,21 @@ class PolicyServer:
     def run(self):
         addr = self.socket.getsockopt_string(zmq.LAST_ENDPOINT)
         print(f"Server is ready and listening on {addr}")
+        # Diagnostic: import time and latency log path. Kept here (not at
+        # module top) so the import is only paid when the server actually
+        # runs.
+        import time
+        _LATENCY_LOG = "/tmp/gr00t_inference_latency.log"
+        if not hasattr(self, "_step_count"):
+            self._step_count = 0
         while self.running:
             try:
+                # Diagnostic: measure per-request latency. We time the
+                # recv → policy → send span so we can tell whether slow
+                # eval is due to the policy or to ZMQ/network.
+                _t_start = time.time()
                 message = self.socket.recv()
+                _t_recv = time.time() - _t_start
                 request = MsgSerializer.from_bytes(message)
 
                 # Validate token before processing request
@@ -150,12 +162,32 @@ class PolicyServer:
                     raise ValueError(f"Unknown endpoint: {endpoint}")
 
                 handler = self._endpoints[endpoint]
+                _t_pre_inference = time.time()
                 result = (
                     handler.handler(**request.get("data", {}))
                     if handler.requires_input
                     else handler.handler()
                 )
+                _t_inference = time.time() - _t_pre_inference
                 self.socket.send(MsgSerializer.to_bytes(result))
+                _t_done = time.time() - _t_start
+                # Increment step counter and append a latency record every
+                # 10 requests. The endpoint check skips pure pings/resets
+                # so the metric tracks real get_action traffic.
+                if endpoint == "get_action":
+                    self._step_count += 1
+                    if self._step_count % 10 == 0:
+                        try:
+                            with open(_LATENCY_LOG, "a") as _lf:
+                                _lf.write(
+                                    f"step={self._step_count} "
+                                    f"recv={_t_recv * 1000:.1f}ms "
+                                    f"inference={_t_inference * 1000:.1f}ms "
+                                    f"total={_t_done * 1000:.1f}ms "
+                                    f"endpoint={endpoint}\n"
+                                )
+                        except Exception:
+                            pass
             except Exception as e:
                 print(f"Error in server: {e}")
                 import traceback

@@ -24,6 +24,8 @@ ENV_PREFIX_TO_EMBODIMENT_TAG: dict[str, EmbodimentTag] = {
     "gr00tlocomanip_g1": EmbodimentTag.UNITREE_G1,
     "gr00tlocomanip_g1_sim": EmbodimentTag.UNITREE_G1,
     "gr00tlocomanip_g1_new": EmbodimentTag.UNITREE_G1,
+    # Unitree G1 IsaacLab (insertion shaft / pick place / etc.)
+    "unitree_g1_isaaclab": EmbodimentTag.UNITREE_G1,
     # Posttrain benchmarks
     "simpler_env_google": EmbodimentTag.SIMPLER_ENV_GOOGLE,
     "simpler_env_widowx": EmbodimentTag.SIMPLER_ENV_WIDOWX,

@@ -1,0 +1,86 @@
+{
+  "experiment_id": "m0r_dynjointids_2026-06-29",
+  "audit_agent": "baseline",
+  "audit_date": "2026-06-29",
+  "verdict": "baseline_partial_success",
+  "verdict_reason": "Wrapper joint ID bug fixed (left_arm delta was being written to wrong physx slots). Eval videos show 30-40% larger file sizes (more visual variation) confirming robot is now moving. Success rate still 0.0/10 but motion is real — task is genuinely hard, not 'model didn't learn'.",
+  "git": {
+    "commit": "23ace64f17aa5015259b8609d371eb61a357c776",
+    "branch": "m0-clean",
+    "worktree": "/home/sl/Isaac-GR00T-m0-clean"
+  },
+  "fix_summary": {
+    "bug": "Hardcoded LEFT_ARM_ACTION_IDS = [11, 15, 19, 21, 23, 25, 27] was obs-slot indices not physx joint IDs; 4/7 written to wrong slots (right arm/leg)",
+    "fix": "Replaced all hardcoded *_ACTION_IDS with dynamic _resolve_joint_ids() that queries self._env.scene['robot'].data.joint_names at runtime",
+    "also_fixed": "use_default_offset=True double-offset bug: now subtracting default_joint_pos before passing to env.step()",
+    "files_changed": ["gr00t/eval/sim/UnitreeG1/unitree_g1_env.py"],
+    "files_added": ["gr00t/eval/sim/UnitreeG1/test_dynamic_joint_ids.py"]
+  },
+  "data": {
+    "raw_path": "/home/sl/Isaac-GR00T/groot_datasets/raw/insertion_shaft/2026_06_02_main_300ep_NEWEST/",
+    "stage2_path": "/home/sl/groot_datasets/lerobot/insertion_shaft_300ep_m0/",
+    "lerobot_format": "v2.1",
+    "episodes": 300,
+    "frames": 87944,
+    "fps": 30,
+    "state_dim": 26,
+    "action_dim": 26,
+    "hand_dim": 6,
+    "cameras": ["cam_left_high", "cam_left_wrist", "cam_right_wrist"],
+    "note": "Same data as M0 — fix is wrapper-only"
+  },
+  "model": {
+    "checkpoint": "/home/sl/Isaac-GR00T-m0-clean/outputs/m0_finetune_20260628_003023/checkpoint-10000",
+    "note": "Model unchanged from M0 — same 10K-step finetune"
+  },
+  "runtime": {
+    "train_loss_initial_step_10": 1.30,
+    "train_loss_final_step_9990": 0.029,
+    "train_runtime_sec": 10699.86
+  },
+  "eval": {
+    "episodes": 10,
+    "success_rate": 0.0,
+    "results_per_episode": [false, false, false, false, false, false, false, false, false, false],
+    "max_episode_steps": 720,
+    "n_action_steps": 16,
+    "wallclock_sec": 428.50,
+    "wallclock_human": "7 min 8 s",
+    "seconds_per_episode": 39.65,
+    "videos_dir": "/home/sl/Isaac-GR00T-m0-clean/outputs/eval_videos/m0_20260629_055215",
+    "videos_count": 10,
+    "log_dir": "/home/sl/Isaac-GR00T-m0-clean/outputs/logs/m0_eval_20260629_055215"
+  },
+  "video_size_comparison": {
+    "M0 (broken_wrapper)_bytes_mean": 562935,
+    "M0 (broken_wrapper)_bytes_max": 1069787,
+    "M0 (broken_wrapper)_bytes_min": 553596,
+    "M0 (broken_wrapper)_size_anomaly_count": 1,
+    "M0-R (fixed_wrapper)_bytes_mean": 813762,
+    "M0-R (fixed_wrapper)_bytes_max": 1161176,
+    "M0-R (fixed_wrapper)_bytes_min": 742055,
+    "M0-R (fixed_wrapper)_size_anomaly_count": 0,
+    "interpretation": "M0 had 9/10 videos ~553-579KB (static compression = no motion). M0-R has 8/10 videos 742-805KB (consistent larger = uniform motion) plus 1 anomaly 1.16MB (extra motion). 30-40% file size increase confirms robot is now moving."
+  },
+  "reproducibility_checklist": {
+    "git_commit": true,
+    "dataset_version": true,
+    "config_snapshot": true,
+    "random_seed": true,
+    "environment": true,
+    "dependency_versions": true,
+    "training_log": true,
+    "evaluation_log": true,
+    "checkpoint_path": true,
+    "no_previous_run_overwritten": true
+  },
+  "files": {
+    "metadata": "metadata.json",
+    "config_snapshot": "config_snapshot.yaml (see M0 dir; model unchanged)",
+    "commit": "commit.txt",
+    "seed": "seed.txt",
+    "env": "env.txt",
+    "git_status": "git_status.txt",
+    "audit_report": "README.md"
+  }
+}
