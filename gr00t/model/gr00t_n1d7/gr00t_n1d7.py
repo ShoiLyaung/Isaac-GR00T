@@ -719,6 +719,13 @@ class Gr00tN1d7(PreTrainedModel):
             raise RuntimeError(
                 f"codec_only trainable numel drifted: {numel} != {_CODEC_ONLY_TRAINABLE_NUMEL}"
             )
+        self.reset_codec_gradient_probe()
+
+    def reset_codec_gradient_probe(self) -> None:
+        """Bind hooks to the current Parameter objects after checkpoint loading."""
+
+        for handle in getattr(self, "_codec_gradient_hook_handles", {}).values():
+            handle.remove()
         self._register_codec_gradient_probe()
 
     def _register_codec_gradient_probe(self) -> None:

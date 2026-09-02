@@ -328,6 +328,10 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
             )
 
+        reset_gradient_probe = getattr(model, "reset_codec_gradient_probe", None)
+        if self.codec_evidence_config is not None and callable(reset_gradient_probe):
+            reset_gradient_probe()
+
         logging.debug(f"Model Config: {model.config}")
         with run_or_wait_on_rank0(label="final_model_config.json write") as is_rank0:
             if is_rank0:

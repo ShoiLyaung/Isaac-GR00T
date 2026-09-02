@@ -186,6 +186,24 @@ class Gr00tTrainer(Trainer):
         evidence = probe()
         if evidence is None:
             return None
+        parameters = evidence.get("parameters")
+        expected_calls = min(int(self.state.global_step), int(evidence.get("probe_limit", 0)))
+        if not isinstance(parameters, dict) or len(parameters) != 27 or expected_calls < 1:
+            raise RuntimeError("Codec gradient evidence parameter/probe closure is incomplete")
+        if any(len(records) != expected_calls for records in parameters.values()):
+            raise RuntimeError("Codec gradient hooks did not observe every expected backward")
+        if any(
+            not record.get("finite", False) for records in parameters.values() for record in records
+        ):
+            raise RuntimeError("Codec gradient evidence contains a non-finite gradient")
+        gate_name = "action_head.codec_conditioning.conditioner.gate"
+        if not parameters[gate_name][0]["nonzero"]:
+            raise RuntimeError("Codec step-0 gate gradient is zero")
+        upstream = [records for name, records in parameters.items() if name != gate_name]
+        if any(records[0]["nonzero"] for records in upstream):
+            raise RuntimeError("Codec exact-zero gate leaked a step-0 upstream gradient")
+        if expected_calls >= 2 and not all(records[1]["nonzero"] for records in upstream):
+            raise RuntimeError("Codec step-1 upstream gradient closure is incomplete")
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         path = (
             Path(self.args.output_dir)

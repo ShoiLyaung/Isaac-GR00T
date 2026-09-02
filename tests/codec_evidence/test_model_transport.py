@@ -710,11 +710,28 @@ def test_trainer_validates_realized_optimizer_closure(monkeypatch):
 
 
 def test_trainer_writes_bounded_codec_gradient_evidence(tmp_path):
+    gate = "action_head.codec_conditioning.conditioner.gate"
     evidence = {
         "schema_version": "groot-codec-gradient-evidence-v1",
         "mode": "codec_only",
         "probe_limit": 3,
-        "parameters": {},
+        "parameters": {
+            name: [
+                {
+                    "call_index": 0,
+                    "finite": True,
+                    "nonzero": name == gate,
+                    "l2_norm": 1.0 if name == gate else 0.0,
+                },
+                {
+                    "call_index": 1,
+                    "finite": True,
+                    "nonzero": True,
+                    "l2_norm": 1.0,
+                },
+            ]
+            for name in _CODEC_ONLY_PARAMETER_NAMES
+        },
     }
     trainer = Gr00tTrainer.__new__(Gr00tTrainer)
     trainer.model = SimpleNamespace(codec_gradient_evidence=lambda: evidence)
