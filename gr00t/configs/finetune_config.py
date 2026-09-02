@@ -33,17 +33,26 @@ class FinetuneConfig:
     base_model_path: str
     """Path to the pretrained base model checkpoint (e.g., Hugging Face model hub or local directory)."""
 
-    dataset_path: str
-    """Path to one dataset root, or an os.pathsep-separated list of dataset roots."""
-
     embodiment_tag: str
     """Embodiment tag (name or value, case-insensitive). See EmbodimentTag for known tags."""
+
+    dataset_path: str | None = None
+    """One dataset root, or an os.pathsep-separated list for the native loader."""
+
+    dataset_manifest_path: str | None = None
+    """Strict JSON manifest for explicitly weighted adapter-backed datasets."""
 
     modality_config_path: str | None = None
     """
     Path to a Python file defining the modality configuration for the given embodiment. 
     If None, use the pre-registered modality config in `gr00t/configs/data/embodiment_configs.py`. 
     """
+
+    dataset_adapter: str | None = None
+    """Optional registered dataset adapter identity."""
+
+    adapter_config_path: str | None = None
+    """Adapter contract path for a single adapter-backed dataset."""
 
     # --- Model Tuning Flags ---
     tune_llm: bool = False

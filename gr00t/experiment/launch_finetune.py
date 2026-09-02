@@ -17,14 +17,109 @@
 # This script tries to provide a similar user experience as current OSS.
 
 import json
+import math
 import os
 from pathlib import Path
+from typing import Any
 
 import tyro
 
 from gr00t.configs.base_config import get_default_config
 from gr00t.configs.finetune_config import FinetuneConfig
 from gr00t.experiment.experiment import run
+
+
+DATASET_MANIFEST_SCHEMA_VERSION = "gr00t-finetune-dataset-manifest-v1"
+
+
+def _load_json_object(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    with path.open("r", encoding="utf-8") as stream:
+        value = json.load(stream)
+    if not isinstance(value, dict):
+        raise ValueError(f"Dataset manifest must be a JSON object: {path}")
+    return value
+
+
+def resolve_dataset_specs(ft_config: FinetuneConfig, embodiment_tag: str) -> list[dict[str, Any]]:
+    """Resolve the native dataset path mode or one strict adapter manifest."""
+
+    has_path = bool(ft_config.dataset_path)
+    has_manifest = bool(ft_config.dataset_manifest_path)
+    if has_path == has_manifest:
+        raise ValueError("Exactly one of dataset_path and dataset_manifest_path is required")
+
+    if has_path:
+        dataset_paths = [path for path in ft_config.dataset_path.split(os.pathsep) if path]
+        if not dataset_paths:
+            raise ValueError("dataset_path did not contain a dataset root")
+        if ft_config.dataset_adapter is not None and len(dataset_paths) != 1:
+            raise ValueError("Adapter-backed dataset_path mode requires exactly one root")
+        if ft_config.dataset_adapter is not None and ft_config.adapter_config_path is None:
+            raise ValueError("Adapter-backed dataset_path mode requires adapter_config_path")
+        return [
+            {
+                "dataset_paths": dataset_paths,
+                "mix_ratio": 1.0,
+                "embodiment_tag": embodiment_tag,
+                "dataset_adapter": ft_config.dataset_adapter,
+                "adapter_config_path": ft_config.adapter_config_path,
+            }
+        ]
+
+    manifest_path = Path(ft_config.dataset_manifest_path).resolve()
+    manifest = _load_json_object(manifest_path)
+    if set(manifest) != {"schema_version", "datasets"}:
+        raise ValueError("Dataset manifest keys must be exactly schema_version and datasets")
+    if manifest["schema_version"] != DATASET_MANIFEST_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported dataset manifest schema: {manifest['schema_version']!r}")
+    entries = manifest["datasets"]
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("Dataset manifest datasets must be a non-empty list")
+    if ft_config.dataset_adapter is None:
+        raise ValueError("dataset_manifest_path requires dataset_adapter")
+
+    specs: list[dict[str, Any]] = []
+    seen_paths: set[Path] = set()
+    for index, entry in enumerate(entries):
+        required = {"dataset_path", "mix_ratio", "adapter_config_path"}
+        if not isinstance(entry, dict) or set(entry) != required:
+            raise ValueError(
+                f"Dataset manifest entry {index} keys must be exactly "
+                "dataset_path, mix_ratio, and adapter_config_path"
+            )
+        dataset_path = Path(entry["dataset_path"])
+        if not dataset_path.is_absolute() or not dataset_path.is_dir():
+            raise ValueError(f"Dataset manifest entry {index} must name an existing absolute root")
+        dataset_path = dataset_path.resolve()
+        if dataset_path in seen_paths:
+            raise ValueError(f"Duplicate dataset root in manifest: {dataset_path}")
+        seen_paths.add(dataset_path)
+
+        mix_ratio = entry["mix_ratio"]
+        if (
+            isinstance(mix_ratio, bool)
+            or not isinstance(mix_ratio, (int, float))
+            or not math.isfinite(float(mix_ratio))
+            or float(mix_ratio) <= 0
+        ):
+            raise ValueError(f"Dataset manifest entry {index} mix_ratio must be finite and > 0")
+        adapter_config = Path(entry["adapter_config_path"])
+        if not adapter_config.is_absolute() or not adapter_config.is_file():
+            raise ValueError(
+                f"Dataset manifest entry {index} must name an existing absolute adapter config"
+            )
+        specs.append(
+            {
+                "dataset_paths": [str(dataset_path)],
+                "mix_ratio": float(mix_ratio),
+                "embodiment_tag": embodiment_tag,
+                "dataset_adapter": ft_config.dataset_adapter,
+                "adapter_config_path": str(adapter_config.resolve()),
+            }
+        )
+    return specs
 
 
 # Make sure the user provided modality config is registered.
@@ -56,19 +151,13 @@ if __name__ == "__main__":
     if ft_config.modality_config_path is not None:
         load_modality_config(ft_config.modality_config_path)
 
-    dataset_paths = [path for path in ft_config.dataset_path.split(os.pathsep) if path]
+    dataset_specs = resolve_dataset_specs(ft_config, embodiment_tag)
 
     config = get_default_config().load_dict(
         {
             "data": {
                 "download_cache": False,
-                "datasets": [
-                    {
-                        "dataset_paths": dataset_paths,
-                        "mix_ratio": 1.0,
-                        "embodiment_tag": embodiment_tag,
-                    }
-                ],
+                "datasets": dataset_specs,
             }
         }
     )

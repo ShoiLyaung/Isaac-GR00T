@@ -53,20 +53,52 @@ class DatasetFactory:
                 embodiment_tag = dataset_spec.embodiment_tag
                 assert embodiment_tag is not None, "Embodiment tag is required"
                 assert self.config.data.mode == "single_turn", "Only single turn mode is supported"
-                # rank-0 writes stats; helper barriers before peers read them.
-                with run_or_wait_on_rank0(label=f"generate_stats({dataset_path})") as is_rank0:
-                    if is_rank0:
-                        generate_stats(dataset_path)
-                        generate_rel_stats(dataset_path, EmbodimentTag(embodiment_tag))
-                dataset = ShardedSingleStepDataset(
-                    dataset_path=dataset_path,
-                    embodiment_tag=EmbodimentTag(embodiment_tag),
-                    modality_configs=self.config.data.modality_configs[embodiment_tag],
-                    shard_size=self.config.data.shard_size,
-                    episode_sampling_rate=self.config.data.episode_sampling_rate,
-                    seed=self.config.data.seed,
-                    allow_padding=self.config.data.allow_padding,
-                )
+                adapter = getattr(dataset_spec, "dataset_adapter", None)
+                adapter_config_path = getattr(dataset_spec, "adapter_config_path", None)
+                common_kwargs = {
+                    "dataset_path": dataset_path,
+                    "embodiment_tag": EmbodimentTag(embodiment_tag),
+                    "modality_configs": self.config.data.modality_configs[embodiment_tag],
+                    "shard_size": self.config.data.shard_size,
+                    "episode_sampling_rate": self.config.data.episode_sampling_rate,
+                    "seed": self.config.data.seed,
+                    "allow_padding": self.config.data.allow_padding,
+                }
+                if adapter is None:
+                    # Rank 0 writes native stats; helper barriers before peers read them.
+                    with run_or_wait_on_rank0(label=f"generate_stats({dataset_path})") as is_rank0:
+                        if is_rank0:
+                            generate_stats(dataset_path)
+                            generate_rel_stats(dataset_path, EmbodimentTag(embodiment_tag))
+                    dataset = ShardedSingleStepDataset(**common_kwargs)
+                elif adapter == "g1_id10_h40_native30_v1":
+                    if adapter_config_path is None:
+                        raise ValueError("G1 ID10/H40 adapter requires adapter_config_path")
+                    if embodiment_tag != "new_embodiment":
+                        raise ValueError("G1 ID10/H40 adapter requires NEW_EMBODIMENT")
+                    from gr00t.data.dataset.g1_id10_h40_native30_adapter import (
+                        G1Id10H40Native30SingleStepDataset,
+                    )
+
+                    dataset = G1Id10H40Native30SingleStepDataset(
+                        **common_kwargs,
+                        adapter_config_path=adapter_config_path,
+                    )
+                elif adapter == "g1_all_lerobot_h40_v1":
+                    if adapter_config_path is None:
+                        raise ValueError("G1 all-LeRobot H40 adapter requires adapter_config_path")
+                    if embodiment_tag != "new_embodiment":
+                        raise ValueError("G1 all-LeRobot H40 adapter requires NEW_EMBODIMENT")
+                    from gr00t.data.dataset.g1_all_lerobot_h40_adapter import (
+                        G1AllLerobotH40SingleStepDataset,
+                    )
+
+                    dataset = G1AllLerobotH40SingleStepDataset(
+                        **common_kwargs,
+                        adapter_config_path=adapter_config_path,
+                    )
+                else:
+                    raise ValueError(f"Unknown dataset adapter: {adapter}")
                 datasets.append(dataset)
             dataset_lengths = np.array([len(dataset) for dataset in datasets])
             dataset_relative_lengths = dataset_lengths / dataset_lengths.sum()
@@ -75,7 +107,7 @@ class DatasetFactory:
                 all_datasets.append(dataset)
                 all_weights.append(weight)
 
-        alpha = self.config.data.ds_weights_alpha
+        alpha = getattr(self.config.data, "ds_weights_alpha", None)
         if alpha is not None and len(all_datasets) > 1:
             ds_lengths = np.array([len(dataset) for dataset in all_datasets], dtype=np.float64)
             all_weights = (np.power(ds_lengths, alpha) / np.power(ds_lengths[0], alpha)).tolist()
