@@ -91,6 +91,7 @@ def main() -> int:
     from gr00t.data.dataset.g1_all_lerobot_h40_adapter import G1AllLerobotH40EpisodeLoader
     from gr00t.data.dataset.sharded_single_step_dataset import extract_step_data
     from gr00t.data.embodiment_tags import EmbodimentTag
+    import gr00t.model  # noqa: F401 - register local AutoModel/AutoProcessor classes
     from gr00t.policy.gr00t_policy import Gr00tPolicy
     from transformers import AutoProcessor
 
