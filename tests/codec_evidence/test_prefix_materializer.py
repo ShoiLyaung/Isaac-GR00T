@@ -34,34 +34,19 @@ def _sha256(path: Path) -> str:
 
 
 def _contract(*, expanded: bool = True) -> dict:
+    del expanded
     digest = _sha256(FACTORY_PATH)
-    value = {
+    return {
         "schema_version": factory.TRAINING_CONTRACT_SCHEMA_VERSION,
-        "runtime_ready": True,
         "online_prefix_equivalent": True,
-        "checkpoint_index_sha256": "a" * 64,
-        "training_source_commit": "b" * 40,
-        "runtime_source_commit": "c" * 40,
         "materializer_id": factory.EXPECTED_MATERIALIZER_ID,
         "materializer_sha256": digest,
         "source_kind": factory.EXPECTED_SOURCE_KIND,
         "camera_id": "cam_left_high",
-        "simulator_hz": 50,
         "evidence_hz": 30,
         "history_length": 8,
         "future_frame_fallback_allowed": False,
     }
-    if expanded:
-        value.update(
-            {
-                "experiment_id": "causal-experiment",
-                "run_id": "causal-run-attempt-1",
-                "checkpoint_identity": "d" * 64,
-                "factory_module": str(FACTORY_PATH),
-                "factory_module_sha256": digest,
-            }
-        )
-    return value
 
 
 def _frames(count: int, *, offset: int = 0) -> tuple[np.ndarray, ...]:

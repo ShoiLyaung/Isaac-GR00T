@@ -248,26 +248,32 @@ class Gr00tN1d7Pipeline(ModelPipeline):
         skip_weight_loading = getattr(self.config.training, "skip_weight_loading", False)
         codec_model_kwargs = {}
         if self.codec_evidence_config is not None:
-            codec_model_kwargs["codec_evidence"] = self.codec_evidence_config.to_model_dict()
+            codec_model_kwargs.update(
+                {
+                    "action_horizon": self.model_config.action_horizon,
+                    "codec_evidence": self.codec_evidence_config.to_model_dict(),
+                    "codec_trainability": self.config.model.codec_trainability,
+                }
+            )
         if self.config.training.start_from_checkpoint is not None and not skip_weight_loading:
-            load_mode = self._checkpoint_codec_load_mode(
-                self.config.training.start_from_checkpoint,
-                self.codec_evidence_config,
-            )
-            self._validate_checkpoint_processor_codec_identity(
-                self.config.training.start_from_checkpoint,
-                self.codec_evidence_config,
-                load_mode,
-            )
+            load_mode = "native"
+            if self.codec_evidence_config is not None:
+                load_mode = self._checkpoint_codec_load_mode(
+                    self.config.training.start_from_checkpoint,
+                    self.codec_evidence_config,
+                )
+                self._validate_checkpoint_processor_codec_identity(
+                    self.config.training.start_from_checkpoint,
+                    self.codec_evidence_config,
+                    load_mode,
+                )
             model, loading_info = AutoModel.from_pretrained(
                 self.config.training.start_from_checkpoint,
-                action_horizon=self.model_config.action_horizon,
                 tune_llm=self.config.model.tune_llm,
                 tune_visual=self.config.model.tune_visual,
                 tune_projector=self.config.model.tune_projector,
                 tune_diffusion_model=self.config.model.tune_diffusion_model,
                 tune_vlln=self.config.model.tune_vlln,
-                codec_trainability=self.config.model.codec_trainability,
                 state_dropout_prob=self.config.model.state_dropout_prob,
                 backbone_trainable_params_fp32=self.config.model.backbone_trainable_params_fp32,
                 load_bf16=self.config.model.load_bf16,

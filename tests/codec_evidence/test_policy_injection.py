@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from gr00t.data.embodiment_tags import EmbodimentTag
-from gr00t.policy.gr00t_policy import Gr00tPolicy
+from gr00t.policy.gr00t_policy import Gr00tPolicy, _validate_model_processor_codec_identity
 import numpy as np
 import pytest
 import torch
@@ -87,3 +87,38 @@ def test_policy_codec_option_fails_closed_for_missing_native_or_wrong_batch():
             _observation(),
             options={"codec_evidence_sample": [evidence, evidence]},
         )
+
+
+def _codec_identity(*, source_kind="NATIVE_CANONICAL_DECODED_DERIVED"):
+    return {
+        "enabled": True,
+        "modalities": ["mv", "rpe", "i_frame", "metadata"],
+        "gate_init": 0.0,
+        "schema_version": "codec-evidence-episode-bundle-v1",
+        "camera_id": "cam_left_high",
+        "source_kind": source_kind,
+        "d_codec": 64,
+        "conditioner_heads": 8,
+    }
+
+
+def test_strict_policy_compares_model_and_processor_codec_identity(tmp_path):
+    native_model = SimpleNamespace(config=SimpleNamespace(codec_evidence=None))
+    native_processor = SimpleNamespace(codec_evidence_enabled=False)
+    _validate_model_processor_codec_identity(native_model, native_processor, tmp_path)
+
+    codec = _codec_identity()
+    codec_model = SimpleNamespace(config=SimpleNamespace(codec_evidence=codec))
+    codec_processor = SimpleNamespace(codec_evidence_enabled=True, codec_evidence=codec)
+    _validate_model_processor_codec_identity(codec_model, codec_processor, tmp_path)
+
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        _validate_model_processor_codec_identity(codec_model, native_processor, tmp_path)
+    drifted = SimpleNamespace(
+        codec_evidence_enabled=True,
+        codec_evidence=_codec_identity(source_kind="RAW_JPEG_DERIVED"),
+    )
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        _validate_model_processor_codec_identity(codec_model, drifted, tmp_path)
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        _validate_model_processor_codec_identity(native_model, codec_processor, tmp_path)

@@ -36,7 +36,6 @@ from .episode_bundle import (
     make_neutral_episode_view,
     make_synthetic_episode_bundle,
     validate_episode_view,
-    write_episode_bundle,
 )
 from .identity import (
     EPISODE_IDENTITY_SCHEMA_VERSION,
@@ -86,5 +85,4 @@ __all__ = [
     "validate_codec_contract",
     "validate_episode_identity_preimage",
     "validate_episode_view",
-    "write_episode_bundle",
 ]

@@ -719,6 +719,52 @@ class Gr00tN1d7(PreTrainedModel):
             raise RuntimeError(
                 f"codec_only trainable numel drifted: {numel} != {_CODEC_ONLY_TRAINABLE_NUMEL}"
             )
+        self._register_codec_gradient_probe()
+
+    def _register_codec_gradient_probe(self) -> None:
+        """Capture only the first three rank-local pre-reduce gradients."""
+
+        self._codec_gradient_probe_limit = 3
+        self._codec_gradient_observations = {name: [] for name in _CODEC_ONLY_PARAMETER_NAMES}
+        self._codec_gradient_hook_handles = {}
+
+        def make_hook(name: str):
+            def hook(gradient: torch.Tensor):
+                records = self._codec_gradient_observations[name]
+                finite = bool(torch.isfinite(gradient).all().item())
+                records.append(
+                    {
+                        "call_index": len(records),
+                        "finite": finite,
+                        "nonzero": bool(torch.count_nonzero(gradient).item()),
+                        "l2_norm": (
+                            float(torch.linalg.vector_norm(gradient.detach().float()).item())
+                            if finite
+                            else None
+                        ),
+                    }
+                )
+                if len(records) >= self._codec_gradient_probe_limit:
+                    self._codec_gradient_hook_handles[name].remove()
+                return gradient
+
+            return hook
+
+        named_parameters = dict(self.named_parameters())
+        for name in _CODEC_ONLY_PARAMETER_NAMES:
+            self._codec_gradient_hook_handles[name] = named_parameters[name].register_hook(
+                make_hook(name)
+            )
+
+    def codec_gradient_evidence(self) -> dict[str, Any] | None:
+        if self.codec_trainability != "codec_only":
+            return None
+        return {
+            "schema_version": "groot-codec-gradient-evidence-v1",
+            "mode": "codec_only",
+            "probe_limit": self._codec_gradient_probe_limit,
+            "parameters": self._codec_gradient_observations,
+        }
 
     def validate_optimizer_trainability(self, optimizer) -> dict[str, Any] | None:
         if self.codec_trainability != "codec_only":

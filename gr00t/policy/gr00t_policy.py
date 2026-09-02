@@ -77,6 +77,38 @@ def _validate_checkpoint_loading_info(loading_info: dict[str, Any], model_dir: P
         )
 
 
+def _normalized_codec_identity(value: Any, label: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if type(value) is not dict:
+        raise RuntimeError(f"{label} Codec config must be a dict or absent")
+    enabled = value.get("enabled", False)
+    if type(enabled) is not bool:
+        raise RuntimeError(f"{label} Codec enabled flag must be boolean")
+    if not enabled:
+        return None
+    from gr00t.data.codec_evidence.config import parse_codec_model_config
+
+    try:
+        return parse_codec_model_config(value)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f"{label} Codec config is invalid") from error
+
+
+def _validate_model_processor_codec_identity(model: Any, processor: Any, model_dir: Path) -> None:
+    model_codec = _normalized_codec_identity(getattr(model.config, "codec_evidence", None), "Model")
+    processor_codec = None
+    if getattr(processor, "codec_evidence_enabled", False):
+        processor_codec = _normalized_codec_identity(
+            getattr(processor, "codec_evidence", None), "Processor"
+        )
+    if model_codec != processor_codec:
+        raise RuntimeError(
+            f"Strict checkpoint Codec model/processor identity mismatch for {model_dir}: "
+            f"model={model_codec!r}, processor={processor_codec!r}"
+        )
+
+
 def _sim_language_batch_to_sequence(value: Any) -> Any:
     """Normalize sim language batches while preserving validation semantics."""
     if isinstance(value, np.ndarray):
@@ -148,6 +180,8 @@ class Gr00tPolicy(BasePolicy):
         )
         self.processor: BaseProcessor = AutoProcessor.from_pretrained(processor_dir)
         self.processor.eval()
+        if strict_checkpoint_loading:
+            _validate_model_processor_codec_identity(model, self.processor, model_dir)
 
         # Store embodiment-specific configurations
         self.embodiment_tag = embodiment_tag

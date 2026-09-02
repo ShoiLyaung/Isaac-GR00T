@@ -10,10 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
-import os
 from pathlib import Path
-import shutil
-import tempfile
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
@@ -1231,168 +1228,6 @@ def _episode_from_components(
     )
 
 
-def _write_array(path: Path, value: np.ndarray, *, relative_path: str) -> dict[str, Any]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("xb") as stream:
-        np.save(stream, value, allow_pickle=False)
-    return {
-        "relative_path": relative_path,
-        "sha256": _sha256_path(path),
-        "bytes": path.stat().st_size,
-        "dtype": str(value.dtype),
-        "shape": list(value.shape),
-    }
-
-
-def write_episode_bundle(
-    root: str | Path,
-    *,
-    episode_uid: str,
-    camera_id: str,
-    source_kind: str,
-    metadata: Mapping[str, Any],
-    arrays: Mapping[str, np.ndarray],
-    raw_mv_offsets: np.ndarray | None = None,
-    raw_mv_fields: Mapping[str, np.ndarray] | None = None,
-    accepted_bitstream: str | Path | None = None,
-) -> Path:
-    """Validate and atomically write one non-overwritable episode bundle."""
-
-    bundle = _episode_from_components(
-        episode_uid=episode_uid,
-        camera_id=camera_id,
-        source_kind=source_kind,
-        metadata=metadata,
-        arrays=arrays,
-    )
-    if (raw_mv_offsets is None) != (raw_mv_fields is None):
-        raise ValueError("raw_mv_offsets and raw_mv_fields must be provided together")
-    raw_audit = (
-        None
-        if raw_mv_offsets is None
-        else RawMotionVectorAudit(raw_mv_offsets, raw_mv_fields or {})
-    )
-    if bundle.codec_contract["fixture_mode"] == PRODUCTION_FIXTURE_MODE and (
-        raw_audit is None or accepted_bitstream is None
-    ):
-        raise ValueError("Production episode bundles require raw MV audit and accepted bitstream")
-    if raw_audit is not None and raw_audit.offsets.shape != (bundle.num_frames + 1,):
-        raise ValueError("Raw MV offsets must have shape [N+1]")
-
-    root_path = Path(root).resolve()
-    root_path.mkdir(parents=True, exist_ok=True)
-    destination = root_path / bundle.key.episode_uid / bundle.key.camera_id / bundle.key.source_kind
-    if destination.exists():
-        raise FileExistsError(f"Episode bundle already exists: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=f".{source_kind}.tmp-", dir=destination.parent))
-    try:
-        descriptors: dict[str, Any] = {}
-        for name in sorted(_ARRAY_KEYS):
-            relative = f"arrays/{name}.npy"
-            descriptors[name] = _write_array(
-                stage / relative,
-                getattr(bundle, name),
-                relative_path=relative,
-            )
-        raw_descriptor: dict[str, Any] | None = None
-        if raw_audit is not None:
-            offsets_relative = "audit/raw_mv_offsets.npy"
-            raw_descriptor = {
-                "offsets": _write_array(
-                    stage / offsets_relative,
-                    raw_audit.offsets,
-                    relative_path=offsets_relative,
-                ),
-                "fields": {},
-            }
-            for name in MV_FIELD_DTYPES:
-                relative = f"audit/raw_mv_{name}.npy"
-                raw_descriptor["fields"][name] = _write_array(
-                    stage / relative,
-                    raw_audit.fields[name],
-                    relative_path=relative,
-                )
-
-        bitstream_descriptor: dict[str, Any] | None = None
-        if accepted_bitstream is not None:
-            source_bitstream = Path(accepted_bitstream).resolve(strict=True)
-            if not source_bitstream.is_file():
-                raise ValueError("accepted_bitstream must be a regular file")
-            relative = "artifacts/accepted_bitstream.bin"
-            destination_bitstream = stage / relative
-            destination_bitstream.parent.mkdir(parents=True, exist_ok=True)
-            with source_bitstream.open("rb") as source, destination_bitstream.open("xb") as sink:
-                shutil.copyfileobj(source, sink, length=1024 * 1024)
-            bitstream_descriptor = {
-                "relative_path": relative,
-                "sha256": _sha256_path(destination_bitstream),
-                "bytes": destination_bitstream.stat().st_size,
-                "dtype": "bytes",
-                "shape": [],
-            }
-
-        manifest = {
-            "schema_version": BUNDLE_SCHEMA_VERSION,
-            "episode_uid": bundle.key.episode_uid,
-            "camera_id": bundle.key.camera_id,
-            "source_kind": bundle.key.source_kind,
-            "episode_identity": _deep_thaw(bundle.episode_identity),
-            "codec_contract": _deep_thaw(bundle.codec_contract),
-            "codec_contract_sha256": bundle.codec_contract_sha256,
-            "split": bundle.split,
-            "cohort_id": bundle.cohort_id,
-            "dataset_name": bundle.dataset_name,
-            "source_episode_index": bundle.source_episode_index,
-            "num_frames": bundle.num_frames,
-            "num_anchors": bundle.num_anchors,
-            "width": bundle.width,
-            "height": bundle.height,
-            "time_base_num": bundle.time_base_num,
-            "time_base_den": bundle.time_base_den,
-            "gop_size": bundle.gop_size,
-            "k_max": K_MAX,
-            "frame_hashes": {
-                "source": list(bundle.source_frame_sha256),
-                "canonical": list(bundle.canonical_frame_sha256),
-                "fixture": list(bundle.fixture_frame_sha256),
-            },
-            "identities": {
-                "tool": _deep_thaw(bundle.tool_identity),
-                "encoder": _deep_thaw(bundle.encoder_identity),
-                "decoder": _deep_thaw(bundle.decoder_identity),
-                "extractor": _deep_thaw(bundle.extractor_identity),
-            },
-            "arrays": descriptors,
-            "accepted_bitstream": bitstream_descriptor,
-            "raw_motion_vector_audit": raw_descriptor,
-        }
-        manifest_path = stage / "bundle.json"
-        with manifest_path.open("x", encoding="utf-8", newline="\n") as stream:
-            json.dump(manifest, stream, sort_keys=True, separators=(",", ":"))
-            stream.write("\n")
-        for file_path in stage.rglob("*"):
-            if file_path.is_file():
-                file_path.chmod(0o444)
-        for directory in sorted((path for path in stage.rglob("*") if path.is_dir()), reverse=True):
-            directory.chmod(0o555)
-        stage.chmod(0o555)
-        if destination.exists():
-            raise FileExistsError(f"Episode bundle already exists: {destination}")
-        os.rename(stage, destination)
-        return destination / "bundle.json"
-    except Exception:
-        if stage.exists():
-            for directory in [stage, *stage.rglob("*")]:
-                if directory.is_dir():
-                    try:
-                        directory.chmod(0o755)
-                    except OSError:
-                        pass
-            shutil.rmtree(stage, ignore_errors=True)
-        raise
-
-
 def _validate_descriptor(
     descriptor: Any, *, name: str, expected_relative: str
 ) -> Mapping[str, Any]:
@@ -1851,5 +1686,4 @@ __all__ = [
     "collate_episode_views_numpy",
     "make_synthetic_episode_bundle",
     "validate_episode_view",
-    "write_episode_bundle",
 ]

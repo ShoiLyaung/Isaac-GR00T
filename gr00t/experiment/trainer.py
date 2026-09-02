@@ -29,8 +29,10 @@ pipeline is bottlenecked by data loading or by the model's computation.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from pathlib import Path
 import queue
 import threading
 from typing import Any, Optional
@@ -173,6 +175,28 @@ class Gr00tTrainer(Trainer):
             self.optimizer_trainability_summary = validator(optimizer)
         return optimizer
 
+    def _write_codec_gradient_evidence(self) -> Path | None:
+        model = self.model
+        probe = getattr(model, "codec_gradient_evidence", None)
+        if not callable(probe) and hasattr(model, "module"):
+            model = model.module
+            probe = getattr(model, "codec_gradient_evidence", None)
+        if not callable(probe):
+            return None
+        evidence = probe()
+        if evidence is None:
+            return None
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        path = (
+            Path(self.args.output_dir)
+            / f"CODEC_GRADIENT_EVIDENCE.rank{rank}.step{self.state.global_step}.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8") as stream:
+            json.dump(evidence, stream, indent=2, sort_keys=True, allow_nan=False)
+            stream.write("\n")
+        return path
+
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
         # Hide epoch from logged metrics as it's misleading for Iterable datasets.
         epoch = self.state.epoch
@@ -252,7 +276,9 @@ class Gr00tTrainer(Trainer):
                 os.path.join(latest_checkpoint, TRAINER_STATE_NAME)
             )
 
-        return super().train(resume_from_checkpoint=latest_checkpoint, **kwargs)
+        result = super().train(resume_from_checkpoint=latest_checkpoint, **kwargs)
+        self._write_codec_gradient_evidence()
+        return result
 
     # ------------------------------------------------------------------
     # Loss / accuracy computation override

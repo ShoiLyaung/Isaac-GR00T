@@ -443,7 +443,13 @@ def test_setup_clears_disabled_preseed_before_native_components(tmp_path):
 
 def _checkpoint_identity_pipeline(requested_codec: dict | None) -> tuple:
     pipeline = Gr00tN1d7Pipeline.__new__(Gr00tN1d7Pipeline)
-    pipeline.config = SimpleNamespace(model=SimpleNamespace(model_type="Gr00tN1d7"))
+    pipeline.config = SimpleNamespace(
+        model=SimpleNamespace(
+            model_type="Gr00tN1d7",
+            action_horizon=40,
+            codec_trainability=None,
+        )
+    )
     pipeline.transformers_loading_kwargs = {"local_files_only": True}
     codec_config = (
         SimpleNamespace(to_model_dict=lambda: dict(requested_codec))
@@ -703,6 +709,24 @@ def test_trainer_validates_realized_optimizer_closure(monkeypatch):
     assert trainer.optimizer_trainability_summary == expected_summary
 
 
+def test_trainer_writes_bounded_codec_gradient_evidence(tmp_path):
+    evidence = {
+        "schema_version": "groot-codec-gradient-evidence-v1",
+        "mode": "codec_only",
+        "probe_limit": 3,
+        "parameters": {},
+    }
+    trainer = Gr00tTrainer.__new__(Gr00tTrainer)
+    trainer.model = SimpleNamespace(codec_gradient_evidence=lambda: evidence)
+    trainer.args = SimpleNamespace(output_dir=str(tmp_path))
+    trainer.state = SimpleNamespace(global_step=2)
+
+    path = trainer._write_codec_gradient_evidence()
+
+    assert path == tmp_path / "CODEC_GRADIENT_EVIDENCE.rank0.step2.json"
+    assert json.loads(path.read_text()) == evidence
+
+
 def test_enabled_checkpoint_partial_codec_missing_fails(monkeypatch):
     requested = _model_codec_config()
     pipeline, codec_config = _checkpoint_identity_pipeline(requested)
@@ -899,3 +923,61 @@ def test_native_to_codec_model_load_receives_strict_trainability(tmp_path, monke
     assert captured["checkpoint"] == "native-checkpoint"
     assert captured["codec_trainability"] == "codec_only"
     assert captured["codec_evidence"] == _model_codec_config()
+
+
+def test_native_checkpoint_model_load_preserves_upstream_call_surface(tmp_path, monkeypatch):
+    pipeline = Gr00tN1d7Pipeline.__new__(Gr00tN1d7Pipeline)
+    model_config = SimpleNamespace(
+        tune_llm=False,
+        tune_visual=False,
+        tune_projector=True,
+        tune_diffusion_model=True,
+        tune_vlln=True,
+        codec_trainability=None,
+        state_dropout_prob=0.2,
+        backbone_trainable_params_fp32=True,
+        load_bf16=False,
+    )
+    pipeline.config = SimpleNamespace(
+        model=model_config,
+        training=SimpleNamespace(
+            start_from_checkpoint="native-checkpoint",
+            skip_weight_loading=False,
+        ),
+    )
+    pipeline.codec_evidence_config = None
+    pipeline.transformers_loading_kwargs = {"local_files_only": True}
+    pipeline.save_cfg_dir = tmp_path
+
+    monkeypatch.setattr(
+        "gr00t.model.gr00t_n1d7.setup.AutoConfig.from_pretrained",
+        lambda *args, **kwargs: pytest.fail("native path performed Codec classification"),
+    )
+    parameter = nn.Parameter(torch.zeros(()))
+    loaded_model = SimpleNamespace(
+        action_head=SimpleNamespace(mask_token=None),
+        config=SimpleNamespace(to_filtered_json=lambda: "{}"),
+        parameters=lambda: [parameter],
+    )
+    captured = {}
+
+    def fake_from_pretrained(checkpoint, **kwargs):
+        captured["checkpoint"] = checkpoint
+        captured.update(kwargs)
+        return loaded_model, {
+            "missing_keys": [],
+            "unexpected_keys": [],
+            "mismatched_keys": [],
+            "error_msgs": [],
+        }
+
+    monkeypatch.setattr(
+        "gr00t.model.gr00t_n1d7.setup.AutoModel.from_pretrained",
+        fake_from_pretrained,
+    )
+
+    assert pipeline._create_model() is loaded_model
+    assert captured["checkpoint"] == "native-checkpoint"
+    assert "action_horizon" not in captured
+    assert "codec_evidence" not in captured
+    assert "codec_trainability" not in captured

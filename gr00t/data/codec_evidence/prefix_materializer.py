@@ -55,29 +55,16 @@ EXPECTED_SOURCE_KIND = SOURCE_KIND_NATIVE_CANONICAL
 EXPECTED_HEIGHT = 480
 EXPECTED_WIDTH = 640
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _TRAINING_CONTRACT_KEYS = {
     "schema_version",
-    "runtime_ready",
     "online_prefix_equivalent",
-    "checkpoint_index_sha256",
-    "training_source_commit",
-    "runtime_source_commit",
     "materializer_id",
     "materializer_sha256",
     "source_kind",
     "camera_id",
-    "simulator_hz",
     "evidence_hz",
     "history_length",
     "future_frame_fallback_allowed",
-}
-_RUNTIME_BINDING_KEYS = {
-    "experiment_id",
-    "run_id",
-    "checkpoint_identity",
-    "factory_module",
-    "factory_module_sha256",
 }
 _EPISODE_ARRAY_KEYS = {
     "frame_index",
@@ -138,35 +125,25 @@ def _validate_contract(contract: Mapping[str, Any]) -> tuple[dict[str, Any], dic
     if type(contract) is not dict:
         raise PrefixMaterializerError("causal materializer contract must be a plain dict")
     keys = set(contract)
-    if keys != _TRAINING_CONTRACT_KEYS and keys != (
-        _TRAINING_CONTRACT_KEYS | _RUNTIME_BINDING_KEYS
-    ):
+    if keys != _TRAINING_CONTRACT_KEYS:
         raise PrefixMaterializerError("causal materializer contract keys are not exact")
     if contract.get("schema_version") != TRAINING_CONTRACT_SCHEMA_VERSION:
         raise PrefixMaterializerError("causal materializer contract schema is not exact")
     if (
-        contract.get("runtime_ready") is not True
-        or contract.get("online_prefix_equivalent") is not True
+        contract.get("online_prefix_equivalent") is not True
         or contract.get("future_frame_fallback_allowed") is not False
     ):
-        raise PrefixMaterializerError("causal materializer contract is not runtime-ready")
+        raise PrefixMaterializerError("causal materializer contract is not prefix-safe")
     expected = {
         "materializer_id": EXPECTED_MATERIALIZER_ID,
         "source_kind": EXPECTED_SOURCE_KIND,
         "camera_id": CAMERA_ID,
-        "simulator_hz": 50,
         "evidence_hz": 30,
         "history_length": HISTORY,
     }
     for name, value in expected.items():
         if contract.get(name) != value:
             raise PrefixMaterializerError(f"causal materializer contract {name} is not exact")
-    _require_sha256(contract.get("checkpoint_index_sha256"), "checkpoint_index_sha256")
-    for name in ("training_source_commit", "runtime_source_commit"):
-        value = contract.get(name)
-        if type(value) is not str or _COMMIT_RE.fullmatch(value) is None:
-            raise PrefixMaterializerError(f"{name} must be a lowercase 40-character commit")
-
     factory_path = Path(__file__)
     factory_identity = _module_identity(factory_path)
     materializer_sha256 = _require_sha256(
@@ -174,24 +151,6 @@ def _validate_contract(contract: Mapping[str, Any]) -> tuple[dict[str, Any], dic
     )
     if materializer_sha256 != factory_identity["sha256"]:
         raise PrefixMaterializerError("contract materializer SHA-256 differs from this factory")
-    if _RUNTIME_BINDING_KEYS.issubset(keys):
-        bound_path = Path(str(contract["factory_module"]))
-        try:
-            resolved_bound = bound_path.resolve(strict=True)
-        except OSError as exc:
-            raise PrefixMaterializerError("bound factory module is unavailable") from exc
-        if resolved_bound != factory_path.resolve(strict=True):
-            raise PrefixMaterializerError("bound factory module path differs from this factory")
-        if (
-            _require_sha256(contract["factory_module_sha256"], "factory_module_sha256")
-            != factory_identity["sha256"]
-        ):
-            raise PrefixMaterializerError("bound factory module SHA-256 differs")
-        for name in ("experiment_id", "run_id"):
-            if type(contract[name]) is not str or not contract[name]:
-                raise PrefixMaterializerError(f"{name} must be a non-empty string")
-        _require_sha256(contract["checkpoint_identity"], "checkpoint_identity")
-
     production_path = Path(sys_module_file(build_episode_arrays))
     episode_path = Path(sys_module_file(validate_episode_view))
     codec_contract = make_codec_contract(
