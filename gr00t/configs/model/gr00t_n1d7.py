@@ -102,8 +102,8 @@ class Gr00tN1d7Config(PretrainedConfig):
         }
     )
 
-    # Only the action sequence self-mixer is changed. Cross-attention stays native.
-    action_self_mixer: str = "dit"
+    # Replace the entire action DiT; external VLM and native action ABI stay unchanged.
+    action_backbone: str = "dit"
     action_mamba2_cfg: dict = field(
         default_factory=lambda: {
             "d_state": 64,

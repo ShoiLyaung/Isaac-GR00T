@@ -17,7 +17,7 @@ def _mamba2_class():
         from mamba_ssm.modules.mamba2 import Mamba2
     except ImportError as exc:
         raise RuntimeError(
-            "action_self_mixer=mamba2 requires the official mamba_ssm Mamba2"
+            "action_backbone=conditional_mamba2 requires the official mamba_ssm Mamba2"
         ) from exc
     return Mamba2
 
@@ -37,82 +37,54 @@ class BidirectionalMamba2SelfMixer(nn.Module):
         return (forward + reverse) * 0.5
 
 
-def replace_self_mixers(diffusion_model, config: Mapping[str, Any]) -> list[int]:
-    """Replace odd self-attention modules; leave every other tensor untouched."""
-    if not diffusion_model.config.interleave_self_attention:
-        raise ValueError("Mamba2 replacement requires native interleaved self-attention")
-    # Validate dependency before changing any module.
-    _mamba2_class()
-    replacements = []
-    for index, block in enumerate(diffusion_model.transformer_blocks):
-        if index % 2 == 0:
-            continue
-        if block.cross_attention_dim is not None:
-            raise ValueError(f"Block {index} is not native self-attention")
-        if isinstance(block.attn1, BidirectionalMamba2SelfMixer):
-            raise ValueError("Self mixer has already been replaced")
-        parameter = next(block.attn1.parameters())
-        trainability = {p.requires_grad for p in block.attn1.parameters()}
-        if len(trainability) != 1:
-            raise ValueError("Cannot preserve mixed trainability within a self-attention module")
-        replacement = BidirectionalMamba2SelfMixer(
-            block.dim, config, device=parameter.device, dtype=parameter.dtype
-        )
-        replacement.requires_grad_(trainability.pop())
-        replacement.train(block.attn1.training)
-        replacements.append((index, replacement))
-    if not replacements:
-        raise ValueError("No action self-attention blocks found")
-    # Commit only after every candidate module was constructed successfully.
-    for index, replacement in replacements:
-        diffusion_model.transformer_blocks[index].attn1 = replacement
-    return [index for index, _ in replacements]
-
-
 def convert_native_model(model, *, mamba2_config=None) -> dict[str, Any]:
-    """Convert a strictly loaded native model and audit unchanged tensor identity.
+    """Replace the entire DiT after strict native load; audit all outside tensors."""
+    from gr00t.model.modules.conditional_mamba import ConditionalMamba2
 
-    Keeping the same object AND version counter verifies no untouched tensor was
-    replaced or modified by conversion. State dict values themselves are not
-    cloned, avoiding an extra full VLM copy in host/device memory.
-    """
-    if model.config.action_self_mixer != "dit":
+    if model.config.action_backbone != "dit":
         raise ValueError("Conversion accepts only a native DiT model")
     before = {
         name: (tensor, tensor._version, tensor.numel())
         for name, tensor in list(model.named_parameters()) + list(model.named_buffers())
     }
     config = dict(model.config.action_mamba2_cfg if mamba2_config is None else mamba2_config)
-    indices = replace_self_mixers(model.action_head.model, config)
-    prefixes = tuple(f"action_head.model.transformer_blocks.{i}.attn1." for i in indices)
+    old = model.action_head.model
+    parameter = next(old.parameters())
+    candidate = ConditionalMamba2(
+        model.config.diffusion_model_cfg, model.config.backbone_embedding_dim, config
+    ).to(device=parameter.device, dtype=parameter.dtype)
+    candidate.requires_grad_(model.action_head.tune_diffusion_model)
+    candidate.train(old.training)
+    model.action_head.model = candidate
+    prefix = "action_head.model."
     after = dict(list(model.named_parameters()) + list(model.named_buffers()))
-    preserved = [name for name in before if not name.startswith(prefixes)]
-    if set(after) - {name for name in after if name.startswith(prefixes)} != set(preserved):
-        raise RuntimeError("Conversion changed keys outside the declared self mixers")
+    preserved = [name for name in before if not name.startswith(prefix)]
+    if {name for name in after if not name.startswith(prefix)} != set(preserved):
+        raise RuntimeError("Conversion changed keys outside the declared backbone")
     if any(
         after[name] is not before[name][0] or after[name]._version != before[name][1]
         for name in preserved
     ):
-        raise RuntimeError("Conversion changed a tensor outside the declared self mixers")
-    model.config.action_self_mixer = "mamba2"
+        raise RuntimeError("Conversion changed a tensor outside the declared backbone")
+    model.config.action_backbone = "conditional_mamba2"
     model.config.action_mamba2_cfg = config
-    model.action_head.config.action_self_mixer = "mamba2"
+    model.action_head.config.action_backbone = "conditional_mamba2"
     model.action_head.config.action_mamba2_cfg = config
     return {
-        "replacement_indices": indices,
-        "replacement_prefixes": list(prefixes),
+        "replacement_prefix": prefix,
         "unchanged_tensor_count": len(preserved),
         "unchanged_tensor_identity_and_version": True,
         "removed_parameter_count": sum(
-            n for name, (_, _, n) in before.items() if name.startswith(prefixes)
+            n for name, (_, _, n) in before.items() if name.startswith(prefix)
         ),
         "replacement_parameter_count": sum(
-            t.numel() for name, t in after.items() if name.startswith(prefixes)
+            t.numel() for name, t in after.items() if name.startswith(prefix)
         ),
         "bidirectional_shared_weights": True,
         "persistent_ssm_state": False,
-        "action_self_mixer": "mamba2",
+        "action_backbone": "conditional_mamba2",
         "mamba2_config": config,
+        "time_and_output_projection_pretrained_transfer": False,
     }
 
 
@@ -152,6 +124,6 @@ def load_candidate_strict(checkpoint, **loading_kwargs):
             raise RuntimeError(
                 f"Candidate checkpoint failed strict load: {key}={loading_info[key]}"
             )
-    if model.config.action_self_mixer != "mamba2":
-        raise ValueError("Candidate checkpoint does not declare Mamba2 self mixers")
+    if model.config.action_backbone != "conditional_mamba2":
+        raise ValueError("Candidate checkpoint does not declare conditional Mamba2")
     return model, loading_info

@@ -46,7 +46,15 @@ class Gr00tN1d7ActionHead(nn.Module):
         self.hidden_size = config.hidden_size
         self.input_embedding_dim = config.input_embedding_dim
 
-        if config.use_alternate_vl_dit:
+        if config.action_backbone == "conditional_mamba2":
+            from gr00t.model.modules.conditional_mamba import ConditionalMamba2
+
+            self.model = ConditionalMamba2(
+                config.diffusion_model_cfg, config.backbone_embedding_dim, config.action_mamba2_cfg
+            )
+        elif config.action_backbone != "dit":
+            raise ValueError(f"Unknown action_backbone: {config.action_backbone!r}")
+        elif config.use_alternate_vl_dit:
             self.model = AlternateVLDiT(
                 **config.diffusion_model_cfg,
                 cross_attention_dim=config.backbone_embedding_dim,
@@ -59,12 +67,6 @@ class Gr00tN1d7ActionHead(nn.Module):
                 cross_attention_dim=config.backbone_embedding_dim,
             )
             logger.info("Using DiT for diffusion model")
-        if config.action_self_mixer not in ("dit", "mamba2"):
-            raise ValueError(f"Unknown action_self_mixer: {config.action_self_mixer!r}")
-        if config.action_self_mixer == "mamba2":
-            from gr00t.model.modules.mamba_action_mixer import replace_self_mixers
-
-            replace_self_mixers(self.model, config.action_mamba2_cfg)
         self.action_dim = config.max_action_dim
         self.action_horizon = config.action_horizon
         self.num_inference_timesteps = config.num_inference_timesteps

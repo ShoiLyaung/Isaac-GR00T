@@ -94,7 +94,7 @@ def test_native_default_is_bitwise_unchanged():
     torch.manual_seed(31)
     default = Gr00tN1d7ActionHead(config())
     torch.manual_seed(31)
-    explicit = Gr00tN1d7ActionHead(config(action_self_mixer="dit"))
+    explicit = Gr00tN1d7ActionHead(config(action_backbone="dit"))
     assert default.state_dict().keys() == explicit.state_dict().keys()
     assert all(
         torch.equal(value, explicit.state_dict()[name])
@@ -115,7 +115,7 @@ def test_bidirectional_is_equivariant_and_repeatable(cpu_double):
         module(sequence, encoder_hidden_states=sequence)
 
 
-def test_only_self_mixers_change_and_gradients_flow(cpu_double):
+def test_only_backbone_changes_and_gradients_flow(cpu_double):
     cfg = config()
     head = Gr00tN1d7ActionHead(cfg)
     holder = nn.Module()
@@ -123,11 +123,11 @@ def test_only_self_mixers_change_and_gradients_flow(cpu_double):
     holder.action_head = head
     before = {name: tensor.clone() for name, tensor in holder.state_dict().items()}
     report = mixer.convert_native_model(holder)
-    assert report["replacement_indices"] == [1, 3]
+    assert report["replacement_prefix"] == "action_head.model."
     assert report["unchanged_tensor_identity_and_version"]
-    assert cfg.action_self_mixer == "mamba2"
+    assert cfg.action_backbone == "conditional_mamba2"
     for name, value in holder.state_dict().items():
-        if not name.startswith(tuple(report["replacement_prefixes"])):
+        if not name.startswith(report["replacement_prefix"]):
             assert torch.equal(value, before[name])
     loss = head(features(cfg), inputs(cfg))["loss"]
     loss.backward()
@@ -136,7 +136,7 @@ def test_only_self_mixers_change_and_gradients_flow(cpu_double):
 
 
 def test_masked_vlm_tokens_remain_excluded(cpu_double):
-    cfg = config(action_self_mixer="mamba2")
+    cfg = config(action_backbone="conditional_mamba2")
     head = Gr00tN1d7ActionHead(cfg).eval()
     original = features(cfg)
     altered = BatchFeature(data={key: value.clone() for key, value in original.items()})
@@ -184,7 +184,7 @@ def test_missing_backend_fails_closed(monkeypatch):
 
     monkeypatch.setattr(mixer, "_mamba2_class", unavailable)
     with pytest.raises(RuntimeError, match="official backend unavailable"):
-        Gr00tN1d7ActionHead(config(action_self_mixer="mamba2"))
+        Gr00tN1d7ActionHead(config(action_backbone="conditional_mamba2"))
 
 
 @pytest.mark.gpu
@@ -215,3 +215,50 @@ def test_official_mamba2_cuda_forward_backward():
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in module.parameters())
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         assert torch.equal(module(data), module(data))
+
+
+def test_candidate_has_no_attention_and_variable_padding_is_invariant(cpu_double):
+    from diffusers.models.attention import Attention
+
+    cfg = config(action_backbone="conditional_mamba2")
+    head = Gr00tN1d7ActionHead(cfg).eval()
+    assert not any(
+        isinstance(module, (Attention, nn.MultiheadAttention)) for module in head.model.modules()
+    )
+    hidden = torch.randn(2, 5, 32)
+    condition = torch.randn(2, 6, 32)
+    mask = torch.tensor(
+        [[True, True, False, True, False, False], [True, False, True, True, True, False]]
+    )
+    times = torch.tensor([2, 5])
+    together = head.model(hidden, condition, times, backbone_attention_mask=mask)
+    for i in range(2):
+        valid = condition[i : i + 1, mask[i]]
+        separate = head.model(
+            hidden[i : i + 1],
+            valid,
+            times[i : i + 1],
+            backbone_attention_mask=torch.ones(1, valid.shape[1], dtype=torch.bool),
+        )
+        assert torch.allclose(together[i], separate[0], atol=1e-6)
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="requires CUDA and official Mamba2 overlay"
+)
+def test_official_conditional_backbone_cuda_gradients():
+    cfg = config(action_backbone="conditional_mamba2")
+    head = Gr00tN1d7ActionHead(cfg).cuda().eval()
+    context = features(cfg, "cuda")
+    action = inputs(cfg, "cuda")
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        loss = head(context, action)["loss"]
+    loss.backward()
+    for parameter in (
+        head.model.condition_projection.weight,
+        head.model.blocks[0].mixer.mamba2.in_proj.weight,
+        head.model.proj_out_2.weight,
+    ):
+        assert parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        assert parameter.grad.abs().sum() > 0
