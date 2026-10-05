@@ -20,6 +20,8 @@ import time
 from unittest.mock import patch
 
 from contract import (
+    LLM_PREFIXES,
+    VISUAL_PREFIXES,
     assert_compact13_contract,
     preserve_yuqi_language,
     sha,
@@ -35,6 +37,7 @@ from runner_core import (
     STEPS,
     aggregate_metrics,
     deterministic_seed,
+    gradient_checks,
     make_schedule,
     masked_flow,
     preserve_eval_state,
@@ -441,9 +444,9 @@ def strict_reload(path):
 
 def optimizer_for(model):
     parameters = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
-    if not any(name.startswith("backbone.model.visual.") for name, _ in parameters):
+    if not any(name.startswith(VISUAL_PREFIXES) for name, _ in parameters):
         raise ValueError("Vision must remain trainable")
-    if any(name.startswith("backbone.model.language_model.") for name, _ in parameters):
+    if any(name.startswith(LLM_PREFIXES) for name, _ in parameters):
         raise ValueError("LLM must remain frozen")
     norms = {
         f"{name}.{key}"
@@ -461,38 +464,6 @@ def optimizer_for(model):
         for no_decay in (False, True)
     ]
     return torch.optim.AdamW(groups, lr=1e-4, betas=(0.9, 0.999), eps=1e-8), parameters
-
-
-def gradient_checks(parameters):
-    from deepspeed.utils import safe_get_full_grad
-
-    prefixes = {
-        "vision": "backbone.model.visual.",
-        "model": "action_head.model.",
-        "state_encoder": "action_head.state_encoder.",
-        "action_encoder": "action_head.action_encoder.",
-        "action_decoder": "action_head.action_decoder.",
-        "vlln": "action_head.vlln.",
-        "vl_self_attention": "action_head.vl_self_attention.",
-    }
-    report = {}
-    for group, prefix in prefixes.items():
-        candidates = [(name, p) for name, p in parameters if name.startswith(prefix)]
-        # Small tensors avoid gathering an entire enormous projector solely for diagnostics.
-        candidates.sort(key=lambda item: (item[1].numel(), item[0]))
-        for name, parameter in candidates:
-            grad = safe_get_full_grad(parameter)
-            if grad is None:
-                continue
-            finite, norm = bool(torch.isfinite(grad).all()), float(grad.float().norm())
-            if not finite:
-                raise FloatingPointError(f"Nonfinite gradient: {name}")
-            if norm > 0:
-                report[group] = {"parameter": name, "finite": finite, "norm": norm}
-                break
-        if group not in report:
-            raise ValueError(f"No finite nonzero gradient in required module: {group}")
-    return report
 
 
 def source_identity():

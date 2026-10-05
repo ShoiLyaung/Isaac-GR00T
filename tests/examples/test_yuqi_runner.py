@@ -124,3 +124,28 @@ def test_known_yuqi_text_identity_preserves_semantics():
     assert loader.tasks_map[0] == loader.tasks_map["insert the shaft into the housing"]
     with pytest.raises(KeyError):
         _ = loader.tasks_map["unknown task"]
+
+
+def test_microbatch_partition_preserves_all_camera_patches_and_active_masks():
+    from preflight import slice_batch
+
+    mask = torch.zeros(32, 40, 13)
+    mask[:, :16] = 1
+    batch = {
+        "state": torch.arange(32 * 13).reshape(32, 1, 13),
+        "action_mask": mask,
+        "image_grid_thw": torch.tensor([[1, 1, 2]] * (32 * 3)),
+        "pixel_values": torch.arange(32 * 3 * 2 * 7).reshape(-1, 7),
+    }
+    parts = []
+    for micro in range(2):
+        for rank in range(2):
+            slots = rank_slots(rank, 8, 2)[micro]
+            part = slice_batch(batch, slots[0], slots[-1] + 1)
+            assert part["action_mask"].sum() == 8 * 208
+            assert part["image_grid_thw"].shape == (24, 3)
+            assert part["pixel_values"].shape == (48, 7)
+            parts.append(part)
+    assert all(
+        torch.equal(torch.cat([part[key] for part in parts]), value) for key, value in batch.items()
+    )

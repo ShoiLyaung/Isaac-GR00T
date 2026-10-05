@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import hashlib
 import random
 
+from contract import VISUAL_PREFIXES
 import numpy as np
 import torch
 
@@ -135,3 +136,35 @@ def aggregate_metrics(rows, keys):
     return episode_rows, {
         key: float(np.mean([row[key] for row in episode_rows.values()])) for key in keys
     }
+
+
+def gradient_checks(parameters):
+    from deepspeed.utils import safe_get_full_grad
+
+    prefixes = {
+        "vision": VISUAL_PREFIXES,
+        "model": "action_head.model.",
+        "state_encoder": "action_head.state_encoder.",
+        "action_encoder": "action_head.action_encoder.",
+        "action_decoder": "action_head.action_decoder.",
+        "vlln": "action_head.vlln.",
+        "vl_self_attention": "action_head.vl_self_attention.",
+    }
+    report = {}
+    for group, prefix in prefixes.items():
+        candidates = [(name, p) for name, p in parameters if name.startswith(prefix)]
+        # Small tensors avoid gathering an entire enormous projector solely for diagnostics.
+        candidates.sort(key=lambda item: (item[1].numel(), item[0]))
+        for name, parameter in candidates:
+            grad = safe_get_full_grad(parameter)
+            if grad is None:
+                continue
+            finite, norm = bool(torch.isfinite(grad).all()), float(grad.float().norm())
+            if not finite:
+                raise FloatingPointError(f"Nonfinite gradient: {name}")
+            if norm > 0:
+                report[group] = {"parameter": name, "finite": finite, "norm": norm}
+                break
+        if group not in report:
+            raise ValueError(f"No finite nonzero gradient in required module: {group}")
+    return report

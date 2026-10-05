@@ -14,6 +14,8 @@ import shutil
 import time
 
 from contract import (
+    LLM_PREFIXES,
+    VISUAL_PREFIXES,
     assert_compact13_contract,
     preserve_yuqi_language,
     processor_compatibility_config,
@@ -23,6 +25,7 @@ from contract import (
     write_new,
 )
 import numpy as np
+from runner_core import assert_mask, gradient_checks, rank_slots
 import torch
 
 
@@ -188,14 +191,14 @@ def full_model(args):
 
 def cuda_probe(args):
     import deepspeed
-    from deepspeed.utils import safe_get_full_grad
     import torch.distributed as dist
 
     world = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if world != 2:
-        raise ValueError("Yuqi preflight requires two GPUs and per-rank batch16/global32")
+        raise ValueError("Yuqi preflight requires two GPUs/global32")
+    slots = rank_slots(rank, args.microbatch, args.accumulation)
     torch.cuda.set_device(local_rank)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -210,17 +213,19 @@ def cuda_probe(args):
     batch = torch.load(prepared["batches"]["train"]["path"], map_location="cpu", weights_only=True)
     # Pixel tensors concatenate image patches, unlike batch-leading state/text.
     # Re-collate per-rank input by slicing image_grid_thw and patch spans together.
-    batch = slice_batch(batch, rank * 16, (rank + 1) * 16)
+    batches = [slice_batch(batch, part[0], part[-1] + 1) for part in slots]
+    for batch in batches:
+        assert_mask(batch["action_mask"])
     eval_batch = slice_batch(
         torch.load(prepared["batches"]["eval"]["path"], map_location="cpu", weights_only=True),
-        rank * 16,
-        (rank + 1) * 16,
+        slots[0][0],
+        slots[0][-1] + 1,
     )
     model, audit = full_model(args)
     parameters = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
-    if not any(name.startswith("backbone.model.visual.") for name, _ in parameters):
+    if not any(name.startswith(VISUAL_PREFIXES) for name, _ in parameters):
         raise ValueError("Visual training is required; raw VLM caching is forbidden")
-    if any(name.startswith("backbone.model.language_model.") for name, _ in parameters):
+    if any(name.startswith(LLM_PREFIXES) for name, _ in parameters):
         raise ValueError("Language weights must remain frozen")
     norm_names = {
         f"{name}.{key}"
@@ -244,8 +249,8 @@ def cuda_probe(args):
     ds_config = json.loads(Path(args.zero_config).read_text())
     ds_config.update(
         train_batch_size=32,
-        train_micro_batch_size_per_gpu=16,
-        gradient_accumulation_steps=1,
+        train_micro_batch_size_per_gpu=args.microbatch,
+        gradient_accumulation_steps=args.accumulation,
         gradient_clipping=1.0,
     )
     ds_config["bf16"]["enabled"] = True
@@ -262,7 +267,10 @@ def cuda_probe(args):
         initial_action = engine.module.get_action(
             {key: value.cuda(local_rank) for key, value in observation.items()}
         )["action_pred"]
-    if initial_action.shape != (16, 40, 13) or not torch.isfinite(initial_action).all():
+    if (
+        initial_action.shape != (args.microbatch, 40, 13)
+        or not torch.isfinite(initial_action).all()
+    ):
         raise ValueError("Nonfinite or non-native preflight action")
     np.save(args.output / f"initial_action_rank{rank}.npy", initial_action.float().cpu().numpy())
     engine.train()
@@ -273,41 +281,20 @@ def cuda_probe(args):
     for step in range(args.steps):
         if time.monotonic() - started > args.wall_seconds:
             raise TimeoutError("Preflight wall budget exhausted")
-        seed_microbatch(step, rank)
         tick = time.perf_counter()
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            result = engine(inputs={key: value.cuda(local_rank) for key, value in batch.items()})
-        loss = result["loss"]
-        if not torch.isfinite(loss):
-            raise FloatingPointError("Nonfinite native masked loss")
-        engine.backward(loss)
-        if step == 0:
-            checks = {}
-            for name, p in parameters:
-                group = None
-                if name.startswith("backbone.model.visual.") and p.numel() < 100000:
-                    group = "visual"
-                elif name.startswith("action_head.model.condition_projection"):
-                    group = "condition_projection"
-                elif name.startswith("action_head.model.blocks.0.mixer") and name.endswith(
-                    "dt_bias"
-                ):
-                    group = "mamba_first_block"
-                elif name.startswith("action_head.action_decoder") and p.numel() < 100000:
-                    group = "action_decoder"
-                if group and group not in checks:
-                    grad = safe_get_full_grad(p)
-                    if grad is None:
-                        raise ValueError(f"Missing required gradient: {name}")
-                    checks[group] = {
-                        "parameter": name,
-                        "finite": bool(torch.isfinite(grad).all()),
-                        "norm": float(grad.float().norm()),
-                    }
-            if not checks or any(not row["finite"] or row["norm"] == 0 for row in checks.values()):
-                raise ValueError(f"Failed gradient checks: {checks}")
-            gradient_report = checks
-        engine.step()
+        for micro, batch in enumerate(batches):
+            seed_microbatch(step * args.accumulation + micro, rank)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                result = engine(
+                    inputs={key: value.cuda(local_rank) for key, value in batch.items()}
+                )
+            loss = result["loss"]
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Nonfinite native masked loss")
+            engine.backward(loss)
+            if step == 0 and micro == args.accumulation - 1:
+                gradient_report = gradient_checks(parameters)
+            engine.step()
         torch.cuda.synchronize()
         durations.append(time.perf_counter() - tick)
     report = {
@@ -315,7 +302,10 @@ def cuda_probe(args):
         "rank": rank,
         "status": "completed",
         "global_batch": 32,
-        "micro_batch": 16,
+        "micro_batch": args.microbatch,
+        "gradient_accumulation_steps": args.accumulation,
+        "rank_slots": slots,
+        "active_mask_sum_per_microbatch": [int(batch["action_mask"].sum()) for batch in batches],
         "steps": args.steps,
         "loss": float(loss),
         "durations_seconds": durations,
@@ -374,6 +364,8 @@ def main():
         choices=("dit_pretrained", "dit_reinit_backbone", "conditional_mamba2"),
         default="dit_pretrained",
     )
+    parser.add_argument("--microbatch", type=int, choices=(8, 16), default=16)
+    parser.add_argument("--accumulation", type=int, choices=(1, 2), default=1)
     parser.add_argument("--steps", type=int, default=3)
     parser.add_argument("--wall-seconds", type=int, default=900)
     parser.add_argument(

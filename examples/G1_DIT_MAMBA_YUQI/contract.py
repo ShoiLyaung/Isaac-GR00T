@@ -12,6 +12,8 @@ import torch
 
 CAMERAS = ("cam_left_high", "cam_left_wrist", "cam_right_wrist")
 GROUPS = ("left_arm", "left_hand")
+VISUAL_PREFIXES = ("backbone.model.visual.", "backbone.model.model.visual.")
+LLM_PREFIXES = ("backbone.model.language_model.", "backbone.model.model.language_model.")
 
 
 def sha(path):
