@@ -102,6 +102,19 @@ class Gr00tN1d7Config(PretrainedConfig):
         }
     )
 
+    # Only the action sequence self-mixer is changed. Cross-attention stays native.
+    action_self_mixer: str = "dit"
+    action_mamba2_cfg: dict = field(
+        default_factory=lambda: {
+            "d_state": 64,
+            "d_conv": 4,
+            "expand": 2,
+            "headdim": 64,
+            "chunk_size": 64,
+            "use_mem_eff_path": False,
+        }
+    )
+
     # Flow matching parameters
     num_inference_timesteps: int = 4
     noise_beta_alpha: float = 1.5
