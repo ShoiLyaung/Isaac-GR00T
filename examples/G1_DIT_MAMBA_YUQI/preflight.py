@@ -15,8 +15,8 @@ import time
 
 from contract import (
     assert_compact13_contract,
-    processor_compatibility_config,
     preserve_yuqi_language,
+    processor_compatibility_config,
     seed_microbatch,
     sha,
     tensor_identity,
