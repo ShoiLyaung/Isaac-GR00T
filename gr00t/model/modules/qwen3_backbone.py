@@ -16,6 +16,7 @@
 import logging
 
 from huggingface_hub.errors import GatedRepoError
+from packaging.version import Version
 import torch
 from transformers.feature_extraction_utils import BatchFeature
 
@@ -217,6 +218,10 @@ class Qwen3Backbone(torch.nn.Module):
         dispatches to a pathologically slow kernel on sm_80; ``channels_last_3d``
         selects the fast one and is numerically equivalent (harmless elsewhere).
         """
+        # Preserve the native NCDHW path on the pinned Yuqi torch2.7 runtime.
+        # This workaround only applies to the torch2.9+ regression described above.
+        if Version(torch.__version__).release[:2] < (2, 9):
+            return
         visual = getattr(self.model, "visual", None)
         if visual is None:
             return

@@ -189,6 +189,55 @@ def full_model(args):
     return model, audit
 
 
+def initialization_evidence(model):
+    """Read actual post-load layouts/hooks and RoPE values without changing them."""
+    qwen = model.backbone.model
+    visual, language = qwen.visual, qwen.language_model
+    module_names = {id(module): name for name, module in model.named_modules()}
+    convolutions = []
+    for module in visual.modules():
+        if not isinstance(module, torch.nn.Conv3d):
+            continue
+        hooks = [
+            getattr(hook, "__qualname__", type(hook).__qualname__)
+            for hook in module._forward_pre_hooks.values()
+        ]
+        convolutions.append(
+            {
+                "module": module_names[id(module)],
+                "weight_shape": list(module.weight.shape),
+                "weight_dtype": str(module.weight.dtype),
+                "weight_device": str(module.weight.device),
+                "weight_stride": list(module.weight.stride()),
+                "weight_contiguous_ncdhw": module.weight.is_contiguous(),
+                "weight_contiguous_channels_last_3d": module.weight.is_contiguous(
+                    memory_format=torch.channels_last_3d
+                ),
+                "forward_pre_hook_count": len(hooks),
+                "forward_pre_hooks": hooks,
+            }
+        )
+    rope = {}
+    for group, rotary in (("vision", visual.rotary_pos_emb), ("text", language.rotary_emb)):
+        values = {}
+        for name in ("inv_freq", "original_inv_freq"):
+            value = getattr(rotary, name, None)
+            if value is None:
+                continue
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"Expected tensor at {group} RoPE {name}")
+            is_buffer = name in rotary._buffers
+            values[name] = {
+                **tensor_identity(value),
+                "device": str(value.device),
+                "stride": list(value.stride()),
+                "registered_buffer": is_buffer,
+                "persistent": name not in rotary._non_persistent_buffers_set if is_buffer else None,
+            }
+        rope[group] = {"module": module_names[id(rotary)], "values": values}
+    return {"torch_version": str(torch.__version__), "vision_conv3d": convolutions, "rope": rope}
+
+
 def cuda_probe(args):
     import deepspeed
     from deepspeed.utils import safe_get_full_grad
@@ -260,6 +309,7 @@ def cuda_probe(args):
         model=model, optimizer=optimizer, config=ds_config
     )
     engine.eval()
+    initialized = initialization_evidence(engine.module)
     seed_microbatch(0, rank)
     with torch.no_grad():
         observation = {
@@ -274,6 +324,14 @@ def cuda_probe(args):
     ):
         raise ValueError("Nonfinite or non-native preflight action")
     np.save(args.output / f"initial_action_rank{rank}.npy", initial_action.float().cpu().numpy())
+    initialization_path = args.output / f"INITIALIZATION_RANK{rank}.json"
+    write_new(
+        initialization_path,
+        {
+            "post_deepspeed_initialization": initialized,
+            "post_initial_inference": initialization_evidence(engine.module),
+        },
+    )
     engine.train()
     torch.cuda.reset_peak_memory_stats()
     durations = []
@@ -396,6 +454,10 @@ def cuda_probe(args):
         "gradient_checks": gradient_report,
         "first_step_training_evidence": first_step_report,
         "initial_action_identity": tensor_identity(initial_action),
+        "initialization_evidence": {
+            "path": str(initialization_path.resolve()),
+            "sha256": sha(initialization_path),
+        },
         "prepared_manifest_sha256": sha(args.prepared / "PREPARED.json"),
         "training_precision": "native Yuqi DeepSpeed BF16/TF32; no raw VLM cache",
     }
