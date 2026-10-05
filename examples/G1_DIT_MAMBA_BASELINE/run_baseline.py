@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import Gr00tN1d7Processor
 from gr00t.model.modules.mamba_action_mixer import convert_native_model
 import numpy as np
 from safetensors import safe_open
+from safetensors.torch import load as deserialize_tensors, save as serialize_tensors
 import torch
 from torch import nn
 from transformers.feature_extraction_utils import BatchFeature
@@ -54,6 +56,26 @@ def sha(path):
         for part in iter(lambda: stream.read(2**20), b""):
             result.update(part)
     return result.hexdigest()
+
+
+def checkpoint_identity(checkpoint):
+    checkpoint = Path(checkpoint).resolve()
+    index = read(checkpoint / "model.safetensors.index.json")
+    names = [
+        "config.json",
+        "model.safetensors.index.json",
+        *sorted(set(index["weight_map"].values())),
+    ]
+    return {
+        name: {"sha256": sha(checkpoint / name), "bytes": (checkpoint / name).stat().st_size}
+        for name in names
+    }
+
+
+def validate_checkpoint_identity(checkpoint, manifest):
+    current = checkpoint_identity(checkpoint)
+    if current != manifest["base_checkpoint_files"]:
+        raise ValueError("Frozen cache checkpoint identity mismatch (config/index/weight hashes)")
 
 
 def tensor_sha(value):
@@ -179,6 +201,7 @@ def cache(args):
     model, loading = load_full_native(args.base_checkpoint)
     manifest = {
         "base_checkpoint": str(args.base_checkpoint),
+        "base_checkpoint_files": checkpoint_identity(args.base_checkpoint),
         "stage": str(args.stage),
         "source_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=REPO, text=True
@@ -215,6 +238,7 @@ def cache(args):
                     else selection["anchor_indices"]
                 )
                 records = []
+                first_items = []
                 for anchor in anchors:
                     if time.monotonic() - started > args.wall_seconds:
                         raise TimeoutError("Cache wall budget exceeded")
@@ -237,8 +261,13 @@ def cache(args):
                     roundtrip = max(
                         float(np.abs(decoded[key] - step.actions[key]).max()) for key in GROUPS
                     )
-                    if roundtrip > 5e-5:
-                        raise ValueError(f"Target roundtrip error {roundtrip}")
+                    physical_target = np.concatenate([decoded[key] for key in GROUPS], axis=-1)
+                    interior = np.abs(normalized_target[:, :26]) < (1.0 - 1e-5)
+                    interior_error = float(
+                        np.abs(physical_target - target)[interior].max(initial=0.0)
+                    )
+                    if interior_error > 5e-5:
+                        raise ValueError(f"Unclipped target roundtrip error {interior_error}")
                     record = {
                         "episode": ep_id,
                         "anchor": anchor,
@@ -250,6 +279,8 @@ def cache(args):
                         },
                         "target": torch.from_numpy(target.copy()),
                         "target_roundtrip_max_abs": roundtrip,
+                        "target_unclipped_roundtrip_max_abs": interior_error,
+                        "normalized_target_boundary_fraction": float((~interior).mean()),
                     }
                     if "native_smoke" not in manifest:
                         observation = {
@@ -290,6 +321,73 @@ def cache(args):
                         }
                         write(root / "NATIVE_SMOKE_RESULT.json", manifest["native_smoke"])
                     records.append(record)
+                    if "native_batch8_smoke" not in manifest:
+                        first_items.append(item)
+                        if len(first_items) == 8:
+                            batch8 = processor.collator(first_items)["inputs"]
+                            vl8, action8 = model.prepare_input(dict(batch8))
+                            raw8 = model.backbone(vl8)
+                            seed(args.seed)
+                            direct_loss8 = model(dict(batch8))["loss"]
+                            seed(args.seed)
+                            cached_loss8 = model.action_head(
+                                copy_features(raw8), BatchFeature(data=dict(action8))
+                            )["loss"]
+                            obs8 = {
+                                k: v
+                                for k, v in batch8.items()
+                                if k not in ("action", "action_mask")
+                            }
+                            seed(args.seed)
+                            direct8 = model.get_action(dict(obs8))["action_pred"]
+                            seed(args.seed)
+                            cached8 = model.action_head.get_action(
+                                copy_features(raw8),
+                                BatchFeature(
+                                    data={
+                                        k: v
+                                        for k, v in action8.items()
+                                        if k not in ("action", "action_mask")
+                                    }
+                                ),
+                            )["action_pred"]
+                            parity8 = float((direct8.float() - cached8.float()).abs().max())
+                            loss_parity8 = float((direct_loss8 - cached_loss8).abs())
+                            if (
+                                parity8 > 1e-5
+                                or loss_parity8 > 1e-5
+                                or not torch.isfinite(direct8).all()
+                            ):
+                                raise ValueError(
+                                    f"Native B8 parity failed: {parity8}, {loss_parity8}"
+                                )
+                            single_vs_batch_raw = float(
+                                (
+                                    torch.cat(
+                                        [r["raw"]["backbone_features"] for r in records[:8]]
+                                    ).float()
+                                    - raw8.backbone_features.float().cpu()
+                                )
+                                .abs()
+                                .max()
+                            )
+                            for i, first_record in enumerate(records[:8]):
+                                first_record["raw"] = {
+                                    k: v[i : i + 1].cpu().clone() for k, v in raw8.items()
+                                }
+                            manifest["native_batch8_smoke"] = {
+                                "action_shape": list(direct8.shape),
+                                "action_parity_max_abs": parity8,
+                                "loss_parity_abs": loss_parity8,
+                                "finite": True,
+                                "cache_features_batch_size": 8,
+                                "cache1_vs_batch8_raw_max_abs_descriptive": single_vs_batch_raw,
+                            }
+                            write(
+                                root / "NATIVE_BATCH8_SMOKE_RESULT.json",
+                                manifest["native_batch8_smoke"],
+                            )
+                            del raw8, direct8, cached8, action8, vl8, batch8, first_items
                     if split == "train":
                         train_keys.append([ep_id, anchor])
                 path = root / f"{split}_{ep_id:06d}.pt"
@@ -368,8 +466,9 @@ def initialize_head(checkpoint, condition, init_seed):
     return head, audit
 
 
-def load_records(cache_root, split):
+def load_records(cache_root, split, base_checkpoint):
     manifest = read(cache_root / "CACHE_RESULT.json")
+    validate_checkpoint_identity(base_checkpoint, manifest)
     if not manifest["technical_validity"]:
         raise ValueError("Invalid cache")
     records = []
@@ -383,7 +482,7 @@ def load_records(cache_root, split):
 
 def probe(args):
     args.output.mkdir(parents=True, exist_ok=False)
-    records, manifest = load_records(args.cache_root, "validation")
+    records, manifest = load_records(args.cache_root, "train", args.base_checkpoint)
     head, audit = initialize_head(args.base_checkpoint, args.condition, args.seed)
     head = head.cuda().eval()
     raw, action = pack_records(records[:1])
@@ -410,8 +509,47 @@ def probe(args):
                 raise ValueError("Bad probe actions")
             if index >= 5:
                 samples.append((time.perf_counter() - tick) * 1000)
+    # Actual B8/H40/full-width optimizer preflight, using the first eight real frames.
+    head.train()
+    raw8, action8 = pack_records(records[:8])
+    optimizer = torch.optim.AdamW(head.parameters(), lr=1e-4, weight_decay=1e-5)
+    seed(args.seed)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        training_loss = head(copy_features(raw8), action8)["loss"]
+    if not torch.isfinite(training_loss):
+        raise ValueError("Nonfinite B8 optimizer probe loss")
+    training_loss.backward()
+    grad_norm = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0, error_if_nonfinite=True)
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    head.eval()
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        seed(args.seed)
+        before_reload = head.get_action(copy_features(raw), observation)["action_pred"].cpu()
+    config_dict = head.config.to_dict()
+    encoded = serialize_tensors(
+        {k: v.detach().cpu().contiguous() for k, v in head.state_dict().items()}
+    )
+    peak = torch.cuda.max_memory_allocated()
+    del optimizer, training_loss, head
+    gc.collect()
+    torch.cuda.empty_cache()
+    head = Gr00tN1d7ActionHead(Gr00tN1d7Config(**config_dict))
+    head.load_state_dict(deserialize_tensors(encoded), strict=True)
+    head = head.cuda().eval()
+    del encoded
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        seed(args.seed)
+        after_reload = head.get_action(copy_features(raw), observation)["action_pred"].cpu()
+    reload_parity = float((before_reload - after_reload).abs().max())
+    if reload_parity != 0.0:
+        raise ValueError(f"Serialized strict reload changed actions: {reload_parity}")
     report = {
         **audit,
+        "batch8_optimizer_step_finite": True,
+        "batch8_grad_norm": float(grad_norm),
+        "serialized_strict_reload_action_max_abs": reload_parity,
+        "batch8_peak_allocated_bytes": peak,
         "status": "completed",
         "technical_validity": True,
         "native_flow_loss": float(loss),

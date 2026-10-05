@@ -47,6 +47,10 @@ class Gr00tN1d7ActionHead(nn.Module):
         self.input_embedding_dim = config.input_embedding_dim
 
         if config.action_backbone == "conditional_mamba2":
+            if not config.use_alternate_vl_dit:
+                raise ValueError(
+                    "Conditional Mamba requires the native masked alternate-VL interface"
+                )
             from gr00t.model.modules.conditional_mamba import ConditionalMamba2
 
             self.model = ConditionalMamba2(

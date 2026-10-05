@@ -110,7 +110,7 @@ class Gr00tN1d7Config(PretrainedConfig):
             "d_conv": 4,
             "expand": 2,
             "headdim": 64,
-            "chunk_size": 64,
+            "chunk_size": 16,
             "use_mem_eff_path": False,
         }
     )

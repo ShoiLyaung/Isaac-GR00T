@@ -44,7 +44,7 @@ def config(**overrides):
         use_vlln=True,
         state_dropout_prob=0.0,
         action_mamba2_cfg=dict(
-            d_state=16, d_conv=4, expand=2, headdim=16, chunk_size=64, use_mem_eff_path=False
+            d_state=16, d_conv=4, expand=2, headdim=16, chunk_size=16, use_mem_eff_path=False
         ),
         diffusion_model_cfg=dict(
             num_layers=4,
@@ -199,7 +199,7 @@ def test_official_mamba2_cuda_forward_backward():
             d_conv=4,
             expand=2,
             headdim=64,
-            chunk_size=64,
+            chunk_size=16,
             use_mem_eff_path=False,
         ),
         device="cuda",
