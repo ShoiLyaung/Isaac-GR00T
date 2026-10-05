@@ -19,7 +19,6 @@ from typing import Any, Tuple
 import torch
 from torch import nn
 from torch.distributions import Beta
-import torch.nn.functional as F
 from transformers import AutoConfig, AutoModel, PreTrainedModel
 from transformers.feature_extraction_utils import BatchFeature
 import tree
@@ -284,10 +283,42 @@ class Gr00tN1d7ActionHead(nn.Module):
         pred = self.action_decoder(model_output, embodiment_id)
         pred_actions = pred[:, -actions.shape[1] :]
 
-        # Slice out only the action portion of pred and target.
-        action_mask = action_input.action_mask
-        action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
-        loss = action_loss.sum() / (action_mask.sum() + 1e-6)
+        # Slice out only the supervised action portion of pred and target.
+        # Apply the mask before squaring so padded horizon entries cannot create
+        # inf * 0 -> NaN while leaving the supervised objective unchanged.
+        action_mask = action_input.action_mask.float()
+        active_mask = action_mask > 0
+        pred_actions_for_loss = pred_actions.float()
+        velocity_for_loss = velocity.float()
+        mask_sum = action_mask.sum()
+        if mask_sum <= 0:
+            raise ValueError("action_mask is empty; no supervised action dimensions are available")
+
+        masked_pred = torch.where(
+            active_mask, pred_actions_for_loss, torch.zeros_like(pred_actions_for_loss)
+        )
+        masked_velocity = torch.where(
+            active_mask, velocity_for_loss, torch.zeros_like(velocity_for_loss)
+        )
+        if not torch.isfinite(masked_pred).all():
+            raise FloatingPointError(
+                "Non-finite supervised pred_actions detected before action loss"
+            )
+        if not torch.isfinite(masked_velocity).all():
+            raise FloatingPointError(
+                "Non-finite supervised target velocity detected before action loss"
+            )
+
+        action_loss = (masked_pred - masked_velocity).square()
+        loss = action_loss.sum() / (mask_sum + 1e-6)
+        if not torch.isfinite(loss):
+            max_pred = masked_pred.abs().max().detach().float().item()
+            max_velocity = masked_velocity.abs().max().detach().float().item()
+            raise FloatingPointError(
+                "Non-finite action loss detected "
+                f"(loss={loss.detach().float().item()}, mask_sum={mask_sum.detach().float().item()}, "
+                f"max_supervised_pred={max_pred}, max_supervised_velocity={max_velocity})"
+            )
 
         return {
             "loss": loss,

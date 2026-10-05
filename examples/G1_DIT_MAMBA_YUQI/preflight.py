@@ -191,6 +191,7 @@ def full_model(args):
 
 def cuda_probe(args):
     import deepspeed
+    from deepspeed.utils import safe_get_full_grad
     import torch.distributed as dist
 
     world = int(os.environ.get("WORLD_SIZE", "1"))
@@ -278,12 +279,36 @@ def cuda_probe(args):
     durations = []
     gradient_report = {}
     started = time.monotonic()
+    first_step = {
+        "rank": rank,
+        "condition": args.condition,
+        "microbatches": [],
+        "selected_gradients": {},
+        "gradient_stage": "after first optimizer-step accumulation backward, before clipping/update",
+        "time_sampler": {
+            "alpha": float(engine.module.action_head.beta_dist.concentration1),
+            "beta": float(engine.module.action_head.beta_dist.concentration0),
+            "dtype": str(engine.module.action_head.beta_dist.concentration1.dtype),
+            "device": str(engine.module.action_head.beta_dist.concentration1.device),
+        },
+    }
+    captured_encoder_inputs = {}
+
+    def capture_native_noisy_input(module, inputs):
+        # This observes existing tensors without drawing RNG or changing model outputs.
+        captured_encoder_inputs["noisy_trajectory"] = inputs[0].detach().cpu().clone()
+        captured_encoder_inputs["time_buckets"] = inputs[1].detach().cpu().clone()
+
+    capture_handle = engine.module.action_head.action_encoder.register_forward_pre_hook(
+        capture_native_noisy_input
+    )
+    first_step_report = None
     for step in range(args.steps):
         if time.monotonic() - started > args.wall_seconds:
             raise TimeoutError("Preflight wall budget exhausted")
         tick = time.perf_counter()
         for micro, batch in enumerate(batches):
-            seed_microbatch(step * args.accumulation + micro, rank)
+            seed = seed_microbatch(step * args.accumulation + micro, rank)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 result = engine(
                     inputs={key: value.cuda(local_rank) for key, value in batch.items()}
@@ -291,9 +316,66 @@ def cuda_probe(args):
             loss = result["loss"]
             if not torch.isfinite(loss):
                 raise FloatingPointError("Nonfinite native masked loss")
+            if step == 0:
+                first_step["microbatches"].append(
+                    {
+                        "micro": micro,
+                        "seed": seed,
+                        "global_slots": slots[micro],
+                        "loss": loss.detach().cpu().clone(),
+                        "action_loss": result["action_loss"].detach().cpu().clone(),
+                        "action_mask": result["action_mask"].detach().cpu().clone(),
+                        **captured_encoder_inputs,
+                    }
+                )
             engine.backward(loss)
             if step == 0 and micro == args.accumulation - 1:
                 gradient_report = gradient_checks(parameters)
+                parameter_map = dict(parameters)
+                for group, check in gradient_report.items():
+                    name = check["parameter"]
+                    gradient = safe_get_full_grad(parameter_map[name])
+                    if gradient is None:
+                        raise ValueError(f"Missing parity gradient: {name}")
+                    first_step["selected_gradients"][group] = {
+                        "parameter": name,
+                        "tensor": gradient.detach().cpu().clone(),
+                    }
+                capture_handle.remove()
+                evidence_file = args.output / f"first_step_training_rank{rank}.pt"
+                torch.save(first_step, evidence_file)
+                first_step_report = {
+                    "path": str(evidence_file.resolve()),
+                    "sha256": sha(evidence_file),
+                    "time_sampler": first_step["time_sampler"],
+                    "gradient_stage": first_step["gradient_stage"],
+                    "microbatches": [
+                        {
+                            "micro": row["micro"],
+                            "seed": row["seed"],
+                            "loss": float(row["loss"]),
+                            "loss_dtype": str(row["loss"].dtype),
+                            "tensors": {
+                                key: tensor_identity(row[key])
+                                for key in (
+                                    "action_loss",
+                                    "action_mask",
+                                    "noisy_trajectory",
+                                    "time_buckets",
+                                )
+                            },
+                        }
+                        for row in first_step["microbatches"]
+                    ],
+                    "selected_gradients": {
+                        group: {
+                            "parameter": row["parameter"],
+                            "tensor": tensor_identity(row["tensor"]),
+                        }
+                        for group, row in first_step["selected_gradients"].items()
+                    },
+                }
+                write_new(args.output / f"FIRST_STEP_TRAINING_RANK{rank}.json", first_step_report)
             engine.step()
         torch.cuda.synchronize()
         durations.append(time.perf_counter() - tick)
@@ -312,6 +394,7 @@ def cuda_probe(args):
         "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
         "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
         "gradient_checks": gradient_report,
+        "first_step_training_evidence": first_step_report,
         "initial_action_identity": tensor_identity(initial_action),
         "prepared_manifest_sha256": sha(args.prepared / "PREPARED.json"),
         "training_precision": "native Yuqi DeepSpeed BF16/TF32; no raw VLM cache",
