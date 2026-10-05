@@ -93,3 +93,18 @@ def tensor_identity(tensor):
         "dtype": str(value.dtype),
         "sha256": hashlib.sha256(value.view(torch.uint8).numpy().tobytes()).hexdigest(),
     }
+
+
+def preserve_yuqi_language(loader):
+    """Accept Yuqi's already-decoded annotation strings without altering their text.
+
+    The newer native loader maps every annotation through tasks_map, whereas
+    Yuqi parquet stores task strings directly. Add only known metadata task
+    strings as identity mappings; unknown labels must still fail.
+    """
+    for task in tuple(loader.tasks_map.values()):
+        if not isinstance(task, str):
+            raise ValueError("Expected string task labels")
+        if task in loader.tasks_map and loader.tasks_map[task] != task:
+            raise ValueError("Ambiguous Yuqi task label mapping")
+        loader.tasks_map[task] = task

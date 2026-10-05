@@ -16,6 +16,7 @@ import time
 from contract import (
     assert_compact13_contract,
     processor_compatibility_config,
+    preserve_yuqi_language,
     seed_microbatch,
     sha,
     tensor_identity,
@@ -70,6 +71,7 @@ def prepare(args):
     if "video_backend" in inspect.signature(LeRobotEpisodeLoader).parameters:
         loader_kwargs["video_backend"] = "torchcodec"
     loader = LeRobotEpisodeLoader(view, modality, **loader_kwargs)
+    preserve_yuqi_language(loader)
     index = next(
         i for i, row in enumerate(loader.episodes_metadata) if row["episode_index"] == args.episode
     )
