@@ -180,6 +180,14 @@ def full_model(args):
         from gr00t.model.modules.mamba_action_mixer import convert_native_model
 
         audit.update(convert_native_model(model))
+    elif args.condition in ("dit_self_mamba2", "dit_reinit_self_attention"):
+        from gr00t.model.modules.self_attention_mamba import modify_native_self_attention
+
+        audit.update(
+            modify_native_self_attention(
+                model, reset_only=args.condition == "dit_reinit_self_attention"
+            )
+        )
     elif args.condition == "dit_reinit_backbone":
         model.action_head.model = type(model.action_head.model)(
             **cfg.diffusion_model_cfg,
@@ -388,7 +396,11 @@ def cuda_probe(args):
                 )
             engine.backward(loss)
             if step == 0 and micro == args.accumulation - 1:
-                gradient_report = gradient_checks(parameters)
+                gradient_report = gradient_checks(
+                    parameters,
+                    require_self_blocks=args.condition
+                    in ("dit_self_mamba2", "dit_reinit_self_attention"),
+                )
                 parameter_map = dict(parameters)
                 for group, check in gradient_report.items():
                     name = check["parameter"]
@@ -506,7 +518,13 @@ def main():
     parser.add_argument("--episode", type=int, default=0)
     parser.add_argument(
         "--condition",
-        choices=("dit_pretrained", "dit_reinit_backbone", "conditional_mamba2"),
+        choices=(
+            "dit_pretrained",
+            "dit_reinit_backbone",
+            "conditional_mamba2",
+            "dit_self_mamba2",
+            "dit_reinit_self_attention",
+        ),
         default="dit_pretrained",
     )
     parser.add_argument("--microbatch", type=int, choices=(8, 16), default=16)

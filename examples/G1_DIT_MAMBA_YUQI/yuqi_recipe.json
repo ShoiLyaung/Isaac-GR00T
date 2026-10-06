@@ -2,7 +2,7 @@
   "schema_version": "g1-dit-mamba-yuqi-v1",
   "base_checkpoint": "/home/yuqi/Isaac-GR00T-N1.7/runs_left13_n1d7_visual_compact_1.2mm_from_ckpt29000_20k/checkpoint-17000",
   "dataset": "/home/yuqi/Desktop/groot_datasets/aug1.2mm_insert the shaft into the housing",
-  "conditions": ["dit_pretrained", "dit_reinit_backbone", "conditional_mamba2"],
+  "conditions": ["dit_pretrained", "dit_reinit_backbone", "conditional_mamba2", "dit_self_mamba2", "dit_reinit_self_attention"],
   "train_episodes": 220,
   "diagnostic_scope": "seen training data; not a held-out validation set",
   "additional_steps": 5000,

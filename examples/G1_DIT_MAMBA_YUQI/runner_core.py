@@ -138,7 +138,7 @@ def aggregate_metrics(rows, keys):
     }
 
 
-def gradient_checks(parameters):
+def gradient_checks(parameters, *, require_self_blocks=False):
     from deepspeed.utils import safe_get_full_grad
 
     prefixes = {
@@ -150,6 +150,13 @@ def gradient_checks(parameters):
         "vlln": "action_head.vlln.",
         "vl_self_attention": "action_head.vl_self_attention.",
     }
+    if require_self_blocks:
+        prefixes.update(
+            {
+                f"self_block_{i:02d}": f"action_head.model.transformer_blocks.{i}.attn1."
+                for i in range(1, 32, 2)
+            }
+        )
     report = {}
     for group, prefix in prefixes.items():
         candidates = [(name, p) for name, p in parameters if name.startswith(prefix)]

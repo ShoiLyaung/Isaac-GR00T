@@ -481,6 +481,12 @@ def source_identity():
                 HERE / "contract.py",
                 REPO / "gr00t/model/gr00t_n1d7/gr00t_n1d7.py",
                 REPO / "gr00t/model/modules/conditional_mamba.py",
+                REPO / "gr00t/model/modules/mamba_action_mixer.py",
+                REPO / "gr00t/model/modules/self_attention_mamba.py",
+                REPO / "gr00t/model/modules/dit.py",
+                HERE / "yuqi_recipe.json",
+                HERE / "self_mamba_preflight.py",
+                HERE / "post_training_diagnostics.py",
             )
         },
     }
@@ -645,7 +651,11 @@ def train(args):
                     raise FloatingPointError(f"Nonfinite loss at step{step}/micro{micro}")
                 engine.backward(loss)
                 if step == 0 and micro == args.accumulation - 1:
-                    gradient_report = gradient_checks(parameters)
+                    gradient_report = gradient_checks(
+                        parameters,
+                        require_self_blocks=args.condition
+                        in ("dit_self_mamba2", "dit_reinit_self_attention"),
+                    )
                     write_new(args.output / f"GRADIENTS_RANK{rank}.json", gradient_report)
                 micro_losses.append(float(loss.detach()))
                 noise_seeds.append(seed)

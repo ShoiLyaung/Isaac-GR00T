@@ -55,7 +55,7 @@ class Gr00tN1d7ActionHead(nn.Module):
             self.model = ConditionalMamba2(
                 config.diffusion_model_cfg, config.backbone_embedding_dim, config.action_mamba2_cfg
             )
-        elif config.action_backbone != "dit":
+        elif config.action_backbone not in ("dit", "dit_self_mamba2"):
             raise ValueError(f"Unknown action_backbone: {config.action_backbone!r}")
         elif config.use_alternate_vl_dit:
             self.model = AlternateVLDiT(
@@ -63,8 +63,14 @@ class Gr00tN1d7ActionHead(nn.Module):
                 cross_attention_dim=config.backbone_embedding_dim,
                 attend_text_every_n_blocks=config.attend_text_every_n_blocks,
             )
+            if config.action_backbone == "dit_self_mamba2":
+                from gr00t.model.modules.self_attention_mamba import install_self_mamba
+
+                install_self_mamba(self.model, config.action_mamba2_cfg)
             logger.info("Using AlternateVLDiT for diffusion model")
         else:
+            if config.action_backbone == "dit_self_mamba2":
+                raise ValueError("Self-Mamba requires AlternateVLDiT")
             self.model = DiT(
                 **config.diffusion_model_cfg,
                 cross_attention_dim=config.backbone_embedding_dim,

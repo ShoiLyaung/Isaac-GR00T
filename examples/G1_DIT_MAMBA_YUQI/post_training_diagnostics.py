@@ -225,7 +225,9 @@ def module_profile_hooks(model):
     for name in modules:
         if name.startswith("action_head.model.") and name.endswith(".ff"):
             targets[name] = "head_ffn"
-        if name.startswith("action_head.model.") and name.endswith(".mixer.mamba2"):
+        if name.startswith("action_head.model.") and name.endswith(
+            (".mixer.mamba2", ".attn1.mamba2")
+        ):
             targets[name] = "mamba2_forward_scan"
     ffn_names = [name for name, group in targets.items() if group == "head_ffn"]
     macs = {"observed_linear_macs": 0}
@@ -332,7 +334,7 @@ def profile(args, model, source, anchors):
 
         # Isolated wall latency: no profiler, module hooks, or module-level CUDA events.
         timings = []
-        for index in range(13):
+        for index in range(args.profile_warmup + args.profile_measured):
             if time.monotonic() > deadline:
                 raise TimeoutError("Profile diagnostic wall budget exceeded")
             set_seed(paired_seed, cuda=True)
@@ -340,7 +342,7 @@ def profile(args, model, source, anchors):
             tick = time.perf_counter()
             clean_prediction = call()
             torch.cuda.synchronize()
-            if index >= 3:
+            if index >= args.profile_warmup:
                 timings.append((time.perf_counter() - tick) * 1000)
         clean_identity = tensor_identity(clean_prediction)
         set_seed(paired_seed, cuda=True)
@@ -388,7 +390,14 @@ def profile(args, model, source, anchors):
             "Observed head FFN token work differs from the actual architecture contract"
         )
     scans = summaries.get("mamba2_forward_scan", {}).get("calls", 0)
-    if scans != (layers * denoising_steps * 2 if is_mamba else 0):
+    expected_scans = (
+        layers * denoising_steps * 2
+        if is_mamba
+        else layers * denoising_steps
+        if model.config.action_backbone == "dit_self_mamba2"
+        else 0
+    )
+    if scans != expected_scans:
         raise ValueError("Observed bidirectional official Mamba2 call count changed")
     sync_events = host_sync_evidence(prof)
     prof.export_chrome_trace(str(args.output / "native_policy_trace.json"))
@@ -425,8 +434,8 @@ def profile(args, model, source, anchors):
             ),
             "host_sync_scope": "events nested within native policy region only; excludes diagnostic/profiler final synchronization; nested ATen inclusive times are not added",
             "isolated_policy_latency_without_hooks_or_profiler": {
-                "warmup_calls": 3,
-                "measured_calls": 10,
+                "warmup_calls": args.profile_warmup,
+                "measured_calls": args.profile_measured,
                 "milliseconds": timings,
                 "p50_ms": float(np.median(timings)),
                 "p95_ms": float(np.percentile(timings, 95)),
@@ -500,7 +509,11 @@ def main():
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--wall-seconds", type=int, default=5400)
+    parser.add_argument("--profile-warmup", type=int, default=3)
+    parser.add_argument("--profile-measured", type=int, default=10)
     args = parser.parse_args()
+    if args.profile_warmup < 1 or args.profile_measured < 1:
+        parser.error("Profile counts must be positive")
     if args.command == "selftest":
         selftest()
         return
