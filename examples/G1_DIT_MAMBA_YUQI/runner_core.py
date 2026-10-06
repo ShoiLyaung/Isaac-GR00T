@@ -139,6 +139,7 @@ def aggregate_metrics(rows, keys):
 
 
 def gradient_checks(parameters, *, require_self_blocks=False):
+    """Require a finite nonzero witness per group; this is not an all-parameter audit."""
     from deepspeed.utils import safe_get_full_grad
 
     prefixes = {

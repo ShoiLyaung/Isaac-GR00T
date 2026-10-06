@@ -21,7 +21,13 @@ import torch
 
 
 REPO = Path(__file__).resolve().parents[2]
-CONDITIONS = ("dit_pretrained", "dit_reinit_backbone", "conditional_mamba2")
+CONDITIONS = (
+    "dit_pretrained",
+    "dit_reinit_backbone",
+    "conditional_mamba2",
+    "dit_reinit_self_attention",
+    "dit_self_mamba2",
+)
 
 
 def assert_source():
@@ -41,7 +47,7 @@ def training_identity(checkpoint, result_path):
     result = json.loads(result_path.read_text())
     condition = result.get("condition")
     if condition not in CONDITIONS:
-        raise ValueError("Expected one of the three final Yuqi5000 conditions")
+        raise ValueError("Expected a supported final Yuqi5000 condition")
     if result.get("status") != "completed" or result.get("steps") != 5000:
         raise ValueError("Serve only the completed additional-5000-step checkpoint")
     if Path(result.get("checkpoint", "")).resolve() != checkpoint.resolve():
@@ -55,7 +61,9 @@ def validate_policy(policy, condition):
     cfg, head, processor = policy.model.config, policy.model.action_head, policy.processor
     if condition not in CONDITIONS:
         raise ValueError("Unknown training condition")
-    expected_backbone = "conditional_mamba2" if condition == "conditional_mamba2" else "dit"
+    expected_backbone = (
+        condition if condition in ("conditional_mamba2", "dit_self_mamba2") else "dit"
+    )
     if cfg.action_backbone != expected_backbone:
         raise ValueError("Checkpoint action backbone does not match its training condition")
     if (cfg.max_state_dim, cfg.max_action_dim, cfg.action_horizon, cfg.state_history_length) != (
@@ -162,6 +170,9 @@ def serve(args):
     assert_source()
     from gr00t.policy.gr00t_policy import Gr00tPolicy
     from gr00t.policy.server_client import PolicyServer
+    from yuqi_wire import install_legacy_yuqi_response_encoding
+
+    install_legacy_yuqi_response_encoding()
 
     policy = Gr00tPolicy(
         "new_embodiment",
@@ -203,6 +214,8 @@ def serve(args):
         "initial_rng_path": str(rng_path.resolve()),
         "openpi_imports": [],
         "bridge": None,
+        "wire_protocol": "Yuqi legacy ModalityConfig/NPY response envelopes; native safe decoder retained",
+        "wire_encoder_sha256": sha(Path(__file__).with_name("yuqi_wire.py")),
         "rtc": False,
         "protocol": "Yuqi three-camera absolute left13, native processor H16 decode from model H40",
     }
@@ -278,6 +291,16 @@ def selftest():
     )
     assert validate_policy(policy, "dit_pretrained")["returned_action_horizon"] == 16
     assert validate_policy(policy, "dit_reinit_backbone")["action_backbone"] == "dit"
+    assert validate_policy(policy, "dit_reinit_self_attention")["action_backbone"] == "dit"
+    cfg.action_backbone = "dit_self_mamba2"
+    assert validate_policy(policy, "dit_self_mamba2")["action_backbone"] == "dit_self_mamba2"
+    for wrong_condition in ("dit_pretrained", "dit_reinit_self_attention", "conditional_mamba2"):
+        try:
+            validate_policy(policy, wrong_condition)
+        except ValueError as exc:
+            assert "backbone" in str(exc)
+        else:
+            raise AssertionError("Wrong condition/backbone pairing was accepted")
     cfg.action_backbone = "conditional_mamba2"
     assert validate_policy(policy, "conditional_mamba2")["state_dim"] == 13
     modalities["action"].delta_indices = list(range(40))
