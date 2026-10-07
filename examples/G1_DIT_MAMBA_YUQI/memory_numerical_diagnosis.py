@@ -296,11 +296,14 @@ def run(args, deadline):
     plan = frozen_inputs(args)
     official, environment = source_environment(plan)
     if (
-        os.environ.get("CUDA_VISIBLE_DEVICES") != "0"
+        os.environ.get("CUDA_VISIBLE_DEVICES") != "1"
         or not torch.cuda.is_available()
         or torch.cuda.device_count() != 1
     ):
-        raise ValueError("Expose only the authorized GPU0")
+        raise ValueError("Expose only the authorized GPU1")
+    environment["cuda_visible_devices"] = os.environ["CUDA_VISIBLE_DEVICES"]
+    environment["logical_cuda_device"] = 0
+    environment["gpu_name"] = torch.cuda.get_device_name(0)
     torch.set_num_threads(4)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True

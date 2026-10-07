@@ -54,3 +54,10 @@ another precision path, or permission to reopen training. Final base/memory/cach
 hashes and allocator release are recorded. Technical failures preserve a failed
 terminal result without retries. Limits are 12 GiB allocated, 1 GiB new artifacts,
 and the parent's outer 1800-second timeout.
+
+The original GPU0 attempt was rejected by resource preflight before launch or
+model output. A separate setup-only migration uses `CUDA_VISIBLE_DEVICES=1` and
+`joint-diagnosis-gpu1-r1`; the GPU0 resolved/terminal records and source
+`e9cdb5b869f56c537ae60aa1b5fd05131857d8e0` remain preserved. GPU selection and
+actual device name are recorded in IDENTITY. Scientific inputs and gates are
+unchanged.
