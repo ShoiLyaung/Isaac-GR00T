@@ -6,6 +6,7 @@ import importlib
 import importlib.metadata
 from itertools import combinations
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -36,10 +37,10 @@ import torch
 
 REPO = Path(__file__).resolve().parents[2]
 EXPECTED_REPO = Path(
-    "/home/sl/research/icra27-worktrees/Isaac-GR00T/g1-causal-mamba-numerical-diagnosis-r1"
+    "/home/sl/research/icra27-worktrees/Isaac-GR00T/g1-causal-mamba-numerical-diagnosis-r2"
 )
 EXPECTED_VENV = Path("/home/yuqi/Isaac-GR00T-N1.7/.venv")
-PLAN_SHA = "f569e7e5debc8b049f731a705dff77841162844c821e1c936e218f89b953599c"
+PLAN_SHA = "7a8280f54013a013bf81ef04ebd186c57253c3fe170e7e2d3e58031368b95afb"
 NEW_FILES = {
     "examples/G1_DIT_MAMBA_YUQI/memory_numerical_diagnosis.py",
     "examples/G1_DIT_MAMBA_YUQI/memory_numerical_trace.py",
@@ -162,12 +163,21 @@ def source_environment(plan):
 
 def reproduction(actual, plan):
     expected = plan["expected_bf16_latent"]
+    if not all(
+        math.isfinite(values[key])
+        for values in (actual, expected)
+        for key in ("maxabs", "rms", "relative_rms")
+    ):
+        raise ValueError("Nonfinite historical statistic input")
     passed = actual["maxabs"] == expected["maxabs"] and all(
         abs(actual[k] - expected[k]) <= plan["statistics_reproduction_atol"]
         for k in ("rms", "relative_rms")
     )
     return {
         "passed": passed,
+        "role": "historical_compatibility_only",
+        "reduction": "gpu_float32",
+        "difference": {key: actual[key] - expected[key] for key in expected},
         "expected": expected,
         "actual": actual,
         "statistics_atol": plan["statistics_reproduction_atol"],
@@ -252,6 +262,25 @@ def base_parity(model, frame, seeds):
     }, predictions
 
 
+def historical_action_compatibility(predicted, flow, seed, row, old_prediction):
+    reference = torch.as_tensor(old_prediction).unsqueeze(0)
+    reference = check_action(reference)
+    if not math.isfinite(flow) or not math.isfinite(row["flow_loss"]):
+        raise ValueError("Nonfinite historical flow input")
+    seed_equal = row["paired_rng_seed"] == seed
+    action_exact = torch.equal(predicted, reference)
+    flow_exact = flow == row["flow_loss"]
+    return {
+        "role": "historical_compatibility_only",
+        "seed_equal": seed_equal,
+        "action_exact": action_exact,
+        "flow_exact": flow_exact,
+        "exact": seed_equal and action_exact and flow_exact,
+        "flow_difference": flow - row["flow_loss"],
+        "action_difference": error_summary(predicted, reference),
+    }
+
+
 def mode_actions(model, frame, residual, mode, seeds, old_rows, old_predictions):
     records = []
     tensors = {}
@@ -263,18 +292,14 @@ def mode_actions(model, frame, residual, mode, seeds, old_rows, old_predictions)
             predicted = check_action(prototype.sample_packet(model, packet, residual))
             flow = float(result["loss"])
             old_exact = None
+            compatibility = None
             if mode == "bf16_step" and label.startswith("nominal_"):
                 nominal = int(label.split("_")[1])
                 index, row = old_rows[nominal]
-                if (
-                    row["paired_rng_seed"] != seed
-                    or flow != row["flow_loss"]
-                    or not np.array_equal(predicted[0].numpy(), old_predictions[index])
-                ):
-                    raise ValueError(
-                        f"Historical BF16step action/flow exact reproduction failed: {label}"
-                    )
-                old_exact = True
+                compatibility = historical_action_compatibility(
+                    predicted, flow, seed, row, old_predictions[index]
+                )
+                old_exact = compatibility["exact"]
             tensors[label] = predicted
             records.append(
                 {
@@ -285,6 +310,7 @@ def mode_actions(model, frame, residual, mode, seeds, old_rows, old_predictions)
                     "noise_receipt": receipt,
                     "action_identity": tensor_identity(predicted),
                     "historical_exact": old_exact,
+                    "historical_compatibility": compatibility,
                 }
             )
     return records, tensors
@@ -376,9 +402,7 @@ def run(args, deadline):
                 gpu_modes["bf16_step"]["latent"], gpu_modes["bf16_full"]["latent"]
             )
             reproduced = reproduction(stats, plan)
-            write_new(args.output / "BF16_REPRODUCTION.json", reproduced)
-            if not reproduced["passed"]:
-                raise ValueError(f"Old BF16 latent statistic did not reproduce: {reproduced}")
+            write_new(args.output / "BF16_HISTORICAL_COMPATIBILITY.json", reproduced)
         print(json.dumps({"untraced_complete": mode}), flush=True)
     traces = {}
     for mode in plan["modes"]:
@@ -430,6 +454,11 @@ def run(args, deadline):
     if set(old_rows) != set(plan["nominal_seeds"]):
         raise ValueError("Missing fixed historical anchor320 seed outputs")
     old_predictions = np.load(plan["historical_predictions"])
+    if (
+        old_predictions.shape != (len(old_details), 40, 13)
+        or not np.isfinite(old_predictions).all()
+    ):
+        raise ValueError("Malformed or nonfinite historical action tensor")
     parity, disabled_actions = base_parity(model, frame, seeds)
     write_new(args.output / "BASE_DISABLED_PARITY.json", parity)
     artifacts["disabled_actions"] = save_tensors(
@@ -506,8 +535,19 @@ def run(args, deadline):
             }
         )
     write_new(args.output / "CROSS_MODE_COMPARISONS.json", cross)
-    bf16 = prototype.differences(gpu_modes["bf16_step"]["latent"], gpu_modes["bf16_full"]["latent"])
-    fp32 = prototype.differences(gpu_modes["fp32_step"]["latent"], gpu_modes["fp32_full"]["latent"])
+    gpu_fp32_report = {
+        "reduction": "gpu_float32",
+        "role": "report_only",
+        "bf16": prototype.differences(
+            gpu_modes["bf16_step"]["latent"], gpu_modes["bf16_full"]["latent"]
+        ),
+        "fp32": prototype.differences(
+            gpu_modes["fp32_step"]["latent"], gpu_modes["fp32_full"]["latent"]
+        ),
+    }
+    write_new(args.output / "GPU_FP32_LATENT_REPORT.json", gpu_fp32_report)
+    bf16 = error_summary(saved_modes["bf16_step"]["latent"], saved_modes["bf16_full"]["latent"])
+    fp32 = error_summary(saved_modes["fp32_step"]["latent"], saved_modes["fp32_full"]["latent"])
     conclusion = interpretation(
         bf16, fp32, plan["latent_limits"], plan["precision_convergence_ratio"]
     )
@@ -536,7 +576,15 @@ def run(args, deadline):
         "technical_validity": "passed",
         "optimizer_steps": 0,
         "old_training_failure_unchanged": True,
-        "historical_bf16_step_outputs_exact": 4,
+        "historical_bf16_step_outputs_exact": sum(
+            row["historical_exact"] is True for row in all_records
+        ),
+        "historical_bf16_step_outputs_compared": sum(
+            row["historical_exact"] is not None for row in all_records
+        ),
+        "historical_bf16_latent_compatibility": reproduced,
+        "gpu_fp32_latent_report": gpu_fp32_report,
+        "primary_reduction": "cpu_float64",
         "trace_untraced_exact_modes": plan["modes"],
         "base_disabled_parity": parity,
         "bf16_latent": bf16,

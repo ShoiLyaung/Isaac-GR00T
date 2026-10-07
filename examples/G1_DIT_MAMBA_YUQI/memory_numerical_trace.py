@@ -235,7 +235,10 @@ class MemoryTrace:
 def error_summary(actual, reference):
     if actual.shape != reference.shape:
         raise ValueError("Comparison shape mismatch")
-    a, b = actual.detach().float().cpu(), reference.detach().float().cpu()
+    a, b = (
+        actual.detach().to(device="cpu", dtype=torch.float64),
+        reference.detach().to(device="cpu", dtype=torch.float64),
+    )
     delta = a - b
     if not bool(torch.isfinite(delta).all()):
         raise ValueError("Nonfinite diagnostic comparison")
@@ -245,7 +248,7 @@ def error_summary(actual, reference):
     relative = rms / max(float(b.square().mean().sqrt()), 1e-12)
     position = [int(v) for v in np.unravel_index(int(flat.argmax()), a.shape)]
     index = tuple(position)
-    quantiles = torch.quantile(flat, torch.tensor([0.5, 0.9, 0.95, 0.99]))
+    quantiles = torch.quantile(flat, torch.tensor([0.5, 0.9, 0.95, 0.99], dtype=torch.float64))
     any_difference = bool(torch.any(flat != 0))
     first = (
         [int(v) for v in np.unravel_index(int((flat != 0).to(torch.uint8).argmax()), a.shape)]
@@ -255,6 +258,7 @@ def error_summary(actual, reference):
     feature = position[-1]
     local = tuple(position[:-1]) + (slice(max(0, feature - 2), feature + 3),)
     return {
+        "reduction": "cpu_float64",
         "maxabs": float(flat.max()),
         "rms": rms,
         "relative_rms": relative,

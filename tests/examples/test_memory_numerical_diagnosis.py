@@ -231,3 +231,91 @@ def test_failed_attempt_preserves_terminal_and_refuses_overwrite(monkeypatch, tm
     )
     with pytest.raises(FileExistsError):
         runner.execute(args)
+
+
+def test_error_summary_uses_cpu_fp64_including_quantiles_and_stage_reductions():
+    reference = torch.ones(2, 3, 4, dtype=torch.float64)
+    actual = reference.clone()
+    actual[1, 2, 3] += 1e-9
+    result = trace.error_summary(actual, reference)
+    delta = actual - reference
+    assert result["reduction"] == "cpu_float64"
+    assert result["rms"] == float(delta.square().mean().sqrt()) > 0
+    assert result["relative_rms"] == result["rms"]
+    assert result["abs_quantiles"]["p99"] == float(
+        torch.quantile(delta.abs().flatten(), torch.tensor(0.99, dtype=torch.float64))
+    )
+    left = {"stages": {"latent": {"times": [0, 1], "values": actual}}}
+    right = {"stages": {"latent": {"times": [0, 1], "values": reference}}}
+    stage = trace.stage_comparisons(left, right, {"maxabs": 0.1, "relative_rms": 0.02})[0]
+    assert stage["summary"]["rms"] == result["rms"]
+    assert all(row["reduction"] == "cpu_float64" for row in stage["per_time"])
+    assert runner.old_gate(
+        {"maxabs": 0.1, "relative_rms": 0.02}, {"maxabs": 0.1, "relative_rms": 0.02}
+    )
+    assert runner.old_gate({"maxabs": 0.02, "rms": 0.002}, {"maxabs": 0.02, "rms": 0.002})
+    with pytest.raises(ValueError, match="Nonfinite"):
+        trace.error_summary(torch.full_like(actual, float("nan")), reference)
+
+
+def test_historical_mismatch_reports_differences_and_continues_but_bad_inputs_fail(monkeypatch):
+    import numpy as np
+
+    monkeypatch.setattr(torch, "autocast", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(runner, "native_flow", lambda *args: ({"loss": torch.tensor(1.5)}, {}))
+    monkeypatch.setattr(runner, "sampling_packet", lambda *args: None)
+    monkeypatch.setattr(runner, "set_seed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runner.prototype, "sample_packet", lambda *args: torch.ones(1, 40, 13))
+    old_rows = {42: (0, {"paired_rng_seed": 123, "flow_loss": 0.5})}
+    old_predictions = np.zeros((1, 40, 13), dtype=np.float32)
+    records, outputs = runner.mode_actions(
+        None,
+        None,
+        None,
+        "bf16_step",
+        [("nominal_42", 123), ("direct_42", 42)],
+        old_rows,
+        old_predictions,
+    )
+    assert len(records) == len(outputs) == 2
+    compatibility = records[0]["historical_compatibility"]
+    assert records[0]["historical_exact"] is False
+    assert compatibility["seed_equal"] is True
+    assert compatibility["action_exact"] is compatibility["flow_exact"] is False
+    assert compatibility["flow_difference"] == 1
+    assert compatibility["action_difference"]["maxabs"] == 1
+    assert compatibility["action_difference"]["reduction"] == "cpu_float64"
+    assert records[1]["historical_exact"] is None
+    for invalid in (
+        np.zeros((16, 13), dtype=np.float32),
+        np.full((40, 13), np.nan, dtype=np.float32),
+    ):
+        with pytest.raises(ValueError, match="finite"):
+            runner.historical_action_compatibility(
+                torch.ones(1, 40, 13), 1.5, 123, old_rows[42][1], invalid
+            )
+    with pytest.raises(ValueError, match="Nonfinite"):
+        runner.historical_action_compatibility(
+            torch.ones(1, 40, 13),
+            1.5,
+            123,
+            {"paired_rng_seed": 123, "flow_loss": float("nan")},
+            old_predictions[0],
+        )
+    with pytest.raises(KeyError):
+        runner.mode_actions(
+            None, None, None, "bf16_step", [("nominal_42", 123)], {}, old_predictions
+        )
+    monkeypatch.setattr(
+        runner.prototype, "sample_packet", lambda *args: torch.full((1, 40, 13), float("nan"))
+    )
+    with pytest.raises(ValueError, match="finite"):
+        runner.mode_actions(
+            None, None, None, "bf16_step", [("nominal_42", 123)], old_rows, old_predictions
+        )
+    old = {"maxabs": 0.125, "rms": 0.009497059509158134, "relative_rms": 0.006728019334615535}
+    plan = {"expected_bf16_latent": old, "statistics_reproduction_atol": 1e-8}
+    report = runner.reproduction({**old, "rms": old["rms"] + 2e-8}, plan)
+    assert report["passed"] is False and report["role"] == "historical_compatibility_only"
+    with pytest.raises(ValueError, match="Nonfinite"):
+        runner.reproduction({**old, "rms": float("nan")}, plan)
