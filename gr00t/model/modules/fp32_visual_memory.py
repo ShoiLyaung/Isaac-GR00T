@@ -17,6 +17,15 @@ def _fp32_memory_region():
         torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = original
 
 
+def explicit_cache_values(state):
+    """Support only the two explicit cache layouts used by this comparison."""
+    if hasattr(state, "layers") and not hasattr(state, "hidden"):
+        return [value for pair in state.layers for value in pair]
+    if hasattr(state, "hidden") and not hasattr(state, "layers"):
+        return list(state.hidden)
+    raise ValueError("Expected explicit Mamba (conv, SSM) or GRU hidden caches")
+
+
 class FP32VisualMemory:
     """Thin executor; weights and explicit state remain owned by the original module.
 
@@ -45,7 +54,7 @@ class FP32VisualMemory:
         self._check_weights()
         if observation.dtype != torch.float32:
             raise ValueError("FP32 memory execution requires FP32 observations")
-        if any(value.dtype != torch.float32 for pair in state.layers for value in pair):
+        if any(value.dtype != torch.float32 for value in explicit_cache_values(state)):
             raise ValueError("FP32 memory execution requires FP32 explicit caches")
         with _fp32_memory_region():
             return self.memory.step(observation, state)
