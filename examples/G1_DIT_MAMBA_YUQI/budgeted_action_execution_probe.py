@@ -31,7 +31,8 @@ EXPECTED_REPO = Path(
     "/home/sl/research/icra27-worktrees/Isaac-GR00T/g1-budgeted-mamba-execution-diagnosis-r1"
 )
 VENV = Path("/home/yuqi/Isaac-GR00T-N1.7/.venv")
-PLAN_SHA = "841004252417b410730647faf4f3cc7cccabca12f655665a7f5f23c9f6c6ddc6"
+PLAN_SHA = "cb845d84e7e6a02707a86a634d4589e80450ea1877b18903f8090a7e87cb9eb7"
+EXECUTION_RUN = "joint-diagnosis-gpu0-r1"
 MODES = ("native", "student_original", "student_bf16_storage")
 SENSITIVE_SUFFIXES = (".mamba.A_log", ".mamba.D", ".mamba.dt_bias")
 FILES = {
@@ -174,11 +175,11 @@ def environment(plan):
     if dirty or not changed.issubset(FILES):
         raise ValueError("Only committed new diagnostic files are permitted")
     if (
-        os.environ.get("CUDA_VISIBLE_DEVICES") != "1"
+        os.environ.get("CUDA_VISIBLE_DEVICES") != str(plan["physical_gpu"])
         or not torch.cuda.is_available()
         or torch.cuda.device_count() != 1
     ):
-        raise ValueError("Expose only authorized physicalGPU1")
+        raise ValueError("Expose only the single physical GPU frozen in this execution plan")
     return {
         "commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=REPO, text=True
@@ -892,7 +893,7 @@ def run(args, deadline):
 
 
 def execute(args):
-    if args.output.resolve() != (args.artifact_root / "joint-diagnosis-r1/output").resolve():
+    if args.output.resolve() != (args.artifact_root / EXECUTION_RUN / "output").resolve():
         raise ValueError("One canonical diagnosis output is required")
     args.output.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()

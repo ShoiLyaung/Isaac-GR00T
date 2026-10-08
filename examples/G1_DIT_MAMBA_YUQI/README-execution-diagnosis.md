@@ -1,7 +1,7 @@
 # Fixed-weight budgeted-action execution diagnosis
 
 `budgeted_action_execution_probe.py --plan PLAN --artifact-root ROOT --output
-ROOT/joint-diagnosis-r1/output --wall-seconds 1750` implements one bounded joint
+ROOT/joint-diagnosis-gpu0-r1/output --wall-seconds 1750` implements one bounded joint
 run. Only the four newly added diagnostic/test/documentation files may differ
 from the frozen source base. Existing student architecture, official kernels,
 native sampler, clean task-loss helper and all old results remain untouched.
@@ -82,3 +82,8 @@ sequential event boundaries (including native zero-condition), request cache
 restoration, profiler namespace/hook cleanup on success and exception, accurate
 event labels, fixed order, timing aggregation and closed training decisions.
 No CPU test invokes the production model or CUDA kernels.
+
+The frozen GPU0 execution identity replaces a GPU1 launch blocked before Popen.
+Old PLAN/resolved/terminal evidence remains untouched. Math and measurement
+contracts are unchanged; timing comparisons use contemporaneous GPU0 modes,
+not historical GPU1 latency. The eight old actions must still match bitwise.
