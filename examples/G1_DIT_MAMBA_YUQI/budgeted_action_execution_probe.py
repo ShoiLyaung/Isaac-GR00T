@@ -31,8 +31,8 @@ EXPECTED_REPO = Path(
     "/home/sl/research/icra27-worktrees/Isaac-GR00T/g1-budgeted-mamba-execution-diagnosis-r1"
 )
 VENV = Path("/home/yuqi/Isaac-GR00T-N1.7/.venv")
-PLAN_SHA = "cb845d84e7e6a02707a86a634d4589e80450ea1877b18903f8090a7e87cb9eb7"
-EXECUTION_RUN = "joint-diagnosis-gpu0-r1"
+PLAN_SHA = "e8897384776f96080b9bbfb304fe4886c11a3986f12c9d96ec295411255702c1"
+EXECUTION_RUN = "joint-diagnosis-gpu0-r2"
 MODES = ("native", "student_original", "student_bf16_storage")
 SENSITIVE_SUFFIXES = (".mamba.A_log", ".mamba.D", ".mamba.dt_bias")
 FILES = {
