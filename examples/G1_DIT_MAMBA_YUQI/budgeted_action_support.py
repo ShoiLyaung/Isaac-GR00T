@@ -5,7 +5,7 @@ from contextlib import ExitStack, contextmanager
 from contract import tensor_identity
 from gr00t.model.modules.budgeted_action_mamba import SELECTED_LAYERS, ConditionedActionRequest
 import memory_prototype as proto
-from memory_training_support import native_flow, sampling_packet
+from memory_training_support import fresh, native_flow, sampling_packet
 from runner_core import set_seed
 import torch
 
@@ -19,6 +19,21 @@ def bind_request(model, student, condition):
         yield request
     finally:
         model.action_head.model = original
+
+
+def clean_task_loss(model, frame, *, student=None):
+    """Original task loss only: no capture, hooks, evidence hashes or RNG reset.
+
+    The caller seeds before its timer. Input transfers/native postprocessing and
+    optional condition construction remain inside this call and its graph.
+    """
+    raw = fresh(frame["raw"], model.device)
+    action = fresh(frame["action_input"], model.device)
+    if student is None:
+        return model.action_head(raw, action)["loss"]
+    condition = student.encode_condition(frame["post_vl_features"].to(model.device))
+    with bind_request(model, student, condition):
+        return model.action_head(raw, action)["loss"]
 
 
 def capture_velocity(model, frame, seed, *, student=None, teacher=None, replay_teacher=False):

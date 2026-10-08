@@ -254,3 +254,97 @@ def test_missing_cost_gate_closes_optimizer_entry(tmp_path):
     args = SimpleNamespace(artifact_root=tmp_path)
     with pytest.raises(FileNotFoundError):
         runner.require_preflight(args)
+
+
+def test_clean_backward_cost_has_no_evidence_hooks_hashes_or_inner_reseed(monkeypatch, tmp_path):
+    from contextlib import nullcontext
+
+    import budgeted_action_evaluation as evaluation
+
+    teacher = ToyCore()
+    student = ToyStudent()
+
+    class Head(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = teacher
+            self.decoder = ToyDecoder(4, 13).requires_grad_(False)
+
+        def forward(self, raw, action):
+            output, _ = self.model(
+                hidden_states=raw["hidden"],
+                encoder_hidden_states=raw["features"],
+                timestep=action["time"],
+                return_all_hidden_states=True,
+            )
+            prediction = self.decoder(output, action["embodiment_id"])
+            return {"loss": prediction.float().square().mean()}
+
+    head = Head()
+    model = SimpleNamespace(action_head=head, device="cpu")
+    frame = {
+        "raw": {"hidden": torch.randn(1, 41, 4), "features": torch.ones(1, 209, 4)},
+        "action_input": {"time": torch.tensor([234]), "embodiment_id": torch.tensor([10])},
+        "post_vl_features": torch.ones(1, 209, 4),
+    }
+
+    def forbidden(*a, **k):
+        raise AssertionError("Evidence/seed/hook operation entered clean cost")
+
+    for target, name in (
+        (support, "capture_velocity"),
+        (support, "native_flow"),
+        (support, "tensor_identity"),
+        (support, "set_seed"),
+        (evaluation, "capture_velocity"),
+    ):
+        monkeypatch.setattr(target, name, forbidden)
+    monkeypatch.setattr(nn.Module, "register_forward_hook", forbidden)
+    monkeypatch.setattr(nn.Module, "register_forward_pre_hook", forbidden)
+    monkeypatch.setattr(torch, "autocast", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 100)
+    clock = {"inside": False, "ticks": 0, "seeds": 0}
+
+    def tick():
+        clock["inside"] = not clock["inside"]
+        clock["ticks"] += 1
+        return clock["ticks"] * 0.001
+
+    def seed(*a, **k):
+        assert not clock["inside"]
+        clock["seeds"] += 1
+
+    monkeypatch.setattr(evaluation.time, "perf_counter", tick)
+    monkeypatch.setattr(evaluation, "set_seed", seed)
+
+    def activate(context, mode, backward=False):
+        teacher.requires_grad_(mode == "native").eval()
+        student.requires_grad_(mode == "student").eval()
+
+    monkeypatch.setattr(evaluation, "activate", activate)
+    monkeypatch.setattr(evaluation, "restore_teacher", lambda context: None)
+    context = SimpleNamespace(
+        args=SimpleNamespace(output=tmp_path),
+        plan={"fb_input": {"episode": 150, "anchor": 336}},
+        teacher=teacher,
+        student=student,
+        model=model,
+        budget=lambda: None,
+    )
+    report = evaluation.backward_cost(context, SimpleNamespace(frame=lambda ep, anchor: frame))
+    assert report["timings"]["native"]["count"] == report["timings"]["student"]["count"] == 20
+    assert clock["seeds"] == 50 and not clock["inside"]
+    assert head.model is teacher
+    assert len(teacher.inputs) == len(student.inputs) == 25
+    assert all(p.grad is None for p in head.decoder.parameters())
+    # Explicit gradient assertion after the same uninstrumented helper; the
+    # cost loop clears its gradients at each block boundary by design.
+    student.requires_grad_(True)
+    loss = support.clean_task_loss(model, frame, student=student)
+    loss.backward()
+    assert student.linear.weight.grad is not None and torch.count_nonzero(
+        student.linear.weight.grad
+    )
+    assert head.model is teacher

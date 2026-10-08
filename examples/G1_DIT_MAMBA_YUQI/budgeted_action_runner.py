@@ -46,6 +46,7 @@ EXPECTED_REPO = Path(
 )
 VENV = Path("/home/yuqi/Isaac-GR00T-N1.7/.venv")
 PLAN_SHA = "2562f74a0cc0475577a76a622a685cfa2f4b04bf8bc306c3a0a4ff6394736f99"
+PREFLIGHT_RUN = "preflight-execution-r1"
 FILES = {
     "gr00t/model/modules/budgeted_action_mamba.py",
     "examples/G1_DIT_MAMBA_YUQI/budgeted_action_runner.py",
@@ -185,7 +186,7 @@ def environment(plan):
 
 
 def require_preflight(args):
-    root = args.artifact_root / "preflight-r1/output"
+    root = args.artifact_root / PREFLIGHT_RUN / "output"
     result = read(root / "RESULT.json")
     if (
         result.get("status") != "passed"
@@ -604,7 +605,8 @@ def execute(args):
         raise NotImplementedError(
             "This reviewed milestone implements preflight/overfit only; no pilot is launched"
         )
-    expected = args.artifact_root / (args.command + "-r1") / "output"
+    run = PREFLIGHT_RUN if args.command == "preflight" else "overfit-r1"
+    expected = args.artifact_root / run / "output"
     if args.output.resolve() != expected.resolve():
         raise ValueError("One canonical output root per stage required")
     args.output.mkdir(parents=True, exist_ok=False)

@@ -4,7 +4,7 @@ import gc
 import json
 import time
 
-from budgeted_action_support import cached_action, capture_velocity, current_policy
+from budgeted_action_support import cached_action, capture_velocity, clean_task_loss, current_policy
 from contract import sha, write_new
 import memory_prototype as proto
 from memory_training import raw_record
@@ -229,10 +229,9 @@ def backward_cost(context, cache):
                 torch.cuda.synchronize()
                 tick = time.perf_counter()
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    result = capture_velocity(
-                        context.model, frame, 42, student=None if mode == "native" else core
+                    loss = clean_task_loss(
+                        context.model, frame, student=None if mode == "native" else core
                     )
-                    loss = result["native"]["loss"]
                 loss.backward()
                 torch.cuda.synchronize()
                 wall_ms = (time.perf_counter() - tick) * 1000
@@ -254,7 +253,7 @@ def backward_cost(context, cache):
                 rows.append(row)
                 stream.write(json.dumps(row, allow_nan=False) + "\n")
                 stream.flush()
-                del result, loss
+                del loss
         core.zero_grad(set_to_none=True)
         values = [r["wall_ms"] for r in rows if not r["warmup"]]
         reports[mode] = {
@@ -275,7 +274,7 @@ def backward_cost(context, cache):
         "passed": all(gates.values()),
         "optimizer_steps": 0,
         "core_mode": "eval, gradient enabled; no dropout; not a complete training step",
-        "scope": "Both action cores FP32 master/AMPBF16; original task loss backward outside autocast, frozen outer modules; cached rawVL/state/target through native postprocess/encoder/decoder plus student condition; no VLM/RGB/KD replay/optimizer",
+        "scope": "Both action cores FP32 master/AMPBF16; original task loss backward outside autocast, frozen outer modules; cached rawVL/state/target through native postprocess/encoder/decoder plus student condition; no VLM/RGB/KD replay/optimizer or evidence hooks/hashes; RNG reset before timer",
     }
     write_new(output / "RESULT.json", report)
     return report

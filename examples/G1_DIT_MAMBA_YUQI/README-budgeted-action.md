@@ -2,7 +2,9 @@
 
 `budgeted_action_runner.py preflight|overfit --plan PLAN --artifact-root ROOT
 --output OUTPUT --wall-seconds 1750` implements the two initially authorized
-stages. The frozen plan, source/checkpoint/cache/kernel hashes and worktree are
+stages. Preflight uses the single canonical `preflight-execution-r1/output`
+root; the earlier resolved-only `preflight-r1` remains unlaunched and immutable.
+Overfit keeps `overfit-r1/output`. The frozen plan, source/checkpoint/cache/kernel hashes and worktree are
 checked before model outputs. Only physical GPU1 is permitted. The train and
 evaluate CLI names explicitly raise `NotImplementedError` before creating an
 output or loading a model: the later two1000-step runs and joint dev evaluator
@@ -42,8 +44,9 @@ condition/Euler4 are included; seed/decode/processor/checks are outside. The
 additional cached-raw-VL task forward/backward probe uses both cores' FP32
 masters with BF16 autocast, frozen outer modules and **eval mode (no dropout)**,
 5warm+20 measurements. It includes native postprocessing/encoders/decoder and
-student condition construction, but no teacher replay, VLM or optimizer. This
-is not a full training-step throughput benchmark. Per-call CUDA peak resets
+student condition construction, but no teacher replay, VLM or optimizer. The timer calls the original native head.forward directly using fresh cached
+inputs, without capture hooks, evidence hashes, teacher replay or internal RNG
+reseed. This is not a full training-step throughput benchmark. Per-call CUDA peak resets
 are tracked separately from the stage high-water recorded at budget boundaries.
 All cost measurements finish before aggregating a reportable false cost gate;
 identity, nonfinite or resource errors stop immediately.
