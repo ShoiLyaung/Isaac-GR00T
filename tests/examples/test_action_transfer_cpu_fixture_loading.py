@@ -48,7 +48,9 @@ def test_native_config_override_is_local_and_default_config_remains_flash(tmp_pa
 def test_cpu_loader_scope_strictness_and_ordinary_loader_restoration(
     monkeypatch, tmp_path, failure
 ):
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 0)
     path = config_file(tmp_path)
     original = path.read_bytes()
     calls = []
@@ -70,11 +72,11 @@ def test_cpu_loader_scope_strictness_and_ordinary_loader_restoration(
         backend = "sdpa" if cpu else "flash_attention_2"
         if cpu and failure == "wrong_backend":
             backend = "eager"
-        model = SimpleNamespace(
-            config=cfg,
-            backbone=SimpleNamespace(
-                model=SimpleNamespace(config=SimpleNamespace(_attn_implementation=backend))
-            ),
+        model = torch.nn.Module()
+        model.register_parameter("cpu_parameter", torch.nn.Parameter(torch.zeros(1)))
+        model.config = cfg
+        model.backbone = SimpleNamespace(
+            model=SimpleNamespace(config=SimpleNamespace(_attn_implementation=backend))
         )
         return model, {"missing_keys": ["missing"] if cpu and failure == "missing_keys" else []}
 
@@ -100,9 +102,11 @@ def test_cpu_loader_scope_strictness_and_ordinary_loader_restoration(
     assert path.read_bytes() == original and not torch.cuda.is_initialized()
 
 
-@pytest.mark.parametrize("visible,skip", [("0", False), ("", True)])
+@pytest.mark.parametrize("visible,skip", [("0", False), ("1", True)])
 def test_cpu_loader_never_enables_cuda_or_skips_weights(monkeypatch, tmp_path, visible, skip):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 0)
     if skip:
         monkeypatch.setenv("GROOT_SKIP_HF_MODEL_WEIGHTS", "1")
     else:

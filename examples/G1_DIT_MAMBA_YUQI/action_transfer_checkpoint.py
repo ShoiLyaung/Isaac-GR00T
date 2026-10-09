@@ -248,19 +248,22 @@ def save_deployment_fixture(
 
     if core_record["kind"] != "core_only" or core_record.get("fixture_only", False):
         raise ValueError("Fixture requires an explicitly trained core-only parent")
+    assert_fixture_cpu_residency(model, "B0")
     proto.assert_frozen(model)
     if proto.content_hash(model.state_dict()) != base_content_sha256:
         raise ValueError("Fixture source model differs from frozen B0")
     teacher_head = model.action_head
     if any(p.device.type != "cpu" or p.dtype != torch.bfloat16 for p in model.parameters()):
-        raise ValueError("Build deployment fixtures from frozen CPU BF16 B0 before any GPU stage")
+        raise ValueError("Build deployment fixtures from frozen CPU BF16 B0")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     budget()
     core = load_student(teacher_head, core_record, device="cpu")
+    assert_fixture_cpu_residency(core, "official Mamba core")
     student = (
         NativeStudent(teacher_head, core, "core_only_continuation").eval().requires_grad_(False)
     )
+    residency = assert_fixture_cpu_residency(student, "composite student")
     budget()
     weights = save_tensor_new(output / "student.pt", cpu_tree(student.state_dict()))
     budget()
@@ -279,6 +282,7 @@ def save_deployment_fixture(
         "weights": weights,
         "core_parent": core_record,
         "base_content_sha256": base_content_sha256,
+        "residency": residency,
         "scope": "Existing trained core plus unchanged B0 periphery; dev deployment fixture only",
     }
     path = output / "fixture-index.json"
@@ -297,14 +301,62 @@ def save_deployment_fixture(
 CPU_FIXTURE_BASE_SHA256 = "2bff6e15f09adc0ee05c24d2445d347113d802043e41227e4eb6b6ce150a83ad"
 
 
+FIXTURE_EXECUTION = "cpu_weights_cuda_driver_only"
+
+
+def fixture_driver_contract(physical_gpu, execution):
+    import os
+
+    if (
+        physical_gpu != 1
+        or execution != FIXTURE_EXECUTION
+        or os.environ.get("CUDA_VISIBLE_DEVICES") != str(physical_gpu)
+    ):
+        raise ValueError(
+            "Fixture requires physical_gpu=1, cpu_weights_cuda_driver_only and CUDA_VISIBLE_DEVICES='1'"
+        )
+    if torch.cuda.device_count() != 1:
+        raise ValueError("Driver-only fixture must expose exactly one CUDA device")
+    return assert_fixture_zero_cuda_allocations()
+
+
+def fixture_cuda_state():
+    return {
+        "cuda_initialized": torch.cuda.is_initialized(),
+        "torch_cuda_memory_allocated_bytes": torch.cuda.memory_allocated(),
+    }
+
+
+def assert_fixture_zero_cuda_allocations():
+    state = fixture_cuda_state()
+    if state["torch_cuda_memory_allocated_bytes"] != 0:
+        raise ValueError(
+            f"Driver-only fixture has PyTorch CUDA allocations: {state['torch_cuda_memory_allocated_bytes']}"
+        )
+    return state
+
+
+def assert_fixture_cpu_residency(module, owner):
+    values = list(module.named_parameters()) + list(module.named_buffers())
+    outside = [name for name, value in values if value.device.type != "cpu"]
+    if outside:
+        raise ValueError(f"Fixture {owner} parameters/buffers escaped CPU: {outside}")
+    state = assert_fixture_zero_cuda_allocations()
+    return {
+        "owner": owner,
+        "parameter_and_buffer_tensors": len(values),
+        "all_parameters_and_buffers_cpu": True,
+        **state,
+    }
+
+
 def strict_cpu_fixture_reload(path):
     """Use the native per-load CPU config override; no factory/global patch escapes."""
     import os
 
     from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7
 
-    if os.environ.get("CUDA_VISIBLE_DEVICES") != "" or torch.cuda.is_initialized():
-        raise ValueError("CPU fixture loading requires hidden and uninitialized CUDA")
+    fixture_driver_contract(1, FIXTURE_EXECUTION)
     if os.environ.get("GROOT_SKIP_HF_MODEL_WEIGHTS") == "1":
         raise ValueError("CPU fixture cannot skip pretrained weights")
     # HF consumes this native config field on the fresh config for THIS load.
@@ -326,8 +378,7 @@ def strict_cpu_fixture_reload(path):
     backend = model.backbone.model.config._attn_implementation
     if backend != "sdpa" or model.config.use_flash_attention is not False:
         raise ValueError("CPU fixture did not construct the native SDPA backbone")
-    if torch.cuda.is_initialized():
-        raise ValueError("CPU fixture construction initialized CUDA")
+    assert_fixture_cpu_residency(model, "loaded B0")
     return model, {
         **info,
         "cpu_fixture_attention_backend": backend,
@@ -345,7 +396,7 @@ def fixture_main():
     from contract import write_new
 
     parser = argparse.ArgumentParser(
-        description="Create one explicit CPU-only task50k+B0 deployment fixture"
+        description="Create CPU task50k+B0 weights with one explicitly assigned CUDA driver context"
     )
     parser.add_argument("command", choices=("fixture",))
     parser.add_argument("--plan", type=Path, required=True)
@@ -354,11 +405,12 @@ def fixture_main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--wall-seconds", type=int, required=True)
     args = parser.parse_args()
-    if os.environ.get("CUDA_VISIBLE_DEVICES") != "" or torch.cuda.is_initialized():
-        raise ValueError("CPU fixture requires CUDA_VISIBLE_DEVICES='' and no CUDA initialization")
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != "1":
+        raise ValueError("Driver-only fixture requires CUDA_VISIBLE_DEVICES='1'")
     if sha(args.plan) != args.plan_sha256:
         raise ValueError("Explicit CPU fixture PLAN SHA mismatch")
     plan = read(args.plan)
+    fixture_driver_contract(plan["physical_gpu"], plan["fixture_execution"])
     repo = Path(__file__).resolve().parents[2]
     if (
         Path(plan["source_worktree"]).resolve() != repo
@@ -394,8 +446,7 @@ def fixture_main():
         size = sum(p.stat().st_size for p in args.artifact_root.rglob("*") if p.is_file())
         if time.monotonic() - started > args.wall_seconds or size > plan["max_artifact_bytes"]:
             raise RuntimeError("CPU fixture wall/storage budget exceeded")
-        if torch.cuda.is_initialized():
-            raise ValueError("CPU fixture unexpectedly initialized CUDA")
+        assert_fixture_zero_cuda_allocations()
         return size
 
     torch.set_num_threads(4)
@@ -411,7 +462,8 @@ def fixture_main():
             budget,
         )
         budget()
-        assert not torch.cuda.is_initialized(), "CPU fixture must not initialize CUDA"
+        residency = assert_fixture_cpu_residency(model, "final B0")
+        cuda_state = assert_fixture_zero_cuda_allocations()
         write_new(
             args.output / "RESULT.json",
             {
@@ -423,7 +475,10 @@ def fixture_main():
                 "strict_loading": loading,
                 "optimizer_steps": 0,
                 "encoded_observations": 0,
-                "cuda_initialized": False,
+                "fixture_execution": plan["fixture_execution"],
+                "physical_gpu": plan["physical_gpu"],
+                "b0_residency": residency,
+                **cuda_state,
                 "elapsed_seconds": time.monotonic() - started,
                 "artifact_bytes": budget(),
             },
@@ -439,7 +494,9 @@ def fixture_main():
                 "source_commit": source_commit,
                 "optimizer_steps": 0,
                 "encoded_observations": 0,
-                "cuda_initialized": torch.cuda.is_initialized(),
+                "fixture_execution": plan["fixture_execution"],
+                "physical_gpu": plan["physical_gpu"],
+                **fixture_cuda_state(),
                 "exception": type(exc).__name__,
                 "message": str(exc),
                 "automatic_retry": False,

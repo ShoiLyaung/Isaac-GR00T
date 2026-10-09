@@ -114,6 +114,8 @@ def test_cpu_fixture_derives_from_real_parent_and_b0_without_training_identity(
     index = checkpoint.read(record["training_index"]["path"])
     assert record["fixture_only"] and index["fixture_only"]
     assert index["optimizer_steps"] == index["added_steps"] == 0
+    assert index["residency"]["all_parameters_and_buffers_cpu"]
+    assert index["residency"]["torch_cuda_memory_allocated_bytes"] == 0
     assert index["core_parent"] == parent and index["base_content_sha256"] == base_hash
     assert record["core_content_sha256"] == parent["core_content_sha256"]
     assert proto.content_hash(model.state_dict()) == base_hash
