@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from action_transfer_matched_support import StrictBatchDispatcher
-from action_transfer_program_support import optimizer_names
+from action_transfer_program_support import cpu_tree, optimizer_names
 from budgeted_action_cudagraph import TENSOR_KEYS, BackwardGraph, CoreDispatcher, TensorCore
 from budgeted_action_cudagraph_probe import group_mapping
 from budgeted_graph_distillation import CoreDelegate, DecoderDelegate, EncoderDelegate
@@ -175,7 +175,9 @@ def make_optimizer(student, plan, parent_payload):
     optimizer = optimizer_for(student.core, plan)
     if optimizer_names(student.core, optimizer) != parent_payload["optimizer_parameter_names"]:
         raise ValueError("Parent ordered core optimizer inventory differs")
-    optimizer.load_state_dict(parent_payload["optimizer"])
+    # AdamW may retain CPU step tensors (and same-device moments) by reference.
+    # Proof updates must never mutate the preserved parent used by reset_parent.
+    optimizer.load_state_dict(cpu_tree(parent_payload["optimizer"]))
     if student.condition == "joint_periphery":
         for decay in (True, False):
             params = [

@@ -263,6 +263,108 @@ def test_composite_checkpoint_roundtrip_keeps_periphery_optimizer_and_names(tmp_
         other.load_state_dict(broken, strict=True)
 
 
+def assert_tree_exact(actual, expected):
+    if isinstance(expected, torch.Tensor):
+        assert isinstance(actual, torch.Tensor)
+        assert actual.dtype == expected.dtype and torch.equal(actual, expected)
+    elif isinstance(expected, dict):
+        assert actual.keys() == expected.keys()
+        for key in expected:
+            assert_tree_exact(actual[key], expected[key])
+    elif isinstance(expected, (list, tuple)):
+        assert type(actual) is type(expected) and len(actual) == len(expected)
+        for a, b in zip(actual, expected):
+            assert_tree_exact(a, b)
+    else:
+        assert actual == expected
+
+
+@pytest.mark.parametrize("condition", ["core_only_continuation", "joint_periphery"])
+def test_proof_checkpoint_reload_then_reset_preserves_parent_payload(
+    tmp_path, monkeypatch, condition
+):
+    # Exercise the production save/reload/reset functions on the native tiny B4
+    # head. Only the CUDA-only replay surface/device is replaced for this CPU test.
+    from integrity_diagnosis_support import BaseAudit
+    from runner_core import set_seed
+
+    autocast = torch.autocast
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_rng_state_all", lambda: [])
+    monkeypatch.setattr(torch, "autocast", lambda _device, **kwargs: autocast("cpu", **kwargs))
+    monkeypatch.setattr(runner, "eager_route", lambda student: student.core)
+    monkeypatch.setattr(runner, "set_seed", lambda seed, cuda: set_seed(seed, cuda=False))
+    head, frame = head_and_frame()
+    teacher = nn.Module()
+    teacher.action_head = head
+    student = NativeStudent(head, deepcopy(head.model).float(), condition)
+    payload = parent_payload(student.core)
+    payload["rng"] = runner.rng_state()
+    original_payload = cpu_tree(payload)
+    initial_core = cpu_tree(student.core.state_dict())
+    initial_periphery = cpu_tree(student.periphery.state_dict())
+    optimizer = make_optimizer(student, PLAN, payload)
+    audit = BaseAudit(
+        teacher,
+        tmp_path,
+        runner.proto.content_hash(teacher.state_dict()),
+        synchronize=lambda: None,
+    )
+    cache = SimpleNamespace(
+        frame=lambda ep, anchor: {
+            "raw": {key: value[ep : ep + 1] for key, value in frame["raw"].items()},
+            "action_input": {
+                key: value[ep : ep + 1] for key, value in frame["action_input"].items()
+            },
+            "content_sha256": str(ep),
+        }
+    )
+    ctx = SimpleNamespace(
+        student=student,
+        optimizer=optimizer,
+        parent_payload=payload,
+        initial_core=initial_core,
+        initial_periphery=initial_periphery,
+        condition=condition,
+        completed_step=50000,
+        cache=cache,
+        output=tmp_path,
+        audit=audit,
+        budget=lambda: None,
+        source_commit="cpu-test-source",
+        args=SimpleNamespace(plan_sha256="cpu-test-plan"),
+        plan={**PLAN, "cache_report_sha256": "cache", "schedule_sha256": "schedule", "parent": {}},
+    )
+    for step in range(3):
+        optimizer.zero_grad(set_to_none=True)
+        with autocast("cpu", dtype=torch.bfloat16):
+            values = task_forward(student, student.core, frame)
+        values["native"]["loss"].backward()
+        torch.nn.utils.clip_grad_norm_([p for p in student.parameters() if p.requires_grad], 1)
+        optimizer.step()
+        ctx.completed_step += 1
+    optimizer_steps(student, optimizer, 3)
+    checkpoint = runner.save_checkpoint(ctx, tmp_path / "proof-checkpoint", {})
+    planned = {"batch": [{"episode": ep, "anchor": 0} for ep in range(4)], "forward_seed": 912}
+    restored = runner.reload_checkpoint(ctx, checkpoint, planned, "cpu-proof")
+    assert restored["passed"] and restored["rng_exact"]
+    report = runner.reset_parent(ctx)
+    assert ctx.completed_step == 50000 and report["optimizer"]["core_step"] == 40000
+    assert_tree_exact(payload, original_payload)
+    assert_tree_exact(student.core.state_dict(), initial_core)
+    assert_tree_exact(student.periphery.state_dict(), initial_periphery)
+    assert_tree_exact(runner.rng_state(), original_payload["rng"])
+    for group, actual in zip(
+        original_payload["optimizer"]["param_groups"], ctx.optimizer.param_groups[:2]
+    ):
+        for identifier, parameter in zip(group["params"], actual["params"]):
+            assert_tree_exact(
+                ctx.optimizer.state[parameter], original_payload["optimizer"]["state"][identifier]
+            )
+    assert all(p not in ctx.optimizer.state for p in student.periphery.parameters())
+    assert not torch.cuda.is_initialized()
+
+
 def test_lr_endpoints_and_fixed_paired_bootstrap():
     values = [adaptation_lr(s) for s in range(50001, 70001)]
     assert values[0] == 1e-5 and values[-1] == 1e-6
