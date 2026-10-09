@@ -200,7 +200,7 @@ class Mamba2State:
 
 
 class _Mamba2ResidualLayer(nn.Module):
-    def __init__(self, index: int):
+    def __init__(self, index: int, *, chunk_size: int):
         super().__init__()
         try:
             from mamba_ssm import Mamba2
@@ -210,8 +210,9 @@ class _Mamba2ResidualLayer(nn.Module):
             ) from error
 
         self.norm = nn.LayerNorm(WIDTH, device="cpu", dtype=torch.float32)
+        config = {**MAMBA2_CONFIG, "chunk_size": chunk_size}
         self.mamba = Mamba2(
-            **MAMBA2_CONFIG,
+            **config,
             layer_idx=index,
             device="cpu",
             dtype=torch.float32,
@@ -234,11 +235,16 @@ class _Mamba2ResidualLayer(nn.Module):
 class CausalMamba2Backbone(nn.Module):
     """Two-layer unidirectional Mamba2 with fixed-size persistent state."""
 
-    def __init__(self, *, seed: int = SEED):
+    def __init__(self, *, seed: int = SEED, chunk_size: int = MAMBA2_CONFIG["chunk_size"]):
         super().__init__()
+        if chunk_size not in (1, MAMBA2_CONFIG["chunk_size"]):
+            raise ValueError("Arena Mamba2 chunk size must be 1 or the frozen current value 16")
+        self.chunk_size = chunk_size
         with torch.random.fork_rng(devices=[]):
             torch.random.default_generator.manual_seed(seed)
-            self.layers = nn.ModuleList([_Mamba2ResidualLayer(index) for index in range(LAYERS)])
+            self.layers = nn.ModuleList(
+                [_Mamba2ResidualLayer(index, chunk_size=chunk_size) for index in range(LAYERS)]
+            )
 
     def forward(self, descriptors: torch.Tensor) -> torch.Tensor:
         _validate_descriptor_sequence(descriptors)
@@ -345,6 +351,25 @@ class CausalGRUBackbone(nn.Module):
             )
             update, _ = layer.gru(layer.norm(value), hidden)
             value = value + update
+        return value
+
+    def forward_explicit(self, descriptors: torch.Tensor) -> torch.Tensor:
+        """Run the same GRU weights one frame at a time while preserving autograd."""
+        batch, _ = _validate_descriptor_sequence(descriptors)
+        value = descriptors
+        for layer in self.layers:
+            hidden = torch.zeros(
+                1,
+                batch,
+                WIDTH,
+                device=value.device,
+                dtype=value.dtype,
+            )
+            updates = []
+            for frame in value.unbind(dim=1):
+                update, hidden = layer.gru(layer.norm(frame).unsqueeze(1), hidden)
+                updates.append(update)
+            value = value + torch.cat(updates, dim=1)
         return value
 
     def new_state(self, batch_size: int) -> GRUState:
