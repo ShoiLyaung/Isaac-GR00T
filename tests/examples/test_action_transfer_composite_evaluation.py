@@ -493,3 +493,72 @@ def test_fixture_entrypoint_refuses_visible_gpu_before_loading(monkeypatch, tmp_
     with pytest.raises(ValueError, match="CUDA_VISIBLE_DEVICES"):
         checkpoint.fixture_main()
     assert not (tmp_path / "output").exists() and not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize("kind", ["core_only", "core_periphery"])
+def test_development_adapter_is_two_dev_pairs_and_never_final(monkeypatch, tmp_path, kind):
+    state = (
+        {"weight": torch.ones(2)}
+        if kind == "core_only"
+        else {"core.weight": torch.ones(2), "periphery.vlln.weight": torch.ones(2)}
+    )
+    pairs = [{"episode": ep, "anchor": 0, "nominal_seed": 42} for ep in (1, 2)]
+    plan = {
+        "dev": [1, 2],
+        "train": [3],
+        "final": [4],
+        "reserve": [5],
+        "grids": {str(ep): [0] for ep in range(1, 6)},
+        "fixtures": [{"episode": ep, "anchor": 0} for ep in (1, 2)],
+    }
+    ctx = SimpleNamespace(
+        plan=plan,
+        candidate={"kind": kind, "fixture_only": True},
+        student=SimpleNamespace(state_dict=lambda: state),
+        cache=SimpleNamespace(frame=lambda ep, anchor: {"content_sha256": f"frame{ep}"}),
+    )
+    calls = []
+    evaluator = support.periphery if kind == "core_periphery" else support.matched
+
+    def evaluate(ctx, selected, path):
+        calls.append(selected)
+        path.mkdir()
+        rows = [
+            {"episode": pair["episode"], "anchor": pair["anchor"], "seed": pair["nominal_seed"]}
+            for pair in selected
+        ]
+        evaluator.write_new(path / "details.json", rows)
+        evaluator.write_new(path / "NORMALIZATION.json", {"normalization": "unchanged"})
+        result = {
+            "status": "passed",
+            "scope": support.OLD_SCOPE,
+            "rows": 2,
+            "metrics": {"flow_loss": 1.0},
+            "array_sha256": {},
+            "details_sha256": sha(path / "details.json"),
+            "normalization_sha256": sha(path / "NORMALIZATION.json"),
+        }
+        evaluator.write_new(path / "RESULT.json", result)
+        return {
+            "path": str(path / "RESULT.json"),
+            "sha256": sha(path / "RESULT.json"),
+            "result": result,
+        }
+
+    monkeypatch.setattr(evaluator, "evaluate_pairs", evaluate)
+    assert support.development_pairs(plan) == pairs
+    record = support.evaluate_development_candidate(ctx, pairs, tmp_path / "development")
+    result, rows = support.verify_development_evaluation(record, pairs)
+    assert result["development_only"] is True and result["cohort"] == "dev"
+    assert result["checkpoint_kind"] == kind and rows[0]["input_frame_content_sha256"] == "frame1"
+    with pytest.raises(ValueError, match="mislabeled"):
+        support.verify_evaluation(record, pairs)
+    with pytest.raises(ValueError, match="cannot use the final evaluator"):
+        support.evaluate_final_candidate(ctx, pairs, tmp_path / "forbidden-final")
+    for episode in (3, 4, 5):
+        wrong = [{**pairs[0], "episode": episode}, pairs[1]]
+        with pytest.raises(ValueError, match="escaped"):
+            support.evaluate_development_candidate(ctx, wrong, tmp_path / f"forbidden{episode}")
+    with pytest.raises(ValueError, match="exactly two"):
+        support.evaluate_development_candidate(ctx, pairs[:1], tmp_path / "one")
+    assert len(calls) == 1 and not torch.cuda.is_initialized()

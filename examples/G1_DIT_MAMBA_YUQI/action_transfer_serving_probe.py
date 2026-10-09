@@ -2,6 +2,7 @@
 
 import argparse
 from contextlib import nullcontext
+from copy import deepcopy
 import gc
 import json
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from action_transfer_checkpoint import DeployedStudent
@@ -360,6 +362,169 @@ def loopback(policy, observations, fixture_path, plan, output, identity, deadlin
     return result
 
 
+def offline_adapter_proof(model, deployment, source, cache, plan, output, budget):
+    """Run both real offline adapters on existing dev pairs before any final use."""
+    from action_transfer_checkpoint import semantic_identity
+    from action_transfer_final_support import (
+        assert_development_teacher_equal,
+        development_pairs,
+        evaluate_development_candidate,
+        verify_development_evaluation,
+    )
+    from integrity_diagnosis_support import BaseAudit
+
+    pairs = development_pairs(plan)
+    if (
+        not isinstance(deployment, DeployedStudent)
+        or deployment.record["kind"] != "core_periphery"
+        or deployment.active_graphs
+    ):
+        raise ValueError("Development offline proof needs a composite owner with no live graph")
+    output.mkdir(exist_ok=False)
+    audit = BaseAudit(model, output, plan["base_content_sha256"], budget=budget)
+    owner = deployment.owner
+    ctx = SimpleNamespace(
+        model=model,
+        teacher=model.action_head.model,
+        source=source,
+        cache=cache,
+        plan=plan,
+        args=SimpleNamespace(cache_report_sha256=plan["cache_report_sha256"]),
+        audit=audit,
+        budget=budget,
+    )
+    records = {}
+    private = None
+
+    def evaluate(name, student, kind, expected_hashes):
+        ctx.student = student
+        ctx.candidate = {"kind": kind, "development_adapter_only": True}
+        audit.check("before-development-adapter:" + name, stable=True)
+        record = evaluate_development_candidate(ctx, pairs, output / name)
+        value, rows = verify_development_evaluation(record, pairs)
+        fields = {
+            "student_content_sha256": "content_sha256",
+            "checkpoint_content_sha256": "content_sha256",
+            "core_content_sha256": "core_content_sha256",
+            "periphery_content_sha256": "periphery_content_sha256",
+        }
+        if value["checkpoint_kind"] != kind or any(
+            value[key] != expected_hashes[source_key] for key, source_key in fields.items()
+        ):
+            raise ValueError("Development evaluator full/core/periphery metadata binding differs")
+        audit.check("after-development-adapter:" + name, stable=True)
+        records[name] = record
+        return value, rows
+
+    try:
+        core = deployment.core.cuda().eval().requires_grad_(False)
+        core_hash = deployment.record["core_content_sha256"]
+        core_result, _ = evaluate(
+            "core-only",
+            core,
+            "core_only",
+            {
+                "content_sha256": core_hash,
+                "core_content_sha256": core_hash,
+                "periphery_content_sha256": None,
+            },
+        )
+        owner.cuda().eval().requires_grad_(False)
+        composite_result, composite_rows = evaluate(
+            "composite", owner, "core_periphery", deployment.record
+        )
+        assert_development_teacher_equal(records["core-only"], records["composite"], pairs)
+        fixture_exact = None
+        if deployment.record.get("fixture_only", False):
+            fixture_exact = all(
+                core_result["array_sha256"][name] == composite_result["array_sha256"][name]
+                for name in ("student_actions", "student_velocity", "student_physical")
+            )
+            if not fixture_exact:
+                raise ValueError(
+                    "B0-periphery fixture differs from the same core-only offline adapter"
+                )
+        # The source object/file is never perturbed. Copy on CPU to avoid keeping
+        # two full FP32 peripheries resident on the GPU during this diagnostic.
+        owner.cpu()
+        ctx.student = None
+        private = deepcopy(owner).cuda().eval().requires_grad_(False)
+        with torch.no_grad():
+            bias = private.periphery["vlln"].bias
+            alternating = (torch.arange(bias.numel(), device=bias.device) % 2).to(
+                bias.dtype
+            ) * 2 - 1
+            bias.add_(alternating.reshape_as(bias) / 64)
+            private.periphery["action_decoder"].layer2.b.add_(1 / 64)
+        private_hashes = semantic_identity(private.state_dict(), "core_periphery")
+        _, changed_rows = evaluate(
+            "diagnostic-private-periphery", private, "core_periphery", private_hashes
+        )
+        assert_development_teacher_equal(
+            records["composite"], records["diagnostic-private-periphery"], pairs
+        )
+        original_actions = np.load(
+            Path(records["composite"]["path"]).parent / "student_actions.npy"
+        )
+        changed_actions = np.load(
+            Path(records["diagnostic-private-periphery"]["path"]).parent / "student_actions.npy"
+        )
+        witness = [
+            {
+                **pair,
+                "student_condition_changed": a["noise_receipt"]["effective_condition"]
+                != b["noise_receipt"]["effective_condition"],
+                "student_action_changed": not np.array_equal(
+                    original_actions[i], changed_actions[i]
+                ),
+            }
+            for i, (pair, a, b) in enumerate(zip(pairs, composite_rows, changed_rows))
+        ]
+        if not all(
+            row["student_condition_changed"] and row["student_action_changed"] for row in witness
+        ):
+            raise ValueError(
+                "Private periphery perturbation did not witness changed student condition/action"
+            )
+        cache.assert_readonly()
+        deployment.assert_unchanged()
+        audit.check("development-proof-complete", stable=True)
+        result = {
+            "status": "passed",
+            "development_only": True,
+            "cohort": "dev",
+            "pairs": pairs,
+            "source_checkpoint": deployment.record,
+            "optimizer_steps": 0,
+            "base_content_sha256": plan["base_content_sha256"],
+            "teacher_arrays_receipts_targets_masks_equal": True,
+            "shared_noise_time_equal": True,
+            "three_semantic_hash_bindings_verified": True,
+            "b0_fixture_core_composite_exact": fixture_exact,
+            "diagnostic_private_perturbation": {
+                "saved_weights": False,
+                "vlln.bias_alternating_delta": 1 / 64,
+                "action_decoder.layer2.b_delta": 1 / 64,
+                "witness": witness,
+                "semantic_identity": private_hashes,
+                "source_checkpoint_unchanged": True,
+            },
+            "evaluations": {
+                name: {"path": record["path"], "sha256": record["sha256"]}
+                for name, record in records.items()
+            },
+        }
+    finally:
+        ctx.student = None
+        private = None
+        owner.cpu()
+        gc.collect()
+        torch.cuda.empty_cache()
+        audit.check("development-private-copy-released", stable=True)
+    write_new(output / "RESULT.json", result)
+    return {"path": str((output / "RESULT.json").resolve()), "sha256": sha(output / "RESULT.json")}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
@@ -407,6 +572,11 @@ def main():
         if plan["student_checkpoint"]["kind"] == "core_periphery" and cache is None:
             raise ValueError(
                 "Composite deployment probe requires frozen train/dev raw cache parity"
+            )
+        offline = None
+        if plan["student_checkpoint"]["kind"] == "core_periphery":
+            offline = offline_adapter_proof(
+                model, student, source, cache, plan, args.output / "offline-adapter-proof", budget
             )
         rows = []
         for mode in plan["modes"]:
@@ -462,6 +632,7 @@ def main():
             "fixtures": fixture,
             "modes": rows,
             "safe_decoder": rejection,
+            "offline_adapter_proof": offline,
             "optimizer_steps": 0,
             "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
             "elapsed_seconds": time.monotonic() - started,

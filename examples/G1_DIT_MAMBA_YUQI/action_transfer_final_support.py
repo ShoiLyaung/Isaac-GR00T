@@ -164,8 +164,8 @@ class FinalCache:
             raise ValueError("Final cache report changed")
 
 
-def evaluate_final_candidate(ctx, pairs, output):
-    """Preserve evaluator mathematics and add final input/full-checkpoint identities."""
+def _evaluate_candidate(ctx, pairs, output, *, development_only):
+    """Shared metadata adapter; each public caller preserves its own cohort boundary."""
     output = Path(output)
     result_path = output / "RESULT.json"
     evaluator = periphery if ctx.candidate["kind"] == "core_periphery" else matched
@@ -183,8 +183,13 @@ def evaluate_final_candidate(ctx, pairs, output):
             seen += 1
             if seen != 1 or value.get("scope") != OLD_SCOPE or result_path.exists():
                 raise ValueError("Final metadata adapter only accepts one fresh original result")
-            value["scope"] = FINAL_SCOPE
-            value["cohort"] = "final"
+            value["scope"] = (
+                "Development-only mathematical adapter check on two existing dev pairs; no final/reserve access"
+                if development_only
+                else FINAL_SCOPE
+            )
+            value["cohort"] = "dev" if development_only else "final"
+            value["development_only"] = development_only
             hashes = semantic_identity(ctx.student.state_dict(), ctx.candidate["kind"])
             value.update(
                 checkpoint_kind=ctx.candidate["kind"],
@@ -202,12 +207,47 @@ def evaluate_final_candidate(ctx, pairs, output):
     return result
 
 
+def evaluate_final_candidate(ctx, pairs, output):
+    if ctx.candidate.get("fixture_only", False):
+        raise ValueError("Deployment fixtures cannot use the final evaluator")
+    return _evaluate_candidate(ctx, pairs, output, development_only=False)
+
+
+def development_pairs(plan):
+    if len(plan["fixtures"]) < 2:
+        raise ValueError("Development adapter proof requires two original dev fixtures")
+    pairs = [
+        {"episode": row["episode"], "anchor": row["anchor"], "nominal_seed": 42}
+        for row in plan["fixtures"][:2]
+    ]
+    validate_development_pairs(plan, pairs)
+    return pairs
+
+
+def validate_development_pairs(plan, pairs):
+    if len(pairs) != 2:
+        raise ValueError("Development adapter proof uses exactly two frozen dev pairs")
+    for pair in pairs:
+        if (
+            pair["episode"] not in plan["dev"]
+            or pair["episode"] in plan.get("final", []) + plan.get("reserve", [])
+            or pair["anchor"] not in plan["grids"][str(pair["episode"])]
+            or pair["nominal_seed"] != 42
+        ):
+            raise ValueError("Development adapter pair escaped the original dev fixtures")
+
+
+def evaluate_development_candidate(ctx, pairs, output):
+    validate_development_pairs(ctx.plan, pairs)
+    return _evaluate_candidate(ctx, pairs, output, development_only=True)
+
+
 def save_numpy_new(path, value):
     with Path(path).open("xb") as stream:
         np.save(stream, value, allow_pickle=False)
 
 
-def verify_evaluation(record, expected_pairs):
+def _verify_evaluation(record, expected_pairs, *, development_only):
     root = Path(record["path"]).parent
     if sha(record["path"]) != record["sha256"]:
         raise ValueError("Candidate result identity changed")
@@ -215,7 +255,8 @@ def verify_evaluation(record, expected_pairs):
     if (
         result["status"] != "passed"
         or result["rows"] != len(expected_pairs)
-        or result["cohort"] != "final"
+        or result["cohort"] != ("dev" if development_only else "final")
+        or result.get("development_only", False) != development_only
     ):
         raise ValueError("Incomplete or mislabeled final candidate evaluation")
     for name, digest in result["array_sha256"].items():
@@ -239,9 +280,27 @@ def verify_evaluation(record, expected_pairs):
     return result, rows
 
 
+def verify_evaluation(record, expected_pairs):
+    return _verify_evaluation(record, expected_pairs, development_only=False)
+
+
+def verify_development_evaluation(record, expected_pairs):
+    return _verify_evaluation(record, expected_pairs, development_only=True)
+
+
 def assert_teacher_equal(first_record, current_record, expected_pairs):
     first, left = verify_evaluation(first_record, expected_pairs)
     current, right = verify_evaluation(current_record, expected_pairs)
+    return _assert_teacher_rows_equal(first, left, current, right)
+
+
+def assert_development_teacher_equal(first_record, current_record, expected_pairs):
+    first, left = verify_development_evaluation(first_record, expected_pairs)
+    current, right = verify_development_evaluation(current_record, expected_pairs)
+    return _assert_teacher_rows_equal(first, left, current, right)
+
+
+def _assert_teacher_rows_equal(first, left, current, right):
     for name in (
         "teacher_actions",
         "teacher_physical",
