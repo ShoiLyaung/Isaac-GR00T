@@ -98,6 +98,8 @@ def test_fixed_candidates_target_preflight() -> None:
         (mamba_candidate, mamba_candidate.forward),
         (gru_candidate, gru_candidate.forward_explicit),
     ):
+        tokenizer.train()
+        temporal.train()
         tokenizer.zero_grad(set_to_none=True)
         temporal.zero_grad(set_to_none=True)
         output = full_path(tokenizer(raw))

@@ -53,6 +53,8 @@ def _passing_inputs() -> tuple[dict[str, object], dict[str, object]]:
             name: {
                 "length": diagnosis.GRADIENT_LENGTH,
                 "output_finite": True,
+                "tokenizer_training_mode": True,
+                "temporal_training_mode": True,
                 "tokenizer": {"finite_nonzero": True},
                 "temporal": {"finite_nonzero": True},
             }
@@ -123,9 +125,9 @@ def test_state_dict_hash_and_tensor_equality_are_ordered_and_sensitive() -> None
 
 def test_resolved_plan_freezes_only_the_four_conditions_and_gpu0() -> None:
     plan = diagnosis.resolved_plan("1" * 40)
-    assert plan["run_id"] == "fixed-weight-gpu0-r2"
+    assert plan["run_id"] == "fixed-weight-gpu0-r3"
     assert plan["source"]["base_commit"] == diagnosis.BASE_SOURCE_COMMIT
-    assert plan["failed_engineering_attempt"] == diagnosis.FAILED_ENGINEERING_ATTEMPT
+    assert plan["failed_engineering_attempts"] == diagnosis.FAILED_ENGINEERING_ATTEMPTS
     assert plan["protocol"]["conditions"] == list(diagnosis.CONDITION_NAMES)
     assert plan["protocol"]["mamba_full_chunk_sizes"] == {"current": 16, "candidate": 1}
     assert plan["resources"] == {

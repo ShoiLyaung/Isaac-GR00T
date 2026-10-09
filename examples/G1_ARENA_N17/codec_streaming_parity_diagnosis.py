@@ -43,7 +43,7 @@ from torch.nn import functional as F
 
 REPO = Path(__file__).resolve().parents[2]
 EXPERIMENT = "g1-arena-codec-streaming-parity-diagnosis-r1"
-RUN_ID = "fixed-weight-gpu0-r2"
+RUN_ID = "fixed-weight-gpu0-r3"
 BASE_SOURCE_COMMIT = "8dd32c8538d758874697e6cbc4086824c6c932ff"
 ARTIFACT_ROOT = Path(
     "/home/sl/research/icra27-artifacts/g1-arena-codec-streaming-parity-diagnosis-r1"
@@ -181,6 +181,7 @@ FROZEN_PROTOCOL = {
     "persistent_stream_partition_size": STREAM_PARTITION_SIZE,
     "repeat_count": 2,
     "gradient_length": GRADIENT_LENGTH,
+    "gradient_module_mode": "train_without_dropout_or_batchnorm",
     "optimizer_steps": 0,
     "vla_model_instantiated": False,
 }
@@ -209,22 +210,38 @@ FROZEN_R1_EVIDENCE = {
         "sha256": R1_RESULT_SHA256,
     },
 }
-FAILED_ENGINEERING_ATTEMPT = {
-    "plan": {
-        "path": str(ARTIFACT_ROOT / "plan-r1/PLAN.json"),
-        "bytes": 4_881,
-        "sha256": "234358bd44e1a110e7988878a090d61f3fa94dcf167b22224136a86aba3bb34e",
+FAILED_ENGINEERING_ATTEMPTS = {
+    "r1_dirty_source": {
+        "plan": {
+            "path": str(ARTIFACT_ROOT / "plan-r1/PLAN.json"),
+            "bytes": 4_881,
+            "sha256": "234358bd44e1a110e7988878a090d61f3fa94dcf167b22224136a86aba3bb34e",
+        },
+        "result": {
+            "path": str(ARTIFACT_ROOT / "fixed-weight-gpu0-r1/RESULT.json"),
+            "bytes": 664,
+            "sha256": "83e68bfd7d018e8e931f29af8b71e4e70264c470e1a72e3d6d49bc9599de433f",
+        },
+        "required_error": (
+            "ValueError: diagnosis source is dirty: "
+            "['tests/gr00t/experimental/test_arena_codec_streaming_parity_target.py']"
+        ),
+        "failure_before_model_probe": True,
     },
-    "result": {
-        "path": str(ARTIFACT_ROOT / "fixed-weight-gpu0-r1/RESULT.json"),
-        "bytes": 664,
-        "sha256": "83e68bfd7d018e8e931f29af8b71e4e70264c470e1a72e3d6d49bc9599de433f",
+    "r2_eval_mode_gradient": {
+        "plan": {
+            "path": str(ARTIFACT_ROOT / "plan-r2/PLAN.json"),
+            "bytes": 5_585,
+            "sha256": "d2ccf0fdedb19d9dcdd8e73c0f9d68d089a720d6cc2ecc71268fdb353154ccc8",
+        },
+        "result": {
+            "path": str(ARTIFACT_ROOT / "fixed-weight-gpu0-r2/RESULT.json"),
+            "bytes": 617,
+            "sha256": "62f6de296955350249cb287f325c73889a9ee43f46b7d5778be9994597725104",
+        },
+        "required_error": "RuntimeError: cudnn RNN backward can only be called in training mode",
+        "failure_before_model_probe": False,
     },
-    "required_status": "failed",
-    "required_error": (
-        "ValueError: diagnosis source is dirty: "
-        "['tests/gr00t/experimental/test_arena_codec_streaming_parity_target.py']"
-    ),
 }
 
 
@@ -359,7 +376,7 @@ def resolved_plan(source_commit: str) -> dict[str, Any]:
             "base_commit": BASE_SOURCE_COMMIT,
         },
         "r1_evidence": copy.deepcopy(FROZEN_R1_EVIDENCE),
-        "failed_engineering_attempt": copy.deepcopy(FAILED_ENGINEERING_ATTEMPT),
+        "failed_engineering_attempts": copy.deepcopy(FAILED_ENGINEERING_ATTEMPTS),
         "input": copy.deepcopy(FROZEN_INPUT),
         "dependency": copy.deepcopy(FROZEN_DEPENDENCY),
         "runtime": copy.deepcopy(FROZEN_RUNTIME),
@@ -385,7 +402,7 @@ def write_new(path: Path, payload: dict[str, Any]) -> int:
 
 
 def prepare_plan(path: Path) -> dict[str, Any]:
-    expected = ARTIFACT_ROOT / "plan-r2/PLAN.json"
+    expected = ARTIFACT_ROOT / "plan-r3/PLAN.json"
     if path.resolve() != expected.resolve():
         raise ValueError(f"resolved plan path must be {expected}")
     commit = subprocess.check_output(
@@ -537,30 +554,31 @@ def verify_r1_evidence() -> dict[str, Any]:
     }
 
 
-def verify_failed_engineering_attempt() -> dict[str, Any]:
-    _verify_material_spec(
-        FAILED_ENGINEERING_ATTEMPT["plan"],
-        expected_path=ARTIFACT_ROOT / "plan-r1/PLAN.json",
-        label="failed engineering attempt plan",
-    )
-    result_path = _verify_material_spec(
-        FAILED_ENGINEERING_ATTEMPT["result"],
-        expected_path=ARTIFACT_ROOT / "fixed-weight-gpu0-r1/RESULT.json",
-        label="failed engineering attempt result",
-    )
-    result = read_json(result_path)
-    if (
-        result.get("status") != FAILED_ENGINEERING_ATTEMPT["required_status"]
-        or result.get("error") != FAILED_ENGINEERING_ATTEMPT["required_error"]
-        or result.get("training_allowed") is not False
-    ):
-        raise ValueError("failed engineering attempt evidence changed")
-    return {
-        "plan": FAILED_ENGINEERING_ATTEMPT["plan"],
-        "result": FAILED_ENGINEERING_ATTEMPT["result"],
-        "failure_before_model_probe": True,
-        "error": result["error"],
-    }
+def verify_failed_engineering_attempts() -> dict[str, Any]:
+    verified = {}
+    for name, spec in FAILED_ENGINEERING_ATTEMPTS.items():
+        plan_path = Path(spec["plan"]["path"])
+        result_path = Path(spec["result"]["path"])
+        _verify_material_spec(
+            spec["plan"], expected_path=plan_path, label=f"{name} engineering attempt plan"
+        )
+        _verify_material_spec(
+            spec["result"], expected_path=result_path, label=f"{name} engineering attempt result"
+        )
+        result = read_json(result_path)
+        if (
+            result.get("status") != "failed"
+            or result.get("error") != spec["required_error"]
+            or result.get("training_allowed") is not False
+        ):
+            raise ValueError(f"{name} failed engineering attempt evidence changed")
+        verified[name] = {
+            "plan": spec["plan"],
+            "result": spec["result"],
+            "failure_before_model_probe": spec["failure_before_model_probe"],
+            "error": result["error"],
+        }
+    return verified
 
 
 def verify_dependencies() -> dict[str, Any]:
@@ -926,6 +944,8 @@ def candidate_gradient_probe(
     temporal: CausalMamba2Backbone | CausalGRUBackbone,
     full_path: Callable[[torch.Tensor], torch.Tensor],
 ) -> dict[str, Any]:
+    tokenizer.train()
+    temporal.train()
     tokenizer.zero_grad(set_to_none=True)
     temporal.zero_grad(set_to_none=True)
     descriptors = tokenizer(raw[:, :GRADIENT_LENGTH])
@@ -937,6 +957,8 @@ def candidate_gradient_probe(
         "loss": float(loss.detach().item()),
         "output_shape": list(output.shape),
         "output_finite": bool(torch.isfinite(output).all()),
+        "tokenizer_training_mode": tokenizer.training,
+        "temporal_training_mode": temporal.training,
         "tokenizer": _gradient_group_report(tokenizer),
         "temporal": _gradient_group_report(temporal),
     }
@@ -1069,6 +1091,8 @@ def evaluate_gates(numerical: dict[str, Any], execution: dict[str, Any]) -> dict
     candidate_gradients = set(gradients) == set(CANDIDATE_CONDITIONS) and all(
         report["length"] == GRADIENT_LENGTH
         and report["output_finite"]
+        and report["tokenizer_training_mode"]
+        and report["temporal_training_mode"]
         and report["tokenizer"]["finite_nonzero"]
         and report["temporal"]["finite_nonzero"]
         for report in gradients.values()
@@ -1101,7 +1125,7 @@ def run(plan: dict[str, Any], plan_identity: dict[str, Any]) -> dict[str, Any]:
     native_modules_before = native_vla_modules_loaded()
     source = verify_source(plan["source"]["commit"])
     r1_evidence = verify_r1_evidence()
-    failed_engineering_attempt = verify_failed_engineering_attempt()
+    failed_engineering_attempts = verify_failed_engineering_attempts()
     dependencies = verify_dependencies()
     codec, input_evidence = load_codec_input()
     environment = verify_environment()
@@ -1127,7 +1151,7 @@ def run(plan: dict[str, Any], plan_identity: dict[str, Any]) -> dict[str, Any]:
         "source": source,
         "plan": plan_identity,
         "r1_evidence": r1_evidence,
-        "failed_engineering_attempt": failed_engineering_attempt,
+        "failed_engineering_attempts": failed_engineering_attempts,
         "input": input_evidence,
         "dependencies": dependencies,
         "environment": environment,
