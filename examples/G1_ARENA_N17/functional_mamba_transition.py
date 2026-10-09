@@ -46,13 +46,13 @@ REPO = Path(__file__).resolve().parents[2]
 EXPERIMENT = "g1-arena-functional-mamba-transition-r1"
 BASE_SOURCE_COMMIT = "9d29f636fbcffbcf5a2b1a26f9fa4df9cbec65f3"
 ARTIFACT_ROOT = Path("/home/sl/research/icra27-artifacts/g1-arena-functional-mamba-transition-r1")
-CORRECTNESS_RUN_ID = "functional-correctness-gpu0-r1"
+CORRECTNESS_RUN_ID = "functional-correctness-gpu0-r2"
 LATENCY_RUN_IDS = {
-    1: "functional-latency-gpu0-r1a",
-    2: "functional-latency-gpu0-r1b",
-    3: "functional-latency-gpu0-r1c",
+    1: "functional-latency-gpu0-r2a",
+    2: "functional-latency-gpu0-r2b",
+    3: "functional-latency-gpu0-r2c",
 }
-AGGREGATE_RUN_ID = "aggregate-r1"
+AGGREGATE_RUN_ID = "aggregate-r2"
 
 STREAMING_ARTIFACT_ROOT = Path(
     "/home/sl/research/icra27-artifacts/g1-arena-codec-streaming-backbone-r1"
@@ -72,6 +72,23 @@ FROZEN_PRIOR_EVIDENCE = {
         "path": str(PARITY_RESULT_PATH),
         "bytes": 682_693,
         "sha256": "8e4cd391ce6f606a767b2a0f40f09ae00ce3007d13a88d9d4c2089e72392cb4f",
+    },
+}
+FROZEN_ENGINEERING_HISTORY = {
+    "plan_r1": {
+        "path": str(ARTIFACT_ROOT / "plan-r1/PLAN.json"),
+        "bytes": 5_702,
+        "sha256": "3417d9b5c8e27ea85146153038311d723022eaa56c1b77f8890d3865b88f2af2",
+    },
+    "correctness_r1": {
+        "path": str(ARTIFACT_ROOT / "functional-correctness-gpu0-r1/RESULT.json"),
+        "bytes": 1_329_025,
+        "sha256": "0d36f9d8ed5c7c910459c47ddbb93a3bda5b6104ab3f5ec551e4659c4eef81d9",
+    },
+    "latency_r1a_failure": {
+        "path": str(ARTIFACT_ROOT / "functional-latency-gpu0-r1a/RESULT.json"),
+        "bytes": 421,
+        "sha256": "319a147b0b880ebbd024ae6348e4afff4db183486f98b66962fb9b404077d895",
     },
 }
 
@@ -220,6 +237,7 @@ FROZEN_PROTOCOL = {
         "warmup_frames": LATENCY_WARMUP_FRAMES,
         "measured_frames": LATENCY_MEASURED_FRAMES,
         "boundary": "resident_input_encode_frame_plus_two_functional_layers_plus_new_state",
+        "kernel_count_scope": "one_post_warmup_full_step_in_separate_profiler_context",
     },
     "optimizer_steps": 0,
     "vla_model_instantiated": False,
@@ -312,6 +330,7 @@ def resolved_plan(source_commit: str) -> dict[str, Any]:
             "base_commit": BASE_SOURCE_COMMIT,
         },
         "prior_evidence": copy.deepcopy(FROZEN_PRIOR_EVIDENCE),
+        "engineering_history": copy.deepcopy(FROZEN_ENGINEERING_HISTORY),
         "input": {
             "path": str(INPUT_PATH),
             "bytes": INPUT_BYTES,
@@ -337,7 +356,7 @@ def resolved_plan(source_commit: str) -> dict[str, Any]:
 
 
 def prepare_plan(path: Path) -> dict[str, Any]:
-    expected = ARTIFACT_ROOT / "plan-r1/PLAN.json"
+    expected = ARTIFACT_ROOT / "plan-r2/PLAN.json"
     if path.resolve() != expected.resolve():
         raise ValueError(f"resolved plan path must be {expected}")
     commit = subprocess.check_output(
@@ -552,6 +571,32 @@ def verify_prior_evidence() -> dict[str, Any]:
         raise ValueError("parity diagnosis r3 result contract changed")
     return {
         name: {**FROZEN_PRIOR_EVIDENCE[name], "verified": True} for name in FROZEN_PRIOR_EVIDENCE
+    }
+
+
+def verify_engineering_history() -> dict[str, Any]:
+    paths = {
+        name: _verify_material_spec(spec, expected_path=Path(spec["path"]), label=name)
+        for name, spec in FROZEN_ENGINEERING_HISTORY.items()
+    }
+    plan = read_json(paths["plan_r1"])
+    correctness = read_json(paths["correctness_r1"])
+    latency_failure = read_json(paths["latency_r1a_failure"])
+    if (
+        plan.get("experiment_id") != EXPERIMENT
+        or correctness.get("status") != "passed"
+        or not correctness.get("latency_allowed")
+        or latency_failure.get("status") != "failed"
+        or latency_failure.get("error")
+        != "RuntimeError: CUDA profiler could not attribute every functional latency sample "
+        "(unattributed=61540)"
+        or latency_failure.get("training_allowed") is not False
+    ):
+        raise ValueError("functional latency engineering history changed")
+    return {
+        "materials": copy.deepcopy(FROZEN_ENGINEERING_HISTORY),
+        "correctness_r1_passed": True,
+        "latency_r1a_failed_only_in_profiler_attribution": True,
     }
 
 
@@ -1607,6 +1652,7 @@ def run_correctness(
     native_before = native_vla_modules_loaded()
     source = verify_source(plan["source"]["commit"])
     prior_evidence = verify_prior_evidence()
+    engineering_history = verify_engineering_history()
     dependencies = verify_dependencies()
     codec, input_evidence = load_codec_input()
     environment = verify_environment()
@@ -1632,6 +1678,7 @@ def run_correctness(
         "source": source,
         "plan": plan_identity,
         "prior_evidence": prior_evidence,
+        "engineering_history": engineering_history,
         "input": input_evidence,
         "dependencies": dependencies,
         "environment": environment,
@@ -1773,62 +1820,43 @@ def _is_cuda_kernel_event(event: Any) -> bool:
     return "memcpy" not in name and "memset" not in name
 
 
-def _event_latency_label(event: Any, labels: set[str]) -> str | None:
-    parent = getattr(event, "cpu_parent", None)
-    while parent is not None:
-        if getattr(parent, "name", None) in labels:
-            return str(parent.name)
-        parent = getattr(parent, "cpu_parent", None)
-    return None
-
-
 @torch.inference_mode()
-def profile_kernel_counts(
+def profile_single_step_kernel_count(
     tokenizer: ArenaCodecSpatialTokenizer,
     temporal: FunctionalMamba2Backbone,
     frames: tuple[torch.Tensor, ...],
-) -> list[int]:
+) -> dict[str, Any]:
     state = temporal.new_functional_state(1)
     for frame in frames[:LATENCY_WARMUP_FRAMES]:
         descriptor = tokenizer.encode_frame(frame)
         _, state = temporal.functional_step(descriptor, state)
     torch.cuda.synchronize(torch.device("cuda", 0))
-    labels = [f"functional_latency_frame_{index + 1}" for index in range(LATENCY_MEASURED_FRAMES)]
-    label_set = set(labels)
     with torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.CUDA,
         ]
     ) as profile:
-        for label, frame in zip(
-            labels,
-            frames[LATENCY_WARMUP_FRAMES:],
-            strict=True,
-        ):
+        with torch.profiler.record_function("functional_latency_single_step"):
+            descriptor = tokenizer.encode_frame(frames[LATENCY_WARMUP_FRAMES])
+            _, state = temporal.functional_step(descriptor, state)
             torch.cuda.synchronize(torch.device("cuda", 0))
-            with torch.profiler.record_function(label):
-                descriptor = tokenizer.encode_frame(frame)
-                _, state = temporal.functional_step(descriptor, state)
-            torch.cuda.synchronize(torch.device("cuda", 0))
-    counts = {label: 0 for label in labels}
-    unattributed_kernels = 0
-    for event in profile.events():
-        if not _is_cuda_kernel_event(event):
-            continue
-        label = _event_latency_label(event, label_set)
-        if label is None:
-            unattributed_kernels += 1
-        else:
-            counts[label] += 1
-    if unattributed_kernels or any(counts[label] < 1 for label in labels):
-        raise RuntimeError(
-            "CUDA profiler could not attribute every functional latency sample "
-            f"(unattributed={unattributed_kernels})"
-        )
-    if state.observations != INPUT_SHAPE[0]:
-        raise RuntimeError("kernel-count replay did not cover the full trajectory")
-    return [counts[label] for label in labels]
+    device_events = [
+        event
+        for event in profile.events()
+        if str(getattr(event, "device_type", "")).lower().endswith("cuda")
+    ]
+    kernel_events = [event for event in device_events if _is_cuda_kernel_event(event)]
+    if not kernel_events or state.observations != LATENCY_WARMUP_FRAMES + 1:
+        raise RuntimeError("single-step CUDA profiler did not capture the frozen transition")
+    return {
+        "scope": "one_post_warmup_encode_frame_plus_two_functional_layers_plus_new_state",
+        "profiled_frame": LATENCY_WARMUP_FRAMES + 1,
+        "kernel_count": len(kernel_events),
+        "cuda_device_event_count": len(device_events),
+        "excluded_memcpy_memset_events": len(device_events) - len(kernel_events),
+        "state_observations_after_profile": state.observations,
+    }
 
 
 @torch.inference_mode()
@@ -1887,7 +1915,7 @@ def benchmark_latency(
             state_bytes.append(state.tensor_nbytes())
     if len(host_samples) != LATENCY_MEASURED_FRAMES or state.observations != INPUT_SHAPE[0]:
         raise RuntimeError("latency trajectory warm-up or measured frame count changed")
-    kernel_counts = profile_kernel_counts(tokenizer, temporal, frames)
+    kernel_profile = profile_single_step_kernel_count(tokenizer, temporal, frames)
     return {
         "boundary": FROZEN_PROTOCOL["latency"]["boundary"],
         "input_resident_on_gpu": raw.device == device,
@@ -1903,8 +1931,8 @@ def benchmark_latency(
         "cuda_event_samples_ms": cuda_samples,
         "cuda_event_p50_ms": statistics.median(cuda_samples),
         "cuda_event_p95_ms": percentile(cuda_samples, 95),
-        "kernel_count_samples": kernel_counts,
-        "kernel_count_profiled_on_separate_same_trajectory_replay": True,
+        "kernel_profile": kernel_profile,
+        "kernel_count_profiled_on_separate_single_step_replay": True,
         "state_logical_bytes_samples": state_bytes,
         "state_logical_bytes_constant": len(set(state_bytes)) == 1,
         "output_finite": all_outputs_finite,
@@ -1932,13 +1960,15 @@ def evaluate_latency_gates(
             and latency["measured_frame_indices"]
             == list(range(LATENCY_WARMUP_FRAMES + 1, INPUT_SHAPE[0] + 1))
         ),
-        "every_sample_synchronized_and_has_host_cuda_kernel_state_metrics": (
+        "every_sample_synchronized_and_has_host_cuda_state_plus_single_step_kernel_profile": (
             latency["pre_and_post_sample_cuda_synchronize"]
             and len(latency["host_wall_samples_ms"]) == LATENCY_MEASURED_FRAMES
             and len(latency["cuda_event_samples_ms"]) == LATENCY_MEASURED_FRAMES
-            and len(latency["kernel_count_samples"]) == LATENCY_MEASURED_FRAMES
-            and all(count > 0 for count in latency["kernel_count_samples"])
             and len(latency["state_logical_bytes_samples"]) == LATENCY_MEASURED_FRAMES
+            and latency["kernel_profile"]["profiled_frame"] == LATENCY_WARMUP_FRAMES + 1
+            and latency["kernel_profile"]["kernel_count"] > 0
+            and latency["kernel_profile"]["state_observations_after_profile"]
+            == LATENCY_WARMUP_FRAMES + 1
         ),
         "host_wall_p95_strictly_below_5ms": latency["host_wall_p95_ms"] < MAX_HOST_P95_MS,
         "outputs_finite_and_state_bytes_constant": latency["output_finite"]
@@ -1992,6 +2022,7 @@ def run_latency(
             source_commit=source["commit"],
         )
     prior_evidence = verify_prior_evidence()
+    engineering_history = verify_engineering_history()
     dependencies = verify_dependencies()
     codec, input_evidence = load_codec_input()
     environment = verify_environment()
@@ -2039,6 +2070,7 @@ def run_latency(
         "correctness_predecessor": correctness_identity,
         "latency_predecessor": predecessor_identity,
         "prior_evidence": prior_evidence,
+        "engineering_history": engineering_history,
         "input": input_evidence,
         "dependencies": dependencies,
         "environment": environment,
@@ -2110,8 +2142,9 @@ def evaluate_aggregate_gates(
             and result["latency"]["measurements"] == LATENCY_MEASURED_FRAMES
             and len(result["latency"]["host_wall_samples_ms"]) == LATENCY_MEASURED_FRAMES
             and len(result["latency"]["cuda_event_samples_ms"]) == LATENCY_MEASURED_FRAMES
-            and len(result["latency"]["kernel_count_samples"]) == LATENCY_MEASURED_FRAMES
             and len(result["latency"]["state_logical_bytes_samples"]) == LATENCY_MEASURED_FRAMES
+            and result["latency"]["kernel_profile"]["profiled_frame"] == LATENCY_WARMUP_FRAMES + 1
+            and result["latency"]["kernel_profile"]["kernel_count"] > 0
             for result in latencies
         ),
         "all_three_weights_match": parameter_identities[1:] == parameter_identities[:-1],
@@ -2169,6 +2202,7 @@ def run_aggregate(
         latencies.append(result)
         latency_identities.append(identity)
     prior_evidence = verify_prior_evidence()
+    engineering_history = verify_engineering_history()
     dependencies = verify_dependencies()
     _, input_evidence = load_codec_input()
     gates = evaluate_aggregate_gates(correctness, latencies, latency_identities)
@@ -2186,6 +2220,7 @@ def run_aggregate(
         "source": source,
         "plan": plan_identity,
         "prior_evidence": prior_evidence,
+        "engineering_history": engineering_history,
         "dependencies": dependencies,
         "input": input_evidence,
         "component_results": {

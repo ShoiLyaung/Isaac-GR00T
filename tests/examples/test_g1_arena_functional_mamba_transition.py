@@ -105,7 +105,11 @@ def _passing_latency() -> tuple[
         ),
         "host_wall_samples_ms": [1.0] * runner.LATENCY_MEASURED_FRAMES,
         "cuda_event_samples_ms": [0.5] * runner.LATENCY_MEASURED_FRAMES,
-        "kernel_count_samples": [20] * runner.LATENCY_MEASURED_FRAMES,
+        "kernel_profile": {
+            "profiled_frame": runner.LATENCY_WARMUP_FRAMES + 1,
+            "kernel_count": 20,
+            "state_observations_after_profile": runner.LATENCY_WARMUP_FRAMES + 1,
+        },
         "state_logical_bytes_samples": [100] * runner.LATENCY_MEASURED_FRAMES,
         "host_wall_p95_ms": 4.9,
         "output_finite": True,
@@ -124,13 +128,13 @@ def _passing_latency() -> tuple[
 
 
 def test_frozen_run_ids_match_experiment_manifest() -> None:
-    assert runner.CORRECTNESS_RUN_ID == "functional-correctness-gpu0-r1"
+    assert runner.CORRECTNESS_RUN_ID == "functional-correctness-gpu0-r2"
     assert runner.LATENCY_RUN_IDS == {
-        1: "functional-latency-gpu0-r1a",
-        2: "functional-latency-gpu0-r1b",
-        3: "functional-latency-gpu0-r1c",
+        1: "functional-latency-gpu0-r2a",
+        2: "functional-latency-gpu0-r2b",
+        3: "functional-latency-gpu0-r2c",
     }
-    assert runner.AGGREGATE_RUN_ID == "aggregate-r1"
+    assert runner.AGGREGATE_RUN_ID == "aggregate-r2"
     plan = runner.resolved_plan("1" * 40)
     assert plan["protocol"]["correctness_chunks"] == list(runner.CORRECTNESS_CHUNKS)
     assert plan["protocol"]["gradient_chunks"] == list(runner.GRADIENT_CHUNKS)
@@ -247,7 +251,7 @@ def test_latency_gate_requires_strict_p95_and_all_per_sample_metrics() -> None:
     assert not gates["host_wall_p95_strictly_below_5ms"]
 
     changed = copy.deepcopy(latency)
-    changed["kernel_count_samples"] = changed["kernel_count_samples"][:-1]
+    changed["kernel_profile"]["kernel_count"] = 0
     gates = runner.evaluate_latency_gates(
         changed,
         identities,
@@ -256,7 +260,9 @@ def test_latency_gate_requires_strict_p95_and_all_per_sample_metrics() -> None:
         telemetry,
         execution,
     )
-    assert not gates["every_sample_synchronized_and_has_host_cuda_kernel_state_metrics"]
+    assert not gates[
+        "every_sample_synchronized_and_has_host_cuda_state_plus_single_step_kernel_profile"
+    ]
 
 
 def test_aggregate_requires_three_distinct_chained_latency_processes() -> None:
@@ -297,7 +303,10 @@ def test_aggregate_requires_three_distinct_chained_latency_processes() -> None:
                     "measurements": runner.LATENCY_MEASURED_FRAMES,
                     "host_wall_samples_ms": [1.0] * runner.LATENCY_MEASURED_FRAMES,
                     "cuda_event_samples_ms": [0.5] * runner.LATENCY_MEASURED_FRAMES,
-                    "kernel_count_samples": [20] * runner.LATENCY_MEASURED_FRAMES,
+                    "kernel_profile": {
+                        "profiled_frame": runner.LATENCY_WARMUP_FRAMES + 1,
+                        "kernel_count": 20,
+                    },
                     "state_logical_bytes_samples": [100] * runner.LATENCY_MEASURED_FRAMES,
                 },
                 "telemetry": {
