@@ -4,19 +4,25 @@
 from __future__ import annotations
 
 import argparse
+import base64
+from contextlib import contextmanager
+import csv
 import gc
 import hashlib
 import importlib.metadata
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import statistics
 import subprocess
 import sys
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
+import gr00t
+import gr00t.experimental
+import gr00t.experimental.arena_codec_streaming_backbone as arena_codec_module
 from gr00t.experimental.arena_codec_streaming_backbone import (
     CODEC_FIELDS,
     GRID_HEIGHT,
@@ -45,7 +51,14 @@ INPUT_PATH = Path(
     "episode45-native-first-r1/episode_000045.native_first_codec_ir_v1.npz"
 )
 DEPENDENCY_MANIFEST_PATH = ARTIFACT_ROOT / "dependencies/DEPENDENCY.json"
-MAMBA2_FILE_PATH = ARTIFACT_ROOT / "dependencies/python-overlay/mamba_ssm/modules/mamba2.py"
+OFFICIAL_WHEEL_PATH = (
+    ARTIFACT_ROOT
+    / "dependencies/mamba_ssm-2.3.2.post1+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+)
+OVERLAY_ROOT = ARTIFACT_ROOT / "dependencies/python-overlay"
+OVERLAY_RECORD_PATH = OVERLAY_ROOT / "mamba_ssm-2.3.2.post1.dist-info/RECORD"
+MAMBA2_FILE_PATH = OVERLAY_ROOT / "mamba_ssm/modules/mamba2.py"
+SELECTIVE_SCAN_EXTENSION_PATH = OVERLAY_ROOT / "selective_scan_cuda.cpython-312-x86_64-linux-gnu.so"
 INPUT_BYTES = 5_632_357
 INPUT_SHA256 = "c7b420aa2ee549b4163a3fc2a1f7335c601e2b769f6eaa16d0ff629d130b6797"
 INPUT_FIELD = "codec_v1"
@@ -69,10 +82,12 @@ MAX_ALLOCATED_GROWTH_BYTES = 1 << 20
 MAX_MAMBA_TRANSFORMER_PEAK_RATIO = 0.60
 MAX_STREAM_STEP_P95_MS = 5.0
 SOURCE_IDENTITY_PATHS = (
+    "gr00t/__init__.py",
     "gr00t/experimental/__init__.py",
     "gr00t/experimental/arena_codec_streaming_backbone.py",
     "examples/G1_ARENA_N17/codec_streaming_backbone_probe.py",
     "tests/gr00t/experimental/test_arena_codec_streaming_backbone.py",
+    "tests/gr00t/experimental/test_arena_codec_streaming_mamba_target.py",
     "tests/examples/test_g1_arena_codec_streaming_backbone_probe.py",
 )
 NATIVE_VLA_MODULE_PREFIXES = (
@@ -82,10 +97,16 @@ NATIVE_VLA_MODULE_PREFIXES = (
     "gr00t.policy",
 )
 FROZEN_RUNTIME = {
-    "python": "3.12",
-    "torch": "2.9.0",
+    "python_executable": "/home/sl/research/icra27-worktrees/Isaac-GR00T/main/.venv/bin/python",
+    "python": "3.12.13",
+    "torch": "2.9.0+cu128",
+    "torch_cuda": "12.8",
+    "cxx11_abi": True,
     "mamba_ssm": "2.3.2.post1",
     "cuda_visible_devices": "1",
+    "pythonpath": f"{OVERLAY_ROOT}:{REPO}",
+    "python_dont_write_bytecode": True,
+    "gpu_name": "NVIDIA RTX 6000 Ada Generation",
     "cost_dtype": "bfloat16",
 }
 FROZEN_PROTOCOL = {
@@ -108,9 +129,9 @@ FROZEN_THRESHOLDS = {
     "mamba_state_serialized_growth_max_fraction": MAX_STATE_GROWTH,
     "mamba_allocated_second_half_growth_max_bytes": MAX_ALLOCATED_GROWTH_BYTES,
     "temporal_parameter_gap_max_fraction": MAX_PARAMETER_GAP,
-    "mamba_t925_peak_delta_max_transformer_fraction": MAX_MAMBA_TRANSFORMER_PEAK_RATIO,
+    "mamba_t925_peak_allocated_max_transformer_fraction": MAX_MAMBA_TRANSFORMER_PEAK_RATIO,
     "transformer_mamba_memory_ratio_nondecreasing": True,
-    "mamba_stream_step_p95_max_ms": MAX_STREAM_STEP_P95_MS,
+    "mamba_stream_step_host_p95_max_ms": MAX_STREAM_STEP_P95_MS,
 }
 FROZEN_RESOURCES = {
     "gpu_physical_id": 1,
@@ -141,6 +162,29 @@ def native_vla_modules_loaded() -> list[str]:
     )
 
 
+@contextmanager
+def optimizer_construction_guard() -> Iterator[dict[str, Any]]:
+    optimizer = torch.optim.Optimizer
+    original_init = optimizer.__init__
+    evidence: dict[str, Any] = {
+        "constructor_calls": [],
+        "steps_observed": None,
+        "guard": "torch.optim.Optimizer.__init__ blocked for the measured probe",
+    }
+
+    def blocked_init(instance, *args, **kwargs):
+        del args, kwargs
+        evidence["constructor_calls"].append(type(instance).__qualname__)
+        raise RuntimeError("optimizer construction is forbidden in this untrained probe")
+
+    optimizer.__init__ = blocked_init
+    try:
+        yield evidence
+    finally:
+        optimizer.__init__ = original_init
+        evidence["steps_observed"] = 0 if not evidence["constructor_calls"] else None
+
+
 def read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -164,6 +208,60 @@ def _verify_material_spec(
     if path.stat().st_size != int(spec["bytes"]) or sha256(path) != spec["sha256"]:
         raise ValueError(f"{label} identity changed")
     return path
+
+
+def _record_sha256(path: Path) -> str:
+    digest = bytes.fromhex(sha256(path))
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def verify_overlay_record(record_path: Path, overlay_root: Path) -> dict[str, Any]:
+    root = overlay_root.resolve()
+    record = record_path.resolve()
+    if not record.is_file() or not record.is_relative_to(root):
+        raise ValueError("overlay RECORD is missing or outside the overlay")
+    recorded: set[str] = set()
+    verified_bytes = 0
+    with record.open("r", encoding="utf-8", newline="") as stream:
+        for row in csv.reader(stream):
+            if len(row) != 3:
+                raise ValueError("overlay RECORD row schema changed")
+            relative_text, expected_hash, expected_size = row
+            relative = PurePosixPath(relative_text)
+            if relative.is_absolute() or ".." in relative.parts or relative_text in recorded:
+                raise ValueError("overlay RECORD contains an unsafe or duplicate path")
+            material = root.joinpath(*relative.parts).resolve()
+            if not material.is_relative_to(root) or not material.is_file():
+                raise ValueError(f"overlay RECORD material is missing: {relative_text}")
+            recorded.add(relative_text)
+            if not expected_hash and not expected_size:
+                if material != record:
+                    raise ValueError("only overlay RECORD may omit its own hash and size")
+                continue
+            if not expected_hash.startswith("sha256=") or not expected_size:
+                raise ValueError("overlay RECORD hash or size contract changed")
+            size = int(expected_size)
+            if material.stat().st_size != size:
+                raise ValueError(f"overlay RECORD size mismatch: {relative_text}")
+            if _record_sha256(material) != expected_hash.removeprefix("sha256="):
+                raise ValueError(f"overlay RECORD hash mismatch: {relative_text}")
+            verified_bytes += size
+
+    actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+    extras = actual - recorded
+    allowed_extras = {relative for relative in extras if relative == ".lock"}
+    unexpected = extras - allowed_extras
+    if unexpected:
+        raise ValueError(f"overlay contains files outside RECORD: {sorted(unexpected)}")
+    return {
+        "root": str(root),
+        "record": str(record),
+        "record_entries": len(recorded),
+        "verified_hashed_files": len(recorded) - 1,
+        "verified_hashed_bytes": verified_bytes,
+        "allowed_unrecorded_files": sorted(allowed_extras),
+        "unexpected_unrecorded_files": [],
+    }
 
 
 def verify_plan(path: Path, expected_sha256: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -217,7 +315,13 @@ def verify_plan(path: Path, expected_sha256: str) -> tuple[dict[str, Any], dict[
         raise ValueError("resolved input contract changed")
 
     dependency = plan["dependency"]
-    if set(dependency) != {"manifest", "mamba_file"}:
+    if set(dependency) != {
+        "manifest",
+        "official_wheel",
+        "overlay_record",
+        "mamba_file",
+        "selective_scan_extension",
+    }:
         raise ValueError("resolved dependency schema changed")
     manifest_path = _verify_material_spec(
         dependency["manifest"],
@@ -229,6 +333,22 @@ def verify_plan(path: Path, expected_sha256: str) -> tuple[dict[str, Any], dict[
         expected_path=MAMBA2_FILE_PATH,
         label="Mamba2 source",
     )
+    wheel_path = _verify_material_spec(
+        dependency["official_wheel"],
+        expected_path=OFFICIAL_WHEEL_PATH,
+        label="official Mamba wheel",
+    )
+    record_path = _verify_material_spec(
+        dependency["overlay_record"],
+        expected_path=OVERLAY_RECORD_PATH,
+        label="overlay RECORD",
+    )
+    extension_path = _verify_material_spec(
+        dependency["selective_scan_extension"],
+        expected_path=SELECTIVE_SCAN_EXTENSION_PATH,
+        label="selective_scan CUDA extension",
+    )
+    closure = verify_overlay_record(record_path, OVERLAY_ROOT)
     manifest = read_json(manifest_path)
     if (
         manifest.get("schema_version") != 1
@@ -237,8 +357,18 @@ def verify_plan(path: Path, expected_sha256: str) -> tuple[dict[str, Any], dict[
         or manifest.get("overlay", {}).get("causal_conv1d_present") is not False
         or Path(manifest.get("overlay", {}).get("mamba2_file", "")).resolve() != mamba_file
         or manifest.get("overlay", {}).get("mamba2_sha256") != dependency["mamba_file"]["sha256"]
-        or not str(manifest.get("runtime", {}).get("python_version", "")).startswith("3.12.")
-        or not str(manifest.get("runtime", {}).get("torch", "")).startswith("2.9.0+")
+        or Path(manifest.get("overlay", {}).get("path", "")).resolve() != OVERLAY_ROOT.resolve()
+        or Path(manifest.get("wheel", {}).get("path", "")).resolve() != wheel_path
+        or manifest.get("wheel", {}).get("bytes") != dependency["official_wheel"]["bytes"]
+        or manifest.get("wheel", {}).get("sha256") != dependency["official_wheel"]["sha256"]
+        or manifest.get("runtime", {}).get("python_version") != FROZEN_RUNTIME["python"]
+        or manifest.get("runtime", {}).get("torch") != FROZEN_RUNTIME["torch"]
+        or manifest.get("runtime", {}).get("torch_cuda") != FROZEN_RUNTIME["torch_cuda"]
+        or manifest.get("runtime", {}).get("cxx11_abi") is not FROZEN_RUNTIME["cxx11_abi"]
+        or extension_path.relative_to(OVERLAY_ROOT).as_posix()
+        not in {
+            row.split(",", 1)[0] for row in record_path.read_text(encoding="utf-8").splitlines()
+        }
     ):
         raise ValueError("dependency manifest runtime or overlay contract changed")
 
@@ -261,11 +391,55 @@ def verify_plan(path: Path, expected_sha256: str) -> tuple[dict[str, Any], dict[
         "bytes": resolved.stat().st_size,
         "sha256": actual_sha256,
         "dependency_manifest_sha256": dependency["manifest"]["sha256"],
+        "official_wheel_sha256": dependency["official_wheel"]["sha256"],
+        "overlay_record_sha256": dependency["overlay_record"]["sha256"],
         "mamba_file_sha256": dependency["mamba_file"]["sha256"],
+        "selective_scan_extension_sha256": dependency["selective_scan_extension"]["sha256"],
+        "overlay_closure": closure,
     }
 
 
-def verify_source(expected_commit: str) -> str:
+def _source_file_identity(path: Path, commit: str) -> dict[str, Any]:
+    resolved = path.resolve()
+    if not resolved.is_file() or not resolved.is_relative_to(REPO.resolve()):
+        raise ValueError(f"imported source escaped repository: {resolved}")
+    relative = resolved.relative_to(REPO.resolve()).as_posix()
+    committed_blob = subprocess.check_output(
+        ["git", "-C", str(REPO), "rev-parse", f"{commit}:{relative}"],
+        text=True,
+    ).strip()
+    working_blob = subprocess.check_output(
+        ["git", "-C", str(REPO), "hash-object", str(resolved)],
+        text=True,
+    ).strip()
+    if working_blob != committed_blob:
+        raise ValueError(f"imported source differs from committed blob: {relative}")
+    return {
+        "path": str(resolved),
+        "relative_path": relative,
+        "bytes": resolved.stat().st_size,
+        "sha256": sha256(resolved),
+        "git_blob": working_blob,
+    }
+
+
+def verify_imported_source_identity(commit: str) -> dict[str, Any]:
+    expected_arena_module = (
+        REPO / "gr00t/experimental/arena_codec_streaming_backbone.py"
+    ).resolve()
+    actual_arena_module = Path(arena_codec_module.__file__).resolve()
+    if actual_arena_module != expected_arena_module:
+        raise ValueError("imported Arena codec module escaped the current source root")
+    entries = {
+        "arena_codec_module": _source_file_identity(actual_arena_module, commit),
+        "gr00t_package": _source_file_identity(Path(gr00t.__file__), commit),
+        "experimental_package": _source_file_identity(Path(gr00t.experimental.__file__), commit),
+        "runner": _source_file_identity(Path(__file__), commit),
+    }
+    return {"root": str(REPO.resolve()), "commit": commit, "entries": entries}
+
+
+def verify_source(expected_commit: str) -> dict[str, Any]:
     commit = subprocess.check_output(
         ["git", "-C", str(REPO), "rev-parse", "HEAD"],
         text=True,
@@ -318,7 +492,7 @@ def verify_source(expected_commit: str) -> str:
     dirty.update(untracked.splitlines())
     if dirty:
         raise ValueError(f"Arena codec backbone source is dirty: {sorted(dirty)}")
-    return commit
+    return verify_imported_source_identity(commit)
 
 
 def load_codec_input(
@@ -360,36 +534,80 @@ def load_codec_input(
     return codec, metadata
 
 
-def verify_environment(expected_mamba_file: Path) -> dict[str, Any]:
+def verify_environment(
+    expected_mamba_file: Path,
+    expected_extension_file: Path,
+) -> dict[str, Any]:
+    import mamba_ssm
     import mamba_ssm.modules.mamba2 as official
+    import mamba_ssm.ops.triton.ssd_combined as ssd_combined
+    import selective_scan_cuda
 
-    torch_version = torch.__version__.split("+")[0]
     mamba_version = importlib.metadata.version("mamba-ssm")
     actual_mamba_file = Path(official.__file__).resolve()
-    if sys.version_info[:2] != (3, 12):
-        raise ValueError("expected frozen Python 3.12 target runtime")
-    if torch_version != "2.9.0":
-        raise ValueError("expected frozen Torch 2.9.0 target runtime")
+    actual_extension_file = Path(selective_scan_cuda.__file__).resolve()
+    actual_ssd_file = Path(ssd_combined.__file__).resolve()
+    actual_package_file = Path(mamba_ssm.__file__).resolve()
+    if official.selective_state_update is None:
+        raise ValueError("Mamba2 persistent step op is unavailable")
+    state_update_module = sys.modules[official.selective_state_update.__module__]
+    actual_state_update_file = Path(state_update_module.__file__).resolve()
+    if Path(sys.executable).resolve() != Path(FROZEN_RUNTIME["python_executable"]).resolve():
+        raise ValueError("formal Python executable changed")
+    if platform.python_version() != FROZEN_RUNTIME["python"]:
+        raise ValueError("expected frozen Python 3.12.13 target runtime")
+    if torch.__version__ != FROZEN_RUNTIME["torch"]:
+        raise ValueError("expected frozen Torch 2.9.0+cu128 target runtime")
+    if torch.version.cuda != FROZEN_RUNTIME["torch_cuda"]:
+        raise ValueError("expected frozen CUDA 12.8 runtime")
+    if torch.compiled_with_cxx11_abi() is not FROZEN_RUNTIME["cxx11_abi"]:
+        raise ValueError("Torch CXX11 ABI contract changed")
     if mamba_version != "2.3.2.post1":
         raise ValueError("expected official mamba-ssm 2.3.2.post1")
     if MAMBA2_CONFIG["use_mem_eff_path"] is not False:
         raise ValueError("frozen Mamba2 requires the non-fused explicit path")
     if actual_mamba_file != expected_mamba_file.resolve():
         raise ValueError("Mamba2 import escaped the resolved official runtime overlay")
+    if actual_extension_file != expected_extension_file.resolve():
+        raise ValueError("selective_scan extension escaped the resolved official runtime overlay")
+    for path in (actual_package_file, actual_ssd_file, actual_state_update_file):
+        if not path.is_relative_to(OVERLAY_ROOT.resolve()):
+            raise ValueError(f"critical Mamba import escaped the overlay: {path}")
+    if official.causal_conv1d_fn is not None or official.causal_conv1d_update is not None:
+        raise ValueError("frozen explicit Mamba path requires causal-conv1d to be absent")
+    if official.mamba_chunk_scan_combined.__module__ != ssd_combined.__name__:
+        raise ValueError("Mamba2 full scan op escaped the verified SSD implementation")
+    if os.environ.get("PYTHONPATH") != FROZEN_RUNTIME["pythonpath"]:
+        raise ValueError("formal PYTHONPATH contract changed")
+    if os.environ.get("PYTHONDONTWRITEBYTECODE") != "1" or not sys.dont_write_bytecode:
+        raise ValueError("formal probe must disable unrecorded Python bytecode writes")
     if os.environ.get("CUDA_VISIBLE_DEVICES") != "1":
         raise ValueError("formal probe must expose only physical GPU1")
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise ValueError("formal probe requires exactly one visible CUDA device")
     if not torch.cuda.is_bf16_supported():
         raise ValueError("formal GPU does not support BF16")
+    if torch.cuda.get_device_name(0) != FROZEN_RUNTIME["gpu_name"]:
+        raise ValueError("formal GPU identity changed")
     return {
         "python": platform.python_version(),
+        "python_executable": str(Path(sys.executable).resolve()),
+        "pythonpath": os.environ.get("PYTHONPATH"),
+        "python_dont_write_bytecode": sys.dont_write_bytecode,
         "torch": torch.__version__,
         "cuda_runtime": torch.version.cuda,
         "gpu": torch.cuda.get_device_name(0),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "mamba_ssm": mamba_version,
         "mamba_file": str(actual_mamba_file),
+        "mamba_package_file": str(actual_package_file),
+        "ssd_combined_file": str(actual_ssd_file),
+        "selective_state_update_file": str(actual_state_update_file),
+        "selective_scan_extension_file": str(actual_extension_file),
+        "causal_conv1d_fn": None,
+        "causal_conv1d_update": None,
+        "use_mem_eff_path": MAMBA2_CONFIG["use_mem_eff_path"],
+        "cxx11_abi": torch.compiled_with_cxx11_abi(),
     }
 
 
@@ -614,8 +832,10 @@ def benchmark_full(
     return {
         "p50_ms": statistics.median(samples),
         "p95_ms": percentile(samples, 95),
+        "cuda_event_samples_ms": samples,
         "host_p50_ms": statistics.median(host_samples),
         "host_p95_ms": percentile(host_samples, 95),
+        "host_samples_ms": host_samples,
         "output_dtype": output_dtype,
         "output_finite": True,
         "measurements": measurements,
@@ -671,8 +891,10 @@ def benchmark_streaming_step(
     return {
         "p50_ms": statistics.median(samples),
         "p95_ms": percentile(samples, 95),
+        "cuda_event_samples_ms": samples,
         "host_p50_ms": statistics.median(host_samples),
         "host_p95_ms": percentile(host_samples, 95),
+        "host_samples_ms": host_samples,
         "measurements": len(samples),
         "warmup_frames": warmup_frames,
         "observations": state.observations,
@@ -746,6 +968,7 @@ def evaluate_gates(
     numerical: dict[str, Any],
     parameters: dict[str, int],
     cost: dict[str, Any],
+    execution_evidence: dict[str, Any],
 ) -> tuple[dict[str, bool], dict[str, Any]]:
     parity_values = [
         numerical["parity"][name][metric]
@@ -753,6 +976,11 @@ def evaluate_gates(
         for metric in ("full_vs_step_max_abs", "full_vs_chunked_max_abs")
     ]
     memory_ratios = {
+        str(length): cost["transformer"][str(length)]["peak_allocated_bytes"]
+        / cost["mamba2"][str(length)]["peak_allocated_bytes"]
+        for length in LENGTHS
+    }
+    delta_ratios = {
         str(length): cost["transformer"][str(length)]["peak_delta_bytes"]
         / cost["mamba2"][str(length)]["peak_delta_bytes"]
         for length in LENGTHS
@@ -780,17 +1008,22 @@ def evaluate_gates(
         ]
         <= MAX_ALLOCATED_GROWTH_BYTES,
         "temporal_parameter_match": max(parameter_gaps) <= MAX_PARAMETER_GAP,
-        "mamba_t925_peak_at_most_60pct_transformer": cost["mamba2"]["925"]["peak_delta_bytes"]
-        <= MAX_MAMBA_TRANSFORMER_PEAK_RATIO * cost["transformer"]["925"]["peak_delta_bytes"],
+        "mamba_t925_peak_at_most_60pct_transformer": cost["mamba2"]["925"]["peak_allocated_bytes"]
+        <= MAX_MAMBA_TRANSFORMER_PEAK_RATIO * cost["transformer"]["925"]["peak_allocated_bytes"],
         "transformer_mamba_memory_ratio_nondecreasing": all(
             later >= earlier for earlier, later in zip(ordered_ratios, ordered_ratios[1:])
         ),
-        "mamba_stream_step_p95_below_5ms": cost["mamba2_streaming_step"]["p95_ms"]
+        "mamba_stream_step_host_p95_below_5ms": cost["mamba2_streaming_step"]["host_p95_ms"]
         < MAX_STREAM_STEP_P95_MS,
+        "native_vla_modules_absent": not execution_evidence["native_vla_modules"]["before"]
+        and not execution_evidence["native_vla_modules"]["after"],
+        "optimizer_steps_zero": not execution_evidence["optimizer"]["constructor_calls"]
+        and execution_evidence["optimizer"]["steps_observed"] == 0,
     }
     derived = {
-        "memory_gate_metric": "peak_delta_bytes_above_warmed_baseline",
-        "transformer_over_mamba_peak_delta_ratio": memory_ratios,
+        "memory_gate_metric": "absolute_peak_allocated_bytes",
+        "transformer_over_mamba_peak_allocated_ratio": memory_ratios,
+        "supplemental_transformer_over_mamba_peak_delta_ratio": delta_ratios,
         "parameter_gap_from_mamba": {
             name: abs(parameters[name] - parameters["mamba2"]) / parameters["mamba2"]
             for name in ("gru", "transformer")
@@ -816,23 +1049,35 @@ def run(plan: dict[str, Any], plan_identity: dict[str, Any]) -> dict[str, Any]:
     artifact_root = ARTIFACT_ROOT.resolve()
     artifact_bytes_before_result = directory_bytes(artifact_root)
     native_modules_before = native_vla_modules_loaded()
-    source_commit = verify_source(plan["source"]["commit"])
+    source_evidence = verify_source(plan["source"]["commit"])
     codec, input_metadata = load_codec_input(Path(plan["input"]["path"]))
-    environment = verify_environment(Path(plan["dependency"]["mamba_file"]["path"]))
-    numerical, parameters = numerical_probe(codec)
-    cost = cost_probe(
-        codec,
-        warmup=plan["protocol"]["warmup"],
-        measurements=plan["protocol"]["measurements"],
+    environment = verify_environment(
+        Path(plan["dependency"]["mamba_file"]["path"]),
+        Path(plan["dependency"]["selective_scan_extension"]["path"]),
     )
-    gates, derived = evaluate_gates(numerical, parameters, cost)
+    with optimizer_construction_guard() as optimizer_evidence:
+        numerical, parameters = numerical_probe(codec)
+        cost = cost_probe(
+            codec,
+            warmup=plan["protocol"]["warmup"],
+            measurements=plan["protocol"]["measurements"],
+        )
+    execution_evidence = {
+        "native_vla_modules": {
+            "before": native_modules_before,
+            "after": native_vla_modules_loaded(),
+        },
+        "optimizer": optimizer_evidence,
+    }
+    gates, derived = evaluate_gates(numerical, parameters, cost, execution_evidence)
     wall_seconds = time.monotonic() - started
     gates["wall_time_at_most_30min"] = wall_seconds <= MAX_WALL_SECONDS
     gates["artifact_total_at_most_1g"] = True
     result = {
         "status": "passed" if all(gates.values()) else "gate_failed",
         "experiment_id": EXPERIMENT,
-        "source_commit": source_commit,
+        "source_commit": source_evidence["commit"],
+        "source": source_evidence,
         "base_source_commit": BASE_SOURCE_COMMIT,
         "plan": plan_identity,
         "seed": SEED,
@@ -856,18 +1101,21 @@ def run(plan: dict[str, Any], plan_identity: dict[str, Any]) -> dict[str, Any]:
                 "CausalTransformerBackbone",
                 "CurrentDescriptorBackbone",
             ],
-            "native_vla": [],
+            "native_vla": sorted(
+                set(execution_evidence["native_vla_modules"]["before"])
+                | set(execution_evidence["native_vla_modules"]["after"])
+            ),
         },
-        "native_vla_modules_loaded": {
-            "before_probe": native_modules_before,
-            "after_probe": native_vla_modules_loaded(),
-        },
+        "execution_evidence": execution_evidence,
         "numerical": numerical,
         "cost_bf16": cost,
         "derived": derived,
         "gates": gates,
-        "optimizer_steps": 0,
-        "vla_model_instantiated": False,
+        "optimizer_steps": optimizer_evidence["steps_observed"],
+        "vla_model_instantiated": bool(
+            execution_evidence["native_vla_modules"]["before"]
+            or execution_evidence["native_vla_modules"]["after"]
+        ),
         "training_allowed": all(gates.values()),
         "wall_seconds": wall_seconds,
         "claim_boundary": "untrained VLA-free codec tokenizer/backbone engineering and memory scaling only",
@@ -912,8 +1160,8 @@ def main() -> int:
                 "experiment_id": EXPERIMENT,
                 "plan": plan_identity,
                 "error": f"{type(error).__name__}: {error}",
-                "optimizer_steps": 0,
-                "vla_model_instantiated": False,
+                "optimizer_evidence": "unavailable because the probe raised before completion",
+                "native_vla_evidence": native_vla_modules_loaded(),
                 "wall_seconds": time.monotonic() - started,
             },
         )
