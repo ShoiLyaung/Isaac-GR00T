@@ -11,6 +11,7 @@ import csv
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import platform
@@ -1226,14 +1227,17 @@ def gradient_pass(
     return report, parameter_gradients, descriptor_gradient, float(loss.detach().item())
 
 
-def _tensor_error(first: torch.Tensor, second: torch.Tensor) -> dict[str, float]:
+def _tensor_error(first: torch.Tensor, second: torch.Tensor) -> dict[str, Any]:
+    finite = bool(torch.isfinite(first).all() and torch.isfinite(second).all())
+    if not finite:
+        return {"max_abs": float("inf"), "max_relative": float("inf"), "finite": False}
     absolute = max_abs(first, second)
     denominator = max(
         float(first.float().abs().max().item()),
         float(second.float().abs().max().item()),
         torch.finfo(torch.float32).tiny,
     )
-    return {"max_abs": absolute, "max_relative": absolute / denominator}
+    return {"max_abs": absolute, "max_relative": absolute / denominator, "finite": True}
 
 
 def gradient_chunk_comparison(
@@ -1259,14 +1263,21 @@ def gradient_chunk_comparison(
         torch.finfo(torch.float32).tiny,
     )
     descriptor_error = _tensor_error(continuous_descriptors, chunked_descriptors)
+    all_errors_finite = (
+        math.isfinite(loss_abs)
+        and descriptor_error["finite"]
+        and all(row["finite"] for row in parameter_errors.values())
+    )
     max_parameter_abs = max(row["max_abs"] for row in parameter_errors.values())
+    combined_max_abs = max(loss_abs, max_parameter_abs, descriptor_error["max_abs"])
     return {
         "continuous": continuous_report,
         "chunked": chunked_report,
         "loss": {"abs": loss_abs, "relative": loss_relative},
         "parameters": parameter_errors,
         "descriptor_gradient": descriptor_error,
-        "max_abs": max(loss_abs, max_parameter_abs, descriptor_error["max_abs"]),
+        "all_errors_finite": all_errors_finite,
+        "max_abs": combined_max_abs if all_errors_finite else float("inf"),
     }
 
 
@@ -1405,6 +1416,52 @@ def _parity_maxima(parity: dict[str, Any]) -> list[float]:
     ]
 
 
+def parity_cardinality_and_summary_report(parity: dict[str, Any]) -> dict[str, Any]:
+    metric_names = ("residual_output", "conv_state", "ssm_state")
+    rows = parity.get("per_frame")
+    if (
+        parity.get("frames") != INPUT_SHAPE[0]
+        or not isinstance(rows, list)
+        or len(rows) != INPUT_SHAPE[0]
+        or [row.get("frame") for row in rows] != list(range(1, INPUT_SHAPE[0] + 1))
+    ):
+        return {"passed": False, "recomputed_maxima": [float("inf")], "reason": "cardinality"}
+    recomputed: dict[str, Any] = {}
+    try:
+        for layer in range(LAYERS):
+            layer_key = f"layer_{layer}"
+            recomputed[layer_key] = {}
+            for name in metric_names:
+                values = []
+                for row in rows:
+                    layers = row["layers"]
+                    if len(layers) != LAYERS or set(layers[layer]) != set(metric_names):
+                        raise ValueError("per-frame parity layer schema changed")
+                    metric = layers[layer][name]
+                    value = float(metric["max_abs"])
+                    if metric.get("finite") is not True or not math.isfinite(value):
+                        raise ValueError("per-frame parity metric is nonfinite")
+                    values.append(value)
+                recomputed[layer_key][name] = {
+                    "max_abs": max(values),
+                    "first_frame_above_1e-4": _first_crossing(values, MAX_PARITY_ABS),
+                }
+    except (KeyError, TypeError, ValueError):
+        return {"passed": False, "recomputed_maxima": [float("inf")], "reason": "schema"}
+    summary_matches = parity.get("summary") == recomputed
+    maxima = [
+        recomputed[f"layer_{layer}"][name]["max_abs"]
+        for layer in range(LAYERS)
+        for name in metric_names
+    ]
+    return {
+        "passed": summary_matches,
+        "recomputed_summary": recomputed,
+        "recomputed_maxima": maxima,
+        "reason": None if summary_matches else "summary_mismatch",
+    }
+
+
 def evaluate_correctness_gates(
     numerical: dict[str, Any],
     execution: dict[str, Any],
@@ -1416,6 +1473,7 @@ def evaluate_correctness_gates(
     continuous = comparison["continuous"]
     chunked = comparison["chunked"]
     parameter_contract_report = numerical["parameter_contract"]
+    parity_integrity = parity_cardinality_and_summary_report(parity)
     return {
         "source_input_dependency_runtime_identity": True,
         "functional_ast_has_no_forbidden_graph_operations": numerical["functional_ast"]["passed"],
@@ -1424,8 +1482,12 @@ def evaluate_correctness_gates(
             and parameter_contract_report["temporal_exact"]
             and parameter_contract_report["temporal_parameter_objects_unique"]
         ),
+        "teacher_functional_parity_has_all_925_frames_and_recomputed_summary": parity_integrity[
+            "passed"
+        ],
         "teacher_functional_all_925_frames_two_layers_at_most_1e-4": (
-            max(_parity_maxima(parity)) <= MAX_PARITY_ABS
+            parity_integrity["passed"]
+            and max(parity_integrity["recomputed_maxima"]) <= MAX_PARITY_ABS
             and parity["all_outputs_and_states_finite"]
         ),
         "functional_input_state_unchanged_every_step": parity["all_input_states_unchanged"],
@@ -1449,6 +1511,7 @@ def evaluate_correctness_gates(
         "chunked_all_26_parameter_gradients_finite_nonzero": chunked["parameters"]["passed"],
         "frame1_descriptor_gradient_finite_and_at_least_1e-8": (
             continuous["descriptor_gradient"]["finite"]
+            and chunked["descriptor_gradient"]["finite"]
             and continuous["descriptor_gradient"]["frame1_l2_norm"] >= MIN_FRAME1_GRADIENT_NORM
         ),
         "finite_difference_same_sign_and_within_tolerance": gradients["finite_difference"][
@@ -1457,8 +1520,8 @@ def evaluate_correctness_gates(
         "detached_state_negative_control_frame1_gradient_zero": gradients[
             "detached_state_negative_control"
         ]["frame1_gradient_exact_zero"],
-        "continuous_chunked_loss_and_all_gradients_at_most_1e-5": comparison["max_abs"]
-        <= MAX_GRADIENT_ABS,
+        "continuous_chunked_loss_and_all_gradients_at_most_1e-5": comparison["all_errors_finite"]
+        and comparison["max_abs"] <= MAX_GRADIENT_ABS,
         "native_vla_modules_absent": not execution["native_vla_modules"]["before"]
         and not execution["native_vla_modules"]["after"],
         "optimizer_steps_zero": not execution["optimizer"]["constructor_calls"]
@@ -1623,6 +1686,15 @@ def verify_passed_result(
         or result.get("vla_model_instantiated") is not False
     ):
         raise ValueError("predecessor result did not pass its frozen contract")
+    if expected_run_id == CORRECTNESS_RUN_ID:
+        recomputed = evaluate_correctness_gates(
+            result["numerical"],
+            result["execution_evidence"],
+        )
+        if any(not value for value in recomputed.values()) or any(
+            result["gates"].get(name) != value for name, value in recomputed.items()
+        ):
+            raise ValueError("correctness predecessor gates do not recompute from raw evidence")
     return result, {
         "path": str(resolved),
         "bytes": resolved.stat().st_size,

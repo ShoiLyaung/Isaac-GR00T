@@ -30,6 +30,19 @@ def _passing_correctness() -> tuple[dict[str, object], dict[str, object]]:
         "parameters": {"passed": True},
         "descriptor_gradient": {"finite": True, "frame1_l2_norm": 1e-4},
     }
+    per_frame = [
+        {
+            "frame": frame,
+            "layers": [
+                {
+                    name: {"max_abs": 0.0, "finite": True}
+                    for name in ("residual_output", "conv_state", "ssm_state")
+                }
+                for _ in range(runner.LAYERS)
+            ],
+        }
+        for frame in range(1, runner.INPUT_SHAPE[0] + 1)
+    ]
     numerical = {
         "functional_ast": {"passed": True},
         "parameter_contract": {
@@ -38,6 +51,8 @@ def _passing_correctness() -> tuple[dict[str, object], dict[str, object]]:
             "temporal_parameter_objects_unique": True,
         },
         "teacher_functional_parity": {
+            "frames": runner.INPUT_SHAPE[0],
+            "per_frame": per_frame,
             "summary": summary,
             "all_outputs_and_states_finite": True,
             "all_input_states_unchanged": True,
@@ -59,6 +74,7 @@ def _passing_correctness() -> tuple[dict[str, object], dict[str, object]]:
             "continuous_vs_fixed_chunks": {
                 "continuous": copy.deepcopy(gradient_pass),
                 "chunked": copy.deepcopy(gradient_pass),
+                "all_errors_finite": True,
                 "max_abs": 0.0,
             },
             "finite_difference": {"passed": True},
@@ -177,6 +193,33 @@ def test_correctness_gate_evaluation_is_fail_closed() -> None:
     assert not runner.evaluate_correctness_gates(changed, execution)[
         "functional_input_state_unchanged_every_step"
     ]
+
+    changed = copy.deepcopy(numerical)
+    changed["teacher_functional_parity"]["per_frame"].pop()
+    assert not runner.evaluate_correctness_gates(changed, execution)[
+        "teacher_functional_parity_has_all_925_frames_and_recomputed_summary"
+    ]
+
+    changed = copy.deepcopy(numerical)
+    changed["teacher_functional_parity"]["frames"] = runner.INPUT_SHAPE[0] - 1
+    assert not runner.evaluate_correctness_gates(changed, execution)[
+        "teacher_functional_parity_has_all_925_frames_and_recomputed_summary"
+    ]
+
+    changed = copy.deepcopy(numerical)
+    comparison = changed["gradients"]["continuous_vs_fixed_chunks"]
+    comparison["chunked"]["descriptor_gradient"]["finite"] = False
+    comparison["all_errors_finite"] = False
+    comparison["max_abs"] = float("inf")
+    assert not runner.evaluate_correctness_gates(changed, execution)[
+        "continuous_chunked_loss_and_all_gradients_at_most_1e-5"
+    ]
+
+
+def test_tensor_error_rejects_nonfinite_gradient() -> None:
+    report = runner._tensor_error(torch.tensor([float("nan")]), torch.zeros(1))
+    assert not report["finite"]
+    assert report["max_abs"] == float("inf")
 
 
 def test_latency_gate_requires_strict_p95_and_all_per_sample_metrics() -> None:
@@ -355,3 +398,44 @@ def test_verify_plan_rejects_protocol_change(
     changed.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="contract changed"):
         runner.verify_plan(changed, runner.sha256(changed))
+
+
+def test_correctness_predecessor_recomputes_full_parity_cardinality(tmp_path: Path) -> None:
+    numerical, execution = _passing_correctness()
+    gates = runner.evaluate_correctness_gates(numerical, execution)
+    gates.update({"wall_time_at_most_10min": True, "artifact_total_at_most_256mib": True})
+    result = {
+        "experiment_id": runner.EXPERIMENT,
+        "run_id": runner.CORRECTNESS_RUN_ID,
+        "source_commit": "1" * 40,
+        "plan": {"sha256": "2" * 64},
+        "status": "passed",
+        "gates": gates,
+        "optimizer_steps": 0,
+        "vla_model_instantiated": False,
+        "numerical": numerical,
+        "execution_evidence": execution,
+    }
+    valid = tmp_path / "valid.json"
+    valid.write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
+    runner.verify_passed_result(
+        valid,
+        runner.sha256(valid),
+        expected_path=valid,
+        expected_run_id=runner.CORRECTNESS_RUN_ID,
+        plan_identity={"sha256": "2" * 64},
+        source_commit="1" * 40,
+    )
+
+    result["numerical"]["teacher_functional_parity"]["per_frame"].pop()
+    truncated = tmp_path / "truncated.json"
+    truncated.write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
+    with pytest.raises(ValueError, match="do not recompute"):
+        runner.verify_passed_result(
+            truncated,
+            runner.sha256(truncated),
+            expected_path=truncated,
+            expected_run_id=runner.CORRECTNESS_RUN_ID,
+            plan_identity={"sha256": "2" * 64},
+            source_commit="1" * 40,
+        )
