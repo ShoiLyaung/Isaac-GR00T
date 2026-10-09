@@ -294,6 +294,47 @@ def save_deployment_fixture(
     }
 
 
+CPU_FIXTURE_BASE_SHA256 = "2bff6e15f09adc0ee05c24d2445d347113d802043e41227e4eb6b6ce150a83ad"
+
+
+def strict_cpu_fixture_reload(path):
+    """Use the native per-load CPU config override; no factory/global patch escapes."""
+    import os
+
+    from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7
+
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != "" or torch.cuda.is_initialized():
+        raise ValueError("CPU fixture loading requires hidden and uninitialized CUDA")
+    if os.environ.get("GROOT_SKIP_HF_MODEL_WEIGHTS") == "1":
+        raise ValueError("CPU fixture cannot skip pretrained weights")
+    # HF consumes this native config field on the fresh config for THIS load.
+    # Qwen3Backbone then omits its forced flash_attention_2 kwarg, allowing the
+    # pinned Qwen3-VL implementation to select its supported SDPA default.
+    model, info = Gr00tN1d7.from_pretrained(
+        path,
+        local_files_only=True,
+        output_loading_info=True,
+        ignore_mismatched_sizes=False,
+        use_flash_attention=False,
+        transformers_loading_kwargs={"local_files_only": True, "trust_remote_code": True},
+    )
+    if any(
+        info.get(key)
+        for key in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs")
+    ):
+        raise ValueError(f"Strict CPU checkpoint reload failed: {info}")
+    backend = model.backbone.model.config._attn_implementation
+    if backend != "sdpa" or model.config.use_flash_attention is not False:
+        raise ValueError("CPU fixture did not construct the native SDPA backbone")
+    if torch.cuda.is_initialized():
+        raise ValueError("CPU fixture construction initialized CUDA")
+    return model, {
+        **info,
+        "cpu_fixture_attention_backend": backend,
+        "cpu_fixture_override_scope": "native use_flash_attention=False on this load only",
+    }
+
+
 def fixture_main():
     import argparse
     import os
@@ -302,7 +343,6 @@ def fixture_main():
 
     from action_transfer_periphery_support import PARENT_SEMANTIC
     from contract import write_new
-    from run_train_eval import strict_reload
 
     parser = argparse.ArgumentParser(
         description="Create one explicit CPU-only task50k+B0 deployment fixture"
@@ -328,6 +368,7 @@ def fixture_main():
         or plan["core_checkpoint"]["kind"] != "core_only"
         or plan["core_checkpoint"]["expected_step"] != 50000
         or plan["core_checkpoint"]["content_sha256"] != PARENT_SEMANTIC
+        or plan["base_content_sha256"] != CPU_FIXTURE_BASE_SHA256
     ):
         raise ValueError("CPU fixture source/parent/output/budget identity differs")
     for row in plan["records"]:
@@ -359,7 +400,7 @@ def fixture_main():
 
     torch.set_num_threads(4)
     try:
-        model, loading = strict_reload(Path(plan["base_checkpoint"]))
+        model, loading = strict_cpu_fixture_reload(Path(plan["base_checkpoint"]))
         model.to(device="cpu", dtype=torch.bfloat16).eval().requires_grad_(False)
         record = save_deployment_fixture(
             model,
