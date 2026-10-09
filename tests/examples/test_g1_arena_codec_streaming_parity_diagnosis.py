@@ -123,7 +123,9 @@ def test_state_dict_hash_and_tensor_equality_are_ordered_and_sensitive() -> None
 
 def test_resolved_plan_freezes_only_the_four_conditions_and_gpu0() -> None:
     plan = diagnosis.resolved_plan("1" * 40)
+    assert plan["run_id"] == "fixed-weight-gpu0-r2"
     assert plan["source"]["base_commit"] == diagnosis.BASE_SOURCE_COMMIT
+    assert plan["failed_engineering_attempt"] == diagnosis.FAILED_ENGINEERING_ATTEMPT
     assert plan["protocol"]["conditions"] == list(diagnosis.CONDITION_NAMES)
     assert plan["protocol"]["mamba_full_chunk_sizes"] == {"current": 16, "candidate": 1}
     assert plan["resources"] == {

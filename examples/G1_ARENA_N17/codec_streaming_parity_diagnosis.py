@@ -43,7 +43,7 @@ from torch.nn import functional as F
 
 REPO = Path(__file__).resolve().parents[2]
 EXPERIMENT = "g1-arena-codec-streaming-parity-diagnosis-r1"
-RUN_ID = "fixed-weight-gpu0-r1"
+RUN_ID = "fixed-weight-gpu0-r2"
 BASE_SOURCE_COMMIT = "8dd32c8538d758874697e6cbc4086824c6c932ff"
 ARTIFACT_ROOT = Path(
     "/home/sl/research/icra27-artifacts/g1-arena-codec-streaming-parity-diagnosis-r1"
@@ -209,6 +209,23 @@ FROZEN_R1_EVIDENCE = {
         "sha256": R1_RESULT_SHA256,
     },
 }
+FAILED_ENGINEERING_ATTEMPT = {
+    "plan": {
+        "path": str(ARTIFACT_ROOT / "plan-r1/PLAN.json"),
+        "bytes": 4_881,
+        "sha256": "234358bd44e1a110e7988878a090d61f3fa94dcf167b22224136a86aba3bb34e",
+    },
+    "result": {
+        "path": str(ARTIFACT_ROOT / "fixed-weight-gpu0-r1/RESULT.json"),
+        "bytes": 664,
+        "sha256": "83e68bfd7d018e8e931f29af8b71e4e70264c470e1a72e3d6d49bc9599de433f",
+    },
+    "required_status": "failed",
+    "required_error": (
+        "ValueError: diagnosis source is dirty: "
+        "['tests/gr00t/experimental/test_arena_codec_streaming_parity_target.py']"
+    ),
+}
 
 
 def sha256(path: Path) -> str:
@@ -342,6 +359,7 @@ def resolved_plan(source_commit: str) -> dict[str, Any]:
             "base_commit": BASE_SOURCE_COMMIT,
         },
         "r1_evidence": copy.deepcopy(FROZEN_R1_EVIDENCE),
+        "failed_engineering_attempt": copy.deepcopy(FAILED_ENGINEERING_ATTEMPT),
         "input": copy.deepcopy(FROZEN_INPUT),
         "dependency": copy.deepcopy(FROZEN_DEPENDENCY),
         "runtime": copy.deepcopy(FROZEN_RUNTIME),
@@ -367,7 +385,7 @@ def write_new(path: Path, payload: dict[str, Any]) -> int:
 
 
 def prepare_plan(path: Path) -> dict[str, Any]:
-    expected = ARTIFACT_ROOT / "plan-r1/PLAN.json"
+    expected = ARTIFACT_ROOT / "plan-r2/PLAN.json"
     if path.resolve() != expected.resolve():
         raise ValueError(f"resolved plan path must be {expected}")
     commit = subprocess.check_output(
@@ -516,6 +534,32 @@ def verify_r1_evidence() -> dict[str, Any]:
             "mamba2": R1_MAMBA_T925_MAX_ABS,
             "gru": R1_GRU_T925_MAX_ABS,
         },
+    }
+
+
+def verify_failed_engineering_attempt() -> dict[str, Any]:
+    _verify_material_spec(
+        FAILED_ENGINEERING_ATTEMPT["plan"],
+        expected_path=ARTIFACT_ROOT / "plan-r1/PLAN.json",
+        label="failed engineering attempt plan",
+    )
+    result_path = _verify_material_spec(
+        FAILED_ENGINEERING_ATTEMPT["result"],
+        expected_path=ARTIFACT_ROOT / "fixed-weight-gpu0-r1/RESULT.json",
+        label="failed engineering attempt result",
+    )
+    result = read_json(result_path)
+    if (
+        result.get("status") != FAILED_ENGINEERING_ATTEMPT["required_status"]
+        or result.get("error") != FAILED_ENGINEERING_ATTEMPT["required_error"]
+        or result.get("training_allowed") is not False
+    ):
+        raise ValueError("failed engineering attempt evidence changed")
+    return {
+        "plan": FAILED_ENGINEERING_ATTEMPT["plan"],
+        "result": FAILED_ENGINEERING_ATTEMPT["result"],
+        "failure_before_model_probe": True,
+        "error": result["error"],
     }
 
 
@@ -1057,6 +1101,7 @@ def run(plan: dict[str, Any], plan_identity: dict[str, Any]) -> dict[str, Any]:
     native_modules_before = native_vla_modules_loaded()
     source = verify_source(plan["source"]["commit"])
     r1_evidence = verify_r1_evidence()
+    failed_engineering_attempt = verify_failed_engineering_attempt()
     dependencies = verify_dependencies()
     codec, input_evidence = load_codec_input()
     environment = verify_environment()
@@ -1082,6 +1127,7 @@ def run(plan: dict[str, Any], plan_identity: dict[str, Any]) -> dict[str, Any]:
         "source": source,
         "plan": plan_identity,
         "r1_evidence": r1_evidence,
+        "failed_engineering_attempt": failed_engineering_attempt,
         "input": input_evidence,
         "dependencies": dependencies,
         "environment": environment,
