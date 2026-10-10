@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+from gr00t.experimental.arena_functional_mamba_transition import FunctionalMamba2State
 import pytest
 import torch
 
@@ -21,6 +22,33 @@ SPEC = importlib.util.spec_from_file_location("online_state_scaling_runner", EXA
 assert SPEC is not None and SPEC.loader is not None
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
+
+
+class _CPUFunctionalMambaStub(torch.nn.Module):
+    """Exercise runner state semantics without invoking GPU-only Mamba kernels."""
+
+    def new_functional_state(self, batch_size: int) -> FunctionalMamba2State:
+        return FunctionalMamba2State(
+            tuple(
+                (
+                    torch.zeros(batch_size, 640, 4),
+                    torch.zeros(batch_size, 8, 64, 64),
+                )
+                for _ in range(2)
+            ),
+            batch_size,
+        )
+
+    def functional_step(
+        self,
+        descriptor: torch.Tensor,
+        state: FunctionalMamba2State,
+    ) -> tuple[torch.Tensor, FunctionalMamba2State]:
+        return descriptor, FunctionalMamba2State(
+            tuple((conv.clone(), ssm.clone()) for conv, ssm in state.layers),
+            state.batch_size,
+            state.observations + 1,
+        )
 
 
 def test_frozen_five_process_orders_lengths_and_incomplete_status() -> None:
@@ -135,6 +163,36 @@ def test_generic_dispatch_keeps_preallocated_mutable_semantics_separate() -> Non
         )
     assert functional_returned is not functional_state
     assert functional_returned.observations == 1
+
+
+@pytest.mark.parametrize("condition", runner.CONDITIONS)
+def test_recurrence_invariants_enforce_reset_return_and_replay_contract(
+    condition: str,
+) -> None:
+    module = (
+        _CPUFunctionalMambaStub()
+        if condition == "functional_mamba"
+        else runner.build_condition(condition).eval()
+    )
+    descriptors = torch.randn(
+        1,
+        128,
+        256,
+        generator=torch.Generator().manual_seed(230923),
+    )
+    invariants, replay_output, replay_state = runner.recurrence_invariants(
+        condition,
+        module,
+        descriptors,
+    )
+    assert replay_output.shape == (1, 128, 256)
+    assert replay_state.observations == 128
+    assert invariants["reset_returned_observations"] == 0
+    assert invariants["reset_alias_contract"]
+    assert invariants["reset_returned_is_input"] is (condition == "transformer_preallocated")
+    assert invariants["episode_reset_output_exact"]
+    assert invariants["episode_reset_terminal_state_exact"]
+    assert invariants["episode_reset_exact"]
 
 
 def test_plan_and_dry_run_are_explicitly_nonformal_and_cost_fail_closed() -> None:

@@ -629,10 +629,20 @@ def recurrence_invariants(
     edited[:, prefix:] += 0.125
     edited_output, _ = online_stream(name, module, edited)
 
+    mutable_expected = name == "transformer_preallocated"
     reset_state = _state_clone(continuous_state)
     reset_returned = reset_state.reset()
-    reset_index_zero = reset_state.observations == 0
+    reset_returned_observations = reset_returned.observations
+    reset_returned_is_input = reset_returned is reset_state
+    reset_index_zero = reset_returned_observations == 0
+    reset_alias_contract = (
+        reset_returned_is_input and reset_state.observations == 0
+        if mutable_expected
+        else not reset_returned_is_input and reset_state.observations == length
+    )
     reset_output, reset_final = online_stream(name, module, descriptors, reset_returned)
+    reset_output_exact = torch.equal(continuous, reset_output)
+    reset_terminal_state_exact = _state_equal(continuous_state, reset_final)
 
     initial = new_state(name, module, int(descriptors.shape[0]))
     _, one = online_step(name, module, descriptors[:, 0], initial)
@@ -640,7 +650,6 @@ def recurrence_invariants(
     before = _state_clone(probe_input)
     ids_before = _state_storage_ids(probe_input)
     _, probe_output = online_step(name, module, descriptors[:, min(1, length - 1)], probe_input)
-    mutable_expected = name == "transformer_preallocated"
     alias_contract = (
         probe_output is probe_input and _state_storage_ids(probe_output) == ids_before
         if mutable_expected
@@ -660,9 +669,15 @@ def recurrence_invariants(
             and _state_equal(continuous_state, chunk_state),
             "repeat_exact": torch.equal(continuous, repeat)
             and _state_equal(continuous_state, repeat_state),
+            "reset_returned_observations": reset_returned_observations,
+            "reset_returned_is_input": reset_returned_is_input,
+            "reset_alias_contract": reset_alias_contract,
+            "episode_reset_output_exact": reset_output_exact,
+            "episode_reset_terminal_state_exact": reset_terminal_state_exact,
             "episode_reset_exact": reset_index_zero
-            and torch.equal(continuous, reset_output)
-            and _state_equal(continuous_state, reset_final),
+            and reset_alias_contract
+            and reset_output_exact
+            and reset_terminal_state_exact,
             "suffix_change_prefix_exact": torch.equal(
                 continuous[:, :prefix], edited_output[:, :prefix]
             ),
@@ -807,6 +822,10 @@ def evaluate_correctness(correctness: dict[str, Any], execution: dict[str, Any])
                     invariants.get("final_observations") == length,
                     invariants.get("continuous_chunk_exact") is True,
                     invariants.get("repeat_exact") is True,
+                    invariants.get("reset_returned_observations") == 0,
+                    invariants.get("reset_alias_contract") is True,
+                    invariants.get("episode_reset_output_exact") is True,
+                    invariants.get("episode_reset_terminal_state_exact") is True,
                     invariants.get("episode_reset_exact") is True,
                     invariants.get("suffix_change_prefix_exact") is True,
                     invariants.get("state_alias_contract") is True,
