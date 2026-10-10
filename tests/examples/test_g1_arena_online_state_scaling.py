@@ -165,6 +165,16 @@ class _PreallocatedLifecycleStub(torch.nn.Module):
 
 
 def test_frozen_five_process_orders_lengths_and_incomplete_status() -> None:
+    assert runner.EXPERIMENT == "g1-arena-online-state-scaling-r2"
+    assert runner.BASE_SOURCE_COMMIT == "3c031d63922ff6fdd2d9a2eeb54c5dc991e407ff"
+    assert runner.ARTIFACT_ROOT == Path(
+        "/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r2"
+    )
+    assert runner.PLAN_PATH == runner.ARTIFACT_ROOT / "plan-r2/PLAN.json"
+    assert runner.CORRECTNESS_RUN_ID == "correctness-gpu0-r2"
+    assert runner.AGGREGATE_RUN_ID == "aggregate-r2"
+    assert runner.FUNCTIONAL_AGGREGATE["path"].endswith("aggregate-r2/RESULT.json")
+    assert runner.FUNCTIONAL_RECHECK["path"].endswith("aggregate-r2/RESULT_RECHECK.json")
     assert runner.CONDITIONS == (
         "functional_mamba",
         "persistent_gru",
@@ -174,11 +184,11 @@ def test_frozen_five_process_orders_lengths_and_incomplete_status() -> None:
     )
     assert runner.LENGTHS == (128, 256, 512, 925)
     assert runner.COST_RUN_IDS == {
-        "A": "cost-gpu0-r1a",
-        "B": "cost-gpu0-r1b",
-        "C": "cost-gpu0-r1c",
-        "D": "cost-gpu0-r1d",
-        "E": "cost-gpu0-r1e",
+        "A": "cost-gpu0-r2a",
+        "B": "cost-gpu0-r2b",
+        "C": "cost-gpu0-r2c",
+        "D": "cost-gpu0-r2d",
+        "E": "cost-gpu0-r2e",
     }
     for offset, label in enumerate(runner.COST_RUN_IDS):
         assert runner.CONDITION_ORDERS[label] == (
@@ -652,6 +662,37 @@ def test_write_once_result_artifact_identity_and_limits(
     )
     with pytest.raises(FileExistsError):
         runner.write_result_once("unit", result)
+
+
+def test_resolved_plan_write_read_verify_roundtrip_preserves_json_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact_root = tmp_path / "artifact"
+    plan_path = artifact_root / "plan-r2/PLAN.json"
+    monkeypatch.setattr(runner, "ARTIFACT_ROOT", artifact_root)
+    monkeypatch.setattr(runner, "PLAN_PATH", plan_path)
+    commit = "1" * 40
+    fresh = runner.resolved_plan(commit)
+    expected_state_bytes = fresh["protocol"]["expected_state_bytes"]
+    assert (
+        sum(
+            isinstance(length, int)
+            for condition in expected_state_bytes.values()
+            for length in condition
+        )
+        == 20
+    )
+
+    identity = runner._write_new_json(plan_path, fresh)
+    loaded, verified_identity = runner.verify_plan(plan_path, identity["sha256"])
+
+    assert verified_identity == identity
+    assert loaded == json.loads(json.dumps(fresh, sort_keys=True))
+    assert all(
+        isinstance(length, str)
+        for condition in loaded["protocol"]["expected_state_bytes"].values()
+        for length in condition
+    )
 
 
 def test_cli_dry_run_is_json_and_does_not_materialize_artifact() -> None:

@@ -64,13 +64,13 @@ from torch import nn
 
 
 REPO = Path(__file__).resolve().parents[2]
-EXPERIMENT = "g1-arena-online-state-scaling-r1"
-BASE_SOURCE_COMMIT = "1a441889907e0c1c3831f717f2748918c8d6877c"
-ARTIFACT_ROOT = Path("/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r1")
-PLAN_PATH = ARTIFACT_ROOT / "plan-r1/PLAN.json"
-CORRECTNESS_RUN_ID = "correctness-gpu0-r1"
-COST_RUN_IDS = {label: f"cost-gpu0-r1{label.lower()}" for label in "ABCDE"}
-AGGREGATE_RUN_ID = "aggregate-r1"
+EXPERIMENT = "g1-arena-online-state-scaling-r2"
+BASE_SOURCE_COMMIT = "3c031d63922ff6fdd2d9a2eeb54c5dc991e407ff"
+ARTIFACT_ROOT = Path("/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r2")
+PLAN_PATH = ARTIFACT_ROOT / "plan-r2/PLAN.json"
+CORRECTNESS_RUN_ID = "correctness-gpu0-r2"
+COST_RUN_IDS = {label: f"cost-gpu0-r2{label.lower()}" for label in "ABCDE"}
+AGGREGATE_RUN_ID = "aggregate-r2"
 
 CONDITIONS = (
     "functional_mamba",
@@ -2052,7 +2052,12 @@ def verify_plan(path: Path, expected_sha256: str) -> tuple[dict[str, Any], dict[
     commit = plan.get("source", {}).get("commit")
     if not isinstance(commit, str) or len(commit) != 40:
         raise ValueError("resolved plan source commit is invalid")
-    if plan != resolved_plan(commit):
+    # JSON object keys are strings.  Canonicalize the freshly resolved Python
+    # contract through the same JSON boundary before comparing it with the
+    # stored plan; in particular, this preserves the 20 integer length keys in
+    # ``expected_state_bytes`` as their JSON string representation.
+    expected_plan = json.loads(json.dumps(resolved_plan(commit), sort_keys=True))
+    if plan != expected_plan:
         raise ValueError("resolved plan contract changed")
     return plan, identity
 
