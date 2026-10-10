@@ -198,32 +198,61 @@ def state_dict_tensor_sha256(module: nn.Module) -> dict[str, str]:
     return {name: tensor_sha256(tensor) for name, tensor in sorted(module.state_dict().items())}
 
 
-def assert_closed_routes_absent() -> dict[str, Any]:
-    """Fail if this runner calls any closed controls/parity evidence route."""
+def _assert_closed_route_source(source: str, *, filename: str) -> dict[str, Any]:
+    """Audit one source unit without consulting process-global import state."""
 
-    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"), filename=__file__)
+    tree = ast.parse(source, filename=filename)
     forbidden = {"run_cost", "evaluate_cost_gates", "verify_passed_result"}
-    observed = []
+    observed_calls = []
+    observed_imports = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if isinstance(node.func, ast.Name):
-            name = node.func.id
-        elif isinstance(node.func, ast.Attribute):
-            name = node.func.attr
-        else:
-            continue
-        if name in forbidden:
-            observed.append({"name": name, "line": node.lineno})
-    if observed:
-        raise RuntimeError(f"closed evidence helper call detected: {observed}")
-    if "functional_streaming_controls" in sys.modules:
-        raise RuntimeError("closed functional-streaming-controls runner was imported")
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            else:
+                continue
+            if name in forbidden:
+                observed_calls.append({"name": name, "line": node.lineno})
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in {
+                    "functional_streaming_controls",
+                    "examples.G1_ARENA_N17.functional_streaming_controls",
+                }:
+                    observed_imports.append({"module": alias.name, "line": node.lineno})
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            imports_closed_runner = module in {
+                "functional_streaming_controls",
+                "examples.G1_ARENA_N17.functional_streaming_controls",
+            } or (
+                module == "examples.G1_ARENA_N17"
+                and any(alias.name == "functional_streaming_controls" for alias in node.names)
+            )
+            if imports_closed_runner:
+                observed_imports.append({"module": module, "line": node.lineno})
+    if observed_calls:
+        raise RuntimeError(f"closed evidence helper call detected: {observed_calls}")
+    if observed_imports:
+        raise RuntimeError(
+            f"closed functional-streaming-controls runner import: {observed_imports}"
+        )
     return {
         "closed_helper_calls": [],
         "closed_runner_imported": False,
         "opaque_full_transformer_calls": 0,
     }
+
+
+def assert_closed_routes_absent() -> dict[str, Any]:
+    """Fail if this runner imports or calls a closed evidence route."""
+
+    return _assert_closed_route_source(
+        Path(__file__).read_text(encoding="utf-8"),
+        filename=__file__,
+    )
 
 
 def max_abs(first: torch.Tensor, second: torch.Tensor) -> float:

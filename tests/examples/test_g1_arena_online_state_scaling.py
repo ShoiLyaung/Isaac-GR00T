@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import os
@@ -83,6 +84,29 @@ def test_closed_routes_and_opaque_full_endpoint_are_fail_closed() -> None:
     module = runner.build_condition("transformer_preallocated").eval()
     with pytest.raises(RuntimeError, match="full-sequence.*forbidden"):
         module(torch.randn(1, 2, 256))
+
+
+def test_closed_route_audit_ignores_preimported_runner_from_shared_test_process() -> None:
+    imported = importlib.import_module("functional_streaming_controls")
+    assert (
+        Path(imported.__file__).resolve()
+        == (REPO / "examples/G1_ARENA_N17/functional_streaming_controls.py").resolve()
+    )
+    assert "functional_streaming_controls" in sys.modules
+    assert runner.assert_closed_routes_absent()["closed_runner_imported"] is False
+
+
+def test_closed_route_audit_rejects_import_in_the_new_runner_ast() -> None:
+    with pytest.raises(RuntimeError, match="runner import"):
+        runner._assert_closed_route_source(
+            "import functional_streaming_controls as closed_runner\n",
+            filename="synthetic_new_runner.py",
+        )
+    with pytest.raises(RuntimeError, match="helper call"):
+        runner._assert_closed_route_source(
+            "def bad():\n    evaluate_cost_gates()\n",
+            filename="synthetic_new_runner.py",
+        )
 
 
 def test_generic_dispatch_keeps_preallocated_mutable_semantics_separate() -> None:
