@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ast
 import copy
 import gc
+import hashlib
 import importlib
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -165,16 +168,32 @@ class _PreallocatedLifecycleStub(torch.nn.Module):
 
 
 def test_frozen_five_process_orders_lengths_and_incomplete_status() -> None:
-    assert runner.EXPERIMENT == "g1-arena-online-state-scaling-r3"
-    assert runner.BASE_SOURCE_COMMIT == "748404e7749af1f7cca465fb74374f5ca0640235"
+    assert runner.EXPERIMENT == "g1-arena-online-state-scaling-r4"
+    assert runner.BASE_SOURCE_COMMIT == "5283d67477cff96139d6ae2dc6b8202d36c1618c"
     assert runner.ARTIFACT_ROOT == Path(
-        "/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r3"
+        "/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r4"
     )
-    assert runner.PLAN_PATH == runner.ARTIFACT_ROOT / "plan-r3/PLAN.json"
-    assert runner.CORRECTNESS_RUN_ID == "correctness-gpu0-r3"
-    assert runner.AGGREGATE_RUN_ID == "aggregate-r3"
+    assert runner.PLAN_PATH == runner.ARTIFACT_ROOT / "plan-r4/PLAN.json"
+    assert runner.CORRECTNESS_RUN_ID == "correctness-gpu0-r4"
+    assert runner.AGGREGATE_RUN_ID == "aggregate-r4"
     assert runner.FUNCTIONAL_AGGREGATE["path"].endswith("aggregate-r2/RESULT.json")
     assert runner.FUNCTIONAL_RECHECK["path"].endswith("aggregate-r2/RESULT_RECHECK.json")
+    assert runner.GRU_ATTRIBUTION_RESULT == {
+        "path": (
+            "/home/sl/research/icra27-artifacts/g1-arena-gru-gradient-attribution-r2/"
+            "attribution-gpu0-r2/RESULT.json"
+        ),
+        "bytes": 29_817,
+        "sha256": "754a28c592b20ede974ea20c60d70b2d3c43db1364584f9d7a2e6d868165abb8",
+    }
+    assert runner.GRU_ATTRIBUTION_GRADIENTS == {
+        "path": (
+            "/home/sl/research/icra27-artifacts/g1-arena-gru-gradient-attribution-r2/"
+            "attribution-gpu0-r2/GRADIENTS.npz"
+        ),
+        "bytes": 525_098,
+        "sha256": "5c2c32b288c6e17cc22997af70290e0f21aea302d136b939674850ce31fa47f7",
+    }
     assert runner.CONDITIONS == (
         "functional_mamba",
         "persistent_gru",
@@ -184,11 +203,11 @@ def test_frozen_five_process_orders_lengths_and_incomplete_status() -> None:
     )
     assert runner.LENGTHS == (128, 256, 512, 925)
     assert runner.COST_RUN_IDS == {
-        "A": "cost-gpu0-r3a",
-        "B": "cost-gpu0-r3b",
-        "C": "cost-gpu0-r3c",
-        "D": "cost-gpu0-r3d",
-        "E": "cost-gpu0-r3e",
+        "A": "cost-gpu0-r4a",
+        "B": "cost-gpu0-r4b",
+        "C": "cost-gpu0-r4c",
+        "D": "cost-gpu0-r4d",
+        "E": "cost-gpu0-r4e",
     }
     for offset, label in enumerate(runner.COST_RUN_IDS):
         assert runner.CONDITION_ORDERS[label] == (
@@ -449,11 +468,55 @@ def test_correctness_gates_fail_closed_before_gradient_and_full_lengths() -> Non
         "all_lengths_model_specific_oracles_invariants_state_and_shared_transformer_pass"
     ]
     assert not gates["t128_directional_jvp_gradcheck"]
+    assert not gates["t128_persistent_gru_full_input_gradient"]
     assert not all(gates.values())
 
 
-@pytest.mark.parametrize("condition", ["persistent_gru", "transformer_functional_cat"])
-def test_cpu_directional_gradient_probe_is_finite_nonzero(condition: str) -> None:
+def test_correctness_distinguishes_directional_and_gru_full_gradient_gates() -> None:
+    execution = {
+        "native_vla_modules": {"before": [], "after": []},
+        "optimizer": {"constructor_calls": [], "steps_observed": 0},
+    }
+    directional = {
+        name: {"length": runner.GRADIENT_LENGTH, "passed": True}
+        for name in ("functional_mamba", "transformer_functional_cat")
+    }
+    gru_gates = {
+        name: True
+        for name in (
+            "all_outputs_and_gradients_finite",
+            "all_outputs_and_gradients_nonzero",
+            "persistent_manual_output_max_abs",
+            "persistent_native_output_max_abs",
+            "persistent_manual_gradient_relative_l2",
+            "persistent_native_gradient_relative_l2",
+            "target_modes_restored_to_eval",
+        )
+    }
+    correctness = {
+        "gradient_probe": {
+            "directional": directional,
+            "persistent_gru_full_input_gradient": {
+                "kind": "three_path_full_input_gradient",
+                "length": runner.GRADIENT_LENGTH,
+                "finite_difference": False,
+                "gates": gru_gates,
+                "passed": True,
+            },
+        }
+    }
+    gates = runner.evaluate_correctness(correctness, execution)
+    assert gates["t128_directional_jvp_gradcheck"]
+    assert gates["t128_persistent_gru_full_input_gradient"]
+
+    correctness["gradient_probe"]["persistent_gru_full_input_gradient"]["passed"] = False
+    gates = runner.evaluate_correctness(correctness, execution)
+    assert gates["t128_directional_jvp_gradcheck"]
+    assert not gates["t128_persistent_gru_full_input_gradient"]
+
+
+def test_cpu_transformer_directional_gradient_probe_is_finite_nonzero() -> None:
+    condition = "transformer_functional_cat"
     module = runner.build_condition(condition).eval()
     descriptors = torch.randn(1, 4, 256, generator=torch.Generator().manual_seed(29))
     result = runner.directional_gradient_probe(condition, module, descriptors)
@@ -463,41 +526,121 @@ def test_cpu_directional_gradient_probe_is_finite_nonzero(condition: str) -> Non
     assert result["passed"], result
 
 
-def test_persistent_gru_probe_uses_one_training_scope_and_restores_eval(
+def test_mamba_transformer_directional_probe_source_is_frozen_from_r3() -> None:
+    source = inspect.getsource(runner.directional_gradient_probe).encode()
+    assert hashlib.sha256(source).hexdigest() == (
+        "4bd6fe039a671d330f0a05b709ed51ada96cbb3b956cd623f86c907355d2dee0"
+    )
+
+
+def test_manual_t4_forward_and_input_gradient_match_native_double() -> None:
+    module = runner.build_condition("persistent_gru").eval()
+    state = {
+        name: value.detach().cpu().float().clone() for name, value in module.state_dict().items()
+    }
+    descriptor = torch.randn(
+        1,
+        4,
+        runner.WIDTH,
+        dtype=torch.float64,
+        generator=torch.Generator().manual_seed(11),
+    )
+    cotangent = torch.randn(
+        descriptor.shape,
+        dtype=torch.float64,
+        generator=torch.Generator().manual_seed(13),
+    )
+
+    manual_output, manual_input = runner.manual_gru_fp64(descriptor, state)
+    manual_gradient = torch.autograd.grad(
+        torch.sum(manual_output * cotangent), manual_input, create_graph=False
+    )[0]
+
+    native = runner.build_condition("persistent_gru").double().eval()
+    native.load_state_dict(state, strict=True)
+    native_input = descriptor.clone().requires_grad_(True)
+    native_output = native(native_input)
+    native_gradient = torch.autograd.grad(
+        torch.sum(native_output * cotangent), native_input, create_graph=False
+    )[0]
+
+    torch.testing.assert_close(manual_output, native_output, rtol=1e-11, atol=1e-11)
+    torch.testing.assert_close(manual_gradient, native_gradient, rtol=2e-10, atol=2e-11)
+
+
+def test_manual_gru_is_independent_and_keeps_input_graph(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = runner.build_condition("persistent_gru").eval()
-    descriptors = torch.randn(1, 4, 256, generator=torch.Generator().manual_seed(31))
-    original = runner.differentiable_stream
-    observed_flags: list[tuple[bool, ...]] = []
+    state = {
+        name: value.detach().cpu().float().clone() for name, value in module.state_dict().items()
+    }
+    descriptor = torch.randn(1, 4, runner.WIDTH, dtype=torch.float64, requires_grad=True)
 
-    def recording_stream(name: str, target: torch.nn.Module, value: torch.Tensor) -> torch.Tensor:
-        observed_flags.append(tuple(child.training for child in target.modules()))
-        return original(name, target, value)
+    source = inspect.getsource(runner.manual_gru_fp64)
+    tree = ast.parse(source)
+    calls = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert not {"detach", "persistent_stream", "persistent_gru_fp64_oracle"} & calls
 
-    monkeypatch.setattr(runner, "differentiable_stream", recording_stream)
-    result = runner.directional_gradient_probe("persistent_gru", module, descriptors)
+    def forbidden(*args, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        raise AssertionError("target or existing oracle reached")
 
-    assert result["passed"], result
-    assert len(observed_flags) == 3
-    assert all(flags and all(flags) for flags in observed_flags)
+    monkeypatch.setattr(torch.nn.GRU, "forward", forbidden)
+    monkeypatch.setattr(type(module), "persistent_stream", forbidden)
+    monkeypatch.setattr(runner, "persistent_gru_fp64_oracle", forbidden)
+    output, manual_input = runner.manual_gru_fp64(descriptor, state)
+    gradient = torch.autograd.grad(output.sum(), manual_input)[0]
+    assert manual_input is descriptor
+    assert output.shape == descriptor.shape
+    assert torch.isfinite(gradient).all()
+
+
+@pytest.mark.parametrize("persistent", [True, False])
+def test_gru_cuda_objective_restores_modes_on_cpu_success(persistent: bool) -> None:
+    module = runner.build_condition("persistent_gru").eval()
+    descriptors = torch.randn(1, 4, runner.WIDTH)
+    cotangent = torch.randn_like(descriptors)
+    output, gradient = runner._gru_cuda_input_gradient(
+        module,
+        descriptors,
+        cotangent,
+        persistent=persistent,
+    )
+    assert output.shape == descriptors.shape
+    assert torch.isfinite(gradient).all()
     assert all(not child.training for child in module.modules())
 
 
-def test_persistent_gru_probe_restores_exact_modes_after_forced_exception(
+@pytest.mark.parametrize("persistent", [True, False])
+def test_gru_cuda_objective_restores_modes_after_forced_exception(
+    persistent: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = runner.build_condition("persistent_gru").eval()
-    descriptors = torch.randn(1, 4, 256, generator=torch.Generator().manual_seed(37))
+    descriptors = torch.randn(1, 4, runner.WIDTH)
+    cotangent = torch.randn_like(descriptors)
 
-    def forced_failure(name: str, target: torch.nn.Module, value: torch.Tensor) -> torch.Tensor:
-        del name, value
-        assert all(child.training for child in target.modules())
-        raise RuntimeError("forced differentiable stream failure")
+    def forced_failure(*args, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        assert all(child.training for child in module.modules())
+        raise RuntimeError("forced GRU target failure")
 
-    monkeypatch.setattr(runner, "differentiable_stream", forced_failure)
-    with pytest.raises(RuntimeError, match="forced differentiable stream failure"):
-        runner.directional_gradient_probe("persistent_gru", module, descriptors)
+    if persistent:
+        monkeypatch.setattr(module, "persistent_stream", forced_failure)
+    else:
+        monkeypatch.setattr(module, "forward", forced_failure)
+    with pytest.raises(RuntimeError, match="forced GRU target failure"):
+        runner._gru_cuda_input_gradient(
+            module,
+            descriptors,
+            cotangent,
+            persistent=persistent,
+        )
     assert all(not child.training for child in module.modules())
 
 
@@ -521,7 +664,7 @@ def test_non_gru_probe_does_not_change_module_modes(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.parametrize("fault", ["entry_training", "count", "layers", "dropout"])
-def test_persistent_gru_probe_structure_is_fail_closed(fault: str) -> None:
+def test_gru_training_scope_structure_is_fail_closed(fault: str) -> None:
     module = runner.build_condition("persistent_gru").eval()
     if fault == "entry_training":
         next(child for child in module.modules() if isinstance(child, torch.nn.GRU)).train()
@@ -536,15 +679,55 @@ def test_persistent_gru_probe_structure_is_fail_closed(fault: str) -> None:
 
     descriptors = torch.randn(1, 4, 256, generator=torch.Generator().manual_seed(43))
     with pytest.raises(ValueError, match="persistent GRU gradient probe requires"):
-        runner.directional_gradient_probe("persistent_gru", module, descriptors)
+        runner._gru_cuda_input_gradient(
+            module,
+            descriptors,
+            torch.randn_like(descriptors),
+            persistent=True,
+        )
+
+
+def test_gru_full_gradient_gate_recomputes_positive_and_negative_cases() -> None:
+    base = torch.randn(1, 4, 8, dtype=torch.float64)
+    outputs = {
+        "cuda_persistent": base.float(),
+        "cuda_native_full": base.float(),
+        "cpu_fp64_manual": base,
+    }
+    gradients = {name: value.clone() for name, value in outputs.items()}
+    positive, metrics = runner.evaluate_gru_full_gradient_gates(
+        outputs, gradients, modes_restored=True
+    )
+    assert all(positive.values())
+    assert metrics["gradient_relative_l2"]["persistent_vs_manual"] < 1e-6
+
+    bad_gradient = {name: value.clone() for name, value in gradients.items()}
+    bad_gradient["cpu_fp64_manual"] *= 2
+    negative, _ = runner.evaluate_gru_full_gradient_gates(
+        outputs, bad_gradient, modes_restored=True
+    )
+    assert not negative["persistent_manual_gradient_relative_l2"]
+
+    bad_output = {name: value.clone() for name, value in outputs.items()}
+    bad_output["cuda_native_full"][0, 0, 0] += 1
+    negative, _ = runner.evaluate_gru_full_gradient_gates(
+        bad_output, gradients, modes_restored=True
+    )
+    assert not negative["persistent_native_output_max_abs"]
+
+    zero = {name: value.clone() for name, value in gradients.items()}
+    zero["cuda_native_full"].zero_()
+    negative, _ = runner.evaluate_gru_full_gradient_gates(outputs, zero, modes_restored=False)
+    assert not negative["all_outputs_and_gradients_nonzero"]
+    assert not negative["target_modes_restored_to_eval"]
 
 
 @pytest.mark.gpu
 @pytest.mark.skipif(
     os.environ.get("RUN_ONLINE_SCALING_GRU_CUDA_TEST") != "1" or not torch.cuda.is_available(),
-    reason="explicit opt-in CUDA T128 GRU directional probe",
+    reason="explicit opt-in CUDA T128 GRU three-path full-gradient probe",
 )
-def test_cuda_persistent_gru_t128_directional_probe_and_mode_contract() -> None:
+def test_cuda_persistent_gru_t128_full_gradient_probe_and_mode_contract() -> None:
     device = torch.device("cuda", 0)
     module = runner.build_condition("persistent_gru").eval().to(device)
     descriptors = torch.randn(
@@ -555,17 +738,30 @@ def test_cuda_persistent_gru_t128_directional_probe_and_mode_contract() -> None:
         generator=torch.Generator(device=device).manual_seed(47),
     )
 
-    with torch.no_grad():
-        eval_output = runner.differentiable_stream("persistent_gru", module, descriptors)
-        module.train(True)
-        train_output = runner.differentiable_stream("persistent_gru", module, descriptors)
-        module.eval()
-    assert runner.max_abs(eval_output, train_output) <= 1e-6
-
-    result = runner.directional_gradient_probe("persistent_gru", module, descriptors)
-    assert result["gradient_finite"]
-    assert result["gradient_nonzero"]
-    assert result["relative_error"] <= 0.05
+    result = runner.persistent_gru_full_gradient_probe(module, descriptors)
+    shared_generator = torch.Generator(device=device).manual_seed(runner.SEED)
+    expected_direction = torch.randn(
+        descriptors.shape,
+        generator=shared_generator,
+        device=device,
+        dtype=torch.float32,
+    )
+    expected_direction /= expected_direction.norm().clamp_min(torch.finfo(torch.float32).eps)
+    expected_cotangent = torch.randn(
+        descriptors.shape,
+        generator=shared_generator,
+        device=device,
+        dtype=torch.float32,
+    )
+    expected_cotangent /= expected_cotangent.norm().clamp_min(torch.finfo(torch.float32).eps)
+    assert result["kind"] == "three_path_full_input_gradient"
+    assert result["length"] == 128
+    assert result["finite_difference"] is False
+    assert result["rng"]["generation_order"] == ["direction", "cotangent"]
+    assert result["rng"]["direction_participates_in_gate"] is False
+    assert result["rng"]["direction_sha256"] == runner.tensor_sha256(expected_direction)
+    assert result["rng"]["cotangent_sha256"] == runner.tensor_sha256(expected_cotangent)
+    assert all(result["gates"].values())
     assert result["passed"], result
     assert all(not child.training for child in module.modules())
 
@@ -771,11 +967,61 @@ def test_write_once_result_artifact_identity_and_limits(
         runner.write_result_once("unit", result)
 
 
+def test_attribution_binding_is_rechecked_for_prepare_verify_and_formal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+
+    def material(name: str, payload: bytes) -> dict[str, object]:
+        path = evidence_root / name
+        path.write_bytes(payload)
+        return {
+            "path": str(path.resolve()),
+            "bytes": path.stat().st_size,
+            "sha256": runner.sha256(path),
+        }
+
+    functional = material("functional.json", b"functional")
+    recheck = material("recheck.json", b"recheck")
+    attribution = material("RESULT.json", b"attribution")
+    gradients = material("GRADIENTS.npz", b"gradients")
+    monkeypatch.setattr(runner, "FUNCTIONAL_AGGREGATE", functional)
+    monkeypatch.setattr(runner, "FUNCTIONAL_RECHECK", recheck)
+    monkeypatch.setattr(runner, "GRU_ATTRIBUTION_RESULT", attribution)
+    monkeypatch.setattr(runner, "GRU_ATTRIBUTION_GRADIENTS", gradients)
+
+    artifact_root = tmp_path / "artifact"
+    plan_path = artifact_root / "plan-r4/PLAN.json"
+    monkeypatch.setattr(runner, "ARTIFACT_ROOT", artifact_root)
+    monkeypatch.setattr(runner, "PLAN_PATH", plan_path)
+    commit = "1" * 40
+    monkeypatch.setattr(runner, "verify_source", lambda expected: {"commit": expected})
+    monkeypatch.setattr(
+        runner.subprocess,
+        "check_output",
+        lambda *args, **kwargs: commit + "\n",
+    )
+
+    identity = runner.prepare_plan(plan_path)
+    plan, checked = runner.verify_plan(plan_path, identity["sha256"])
+    assert checked == identity
+    assert plan["qualified_prior_evidence"]["gru_gradient_attribution_result"] == attribution
+    assert plan["qualified_prior_evidence"]["gru_gradient_attribution_gradients"] == gradients
+
+    Path(str(gradients["path"])).write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="attribution gradients identity changed"):
+        runner.verify_plan(plan_path, identity["sha256"])
+    with pytest.raises(ValueError, match="attribution gradients identity changed"):
+        runner._common_verified_inputs(plan)
+
+
 def test_resolved_plan_write_read_verify_roundtrip_preserves_json_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     artifact_root = tmp_path / "artifact"
-    plan_path = artifact_root / "plan-r3/PLAN.json"
+    plan_path = artifact_root / "plan-r4/PLAN.json"
     monkeypatch.setattr(runner, "ARTIFACT_ROOT", artifact_root)
     monkeypatch.setattr(runner, "PLAN_PATH", plan_path)
     commit = "1" * 40

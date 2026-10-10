@@ -22,7 +22,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 import functional_mamba_transition as input_runtime_provider
 from gr00t.experimental.arena_codec_streaming_backbone import (
@@ -61,16 +61,17 @@ from gr00t.experimental.arena_online_state_scaling import (
 import numpy as np
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 REPO = Path(__file__).resolve().parents[2]
-EXPERIMENT = "g1-arena-online-state-scaling-r3"
-BASE_SOURCE_COMMIT = "748404e7749af1f7cca465fb74374f5ca0640235"
-ARTIFACT_ROOT = Path("/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r3")
-PLAN_PATH = ARTIFACT_ROOT / "plan-r3/PLAN.json"
-CORRECTNESS_RUN_ID = "correctness-gpu0-r3"
-COST_RUN_IDS = {label: f"cost-gpu0-r3{label.lower()}" for label in "ABCDE"}
-AGGREGATE_RUN_ID = "aggregate-r3"
+EXPERIMENT = "g1-arena-online-state-scaling-r4"
+BASE_SOURCE_COMMIT = "5283d67477cff96139d6ae2dc6b8202d36c1618c"
+ARTIFACT_ROOT = Path("/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r4")
+PLAN_PATH = ARTIFACT_ROOT / "plan-r4/PLAN.json"
+CORRECTNESS_RUN_ID = "correctness-gpu0-r4"
+COST_RUN_IDS = {label: f"cost-gpu0-r4{label.lower()}" for label in "ABCDE"}
+AGGREGATE_RUN_ID = "aggregate-r4"
 
 CONDITIONS = (
     "functional_mamba",
@@ -96,6 +97,9 @@ GRADIENT_LENGTH = 128
 MAX_ORACLE_ABS = 1e-4
 MAX_TRANSFORMER_CONTROL_ABS = 1e-5
 MAX_DIRECTIONAL_GRAD_RELATIVE_ERROR = 0.05
+MAX_PERSISTENT_MANUAL_OUTPUT_ABS = 1e-4
+MAX_PERSISTENT_NATIVE_OUTPUT_ABS = 1e-5
+MAX_GRADIENT_RELATIVE_L2 = 1e-3
 MAX_CORRECTNESS_WALL_SECONDS = 20 * 60
 MAX_COST_WALL_SECONDS = 2 * 60 * 60
 MAX_AGGREGATE_WALL_SECONDS = 20 * 60
@@ -128,6 +132,22 @@ FUNCTIONAL_RECHECK = {
     ),
     "bytes": 2_134,
     "sha256": "6581ff40fb90f4d795b40a5490db0438c48a9621ce99faa604d409711f61387d",
+}
+GRU_ATTRIBUTION_RESULT = {
+    "path": (
+        "/home/sl/research/icra27-artifacts/g1-arena-gru-gradient-attribution-r2/"
+        "attribution-gpu0-r2/RESULT.json"
+    ),
+    "bytes": 29_817,
+    "sha256": "754a28c592b20ede974ea20c60d70b2d3c43db1364584f9d7a2e6d868165abb8",
+}
+GRU_ATTRIBUTION_GRADIENTS = {
+    "path": (
+        "/home/sl/research/icra27-artifacts/g1-arena-gru-gradient-attribution-r2/"
+        "attribution-gpu0-r2/GRADIENTS.npz"
+    ),
+    "bytes": 525_098,
+    "sha256": "5c2c32b288c6e17cc22997af70290e0f21aea302d136b939674850ce31fa47f7",
 }
 
 EXPECTED_STATE_BYTES = {
@@ -386,6 +406,21 @@ def frozen_protocol() -> dict[str, Any]:
         "scopes": list(SCOPES),
         "fixed_chunk_size": FIXED_CHUNK_SIZE,
         "gradient_length": GRADIENT_LENGTH,
+        "gradient_probe": {
+            "directional_conditions": [
+                "functional_mamba",
+                "transformer_functional_cat",
+            ],
+            "directional_epsilon": 1e-3,
+            "persistent_gru": (
+                "cuda_persistent_vs_cuda_native_full_vs_independent_cpu_fp64_full_input_gradient"
+            ),
+            "objective": "sum(output*cotangent)",
+            "direction_cotangent_generator_seed": SEED,
+            "direction_then_cotangent_same_generator": True,
+            "direction_participates_in_gru_gate": False,
+            "gru_finite_difference": False,
+        },
         "transformer_capacity": KV_CAPACITY,
         "expected_state_bytes": EXPECTED_STATE_BYTES,
         "preallocated_semantics": {
@@ -464,6 +499,8 @@ def resolved_plan(source_commit: str, identity: dict[str, Any] | None = None) ->
         "qualified_prior_evidence": {
             "functional_aggregate": copy.deepcopy(FUNCTIONAL_AGGREGATE),
             "functional_recheck": copy.deepcopy(FUNCTIONAL_RECHECK),
+            "gru_gradient_attribution_result": copy.deepcopy(GRU_ATTRIBUTION_RESULT),
+            "gru_gradient_attribution_gradients": copy.deepcopy(GRU_ATTRIBUTION_GRADIENTS),
         },
         "closed_evidence_excluded": {
             "functional_streaming_controls": True,
@@ -476,6 +513,9 @@ def resolved_plan(source_commit: str, identity: dict[str, Any] | None = None) ->
         "thresholds": {
             "oracle_max_abs": MAX_ORACLE_ABS,
             "transformer_control_max_abs": MAX_TRANSFORMER_CONTROL_ABS,
+            "persistent_manual_output_max_abs": MAX_PERSISTENT_MANUAL_OUTPUT_ABS,
+            "persistent_native_output_max_abs": MAX_PERSISTENT_NATIVE_OUTPUT_ABS,
+            "gru_full_gradient_relative_l2": MAX_GRADIENT_RELATIVE_L2,
             "mamba_t925_end_to_end_p95_ms": 20.0,
             "mamba_state_fraction_of_preallocated_live_kv": 0.10,
             "mamba_preallocated_next_step_ratio": 0.80,
@@ -614,6 +654,255 @@ def directional_gradient_training_scope(name: str, module: nn.Module) -> Iterato
     finally:
         for submodule, training in zip(submodules, training_flags, strict=True):
             submodule.training = training
+
+
+def _manual_layer_norm(
+    value: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    mean = value.mean(dim=-1, keepdim=True)
+    variance = (value - mean).square().mean(dim=-1, keepdim=True)
+    return (value - mean) * torch.rsqrt(variance + eps) * weight + bias
+
+
+def manual_gru_fp64(
+    descriptors: torch.Tensor,
+    state_dict: Mapping[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Independent differentiable CPU FP64 LayerNorm/reset-after GRU equation."""
+
+    if (
+        descriptors.ndim != 3
+        or descriptors.shape[0] != 1
+        or descriptors.shape[1] < 1
+        or descriptors.shape[2] != WIDTH
+    ):
+        raise ValueError("manual GRU expects [1,time,256] with positive time")
+    if descriptors.device.type != "cpu" or not descriptors.is_floating_point():
+        raise ValueError("manual GRU input must be a CPU floating tensor")
+    value = descriptors.to(dtype=torch.float64)
+    if not value.requires_grad:
+        value.requires_grad_(True)
+    input_value = value
+    for layer_index in range(LAYERS):
+        prefix = f"layers.{layer_index}."
+        weight = state_dict[f"{prefix}norm.weight"].to(dtype=torch.float64, device="cpu")
+        bias = state_dict[f"{prefix}norm.bias"].to(dtype=torch.float64, device="cpu")
+        weight_ih = state_dict[f"{prefix}gru.weight_ih_l0"].to(dtype=torch.float64, device="cpu")
+        weight_hh = state_dict[f"{prefix}gru.weight_hh_l0"].to(dtype=torch.float64, device="cpu")
+        bias_ih = state_dict[f"{prefix}gru.bias_ih_l0"].to(dtype=torch.float64, device="cpu")
+        bias_hh = state_dict[f"{prefix}gru.bias_hh_l0"].to(dtype=torch.float64, device="cpu")
+        hidden = torch.zeros(1, WIDTH, dtype=torch.float64)
+        updates = []
+        for frame in value.unbind(dim=1):
+            normalized = _manual_layer_norm(frame, weight, bias, 1e-5)
+            input_gates = F.linear(normalized, weight_ih, bias_ih)
+            hidden_gates = F.linear(hidden, weight_hh, bias_hh)
+            ir, iz, candidate_input = input_gates.chunk(3, dim=-1)
+            hr, hz, candidate_hidden = hidden_gates.chunk(3, dim=-1)
+            reset = torch.sigmoid(ir + hr)
+            update = torch.sigmoid(iz + hz)
+            candidate = torch.tanh(candidate_input + reset * candidate_hidden)
+            hidden = (1.0 - update) * candidate + update * hidden
+            updates.append(hidden)
+        value = value + torch.stack(updates, dim=1)
+    return value, input_value
+
+
+def _relative_l2(candidate: torch.Tensor, reference: torch.Tensor) -> float:
+    first = candidate.detach().cpu().double()
+    second = reference.detach().cpu().double()
+    difference = first - second
+    if not bool(torch.isfinite(difference).all() and torch.isfinite(second).all()):
+        return float("inf")
+    denominator = max(float(torch.linalg.vector_norm(second).item()), 1e-12)
+    return float(torch.linalg.vector_norm(difference).item()) / denominator
+
+
+def evaluate_gru_full_gradient_gates(
+    outputs: Mapping[str, torch.Tensor],
+    gradients: Mapping[str, torch.Tensor],
+    *,
+    modes_restored: bool,
+) -> tuple[dict[str, bool], dict[str, Any]]:
+    paths = {"cuda_persistent", "cuda_native_full", "cpu_fp64_manual"}
+    if set(outputs) != paths or set(gradients) != paths:
+        raise ValueError("GRU full-gradient gate requires exactly three frozen paths")
+    tensors = tuple(outputs.values()) + tuple(gradients.values())
+    finite = all(bool(torch.isfinite(value).all()) for value in tensors)
+    nonzero = all(bool(value.abs().max() > 0) for value in tensors)
+    persistent_manual_output = max_abs(outputs["cuda_persistent"], outputs["cpu_fp64_manual"])
+    persistent_native_output = max_abs(outputs["cuda_persistent"], outputs["cuda_native_full"])
+    persistent_manual_gradient = _relative_l2(
+        gradients["cuda_persistent"], gradients["cpu_fp64_manual"]
+    )
+    persistent_native_gradient = _relative_l2(
+        gradients["cuda_persistent"], gradients["cuda_native_full"]
+    )
+    gates = {
+        "all_outputs_and_gradients_finite": finite,
+        "all_outputs_and_gradients_nonzero": nonzero,
+        "persistent_manual_output_max_abs": (
+            persistent_manual_output <= MAX_PERSISTENT_MANUAL_OUTPUT_ABS
+        ),
+        "persistent_native_output_max_abs": (
+            persistent_native_output <= MAX_PERSISTENT_NATIVE_OUTPUT_ABS
+        ),
+        "persistent_manual_gradient_relative_l2": (
+            persistent_manual_gradient <= MAX_GRADIENT_RELATIVE_L2
+        ),
+        "persistent_native_gradient_relative_l2": (
+            persistent_native_gradient <= MAX_GRADIENT_RELATIVE_L2
+        ),
+        "target_modes_restored_to_eval": modes_restored,
+    }
+    metrics = {
+        "output_max_abs": {
+            "persistent_vs_manual": persistent_manual_output,
+            "persistent_vs_native": persistent_native_output,
+        },
+        "gradient_relative_l2": {
+            "persistent_vs_manual": persistent_manual_gradient,
+            "persistent_vs_native": persistent_native_gradient,
+        },
+        "output_l2_norm": {
+            name: float(torch.linalg.vector_norm(value.detach().cpu().double()).item())
+            for name, value in outputs.items()
+        },
+        "gradient_l2_norm": {
+            name: float(torch.linalg.vector_norm(value.detach().cpu().double()).item())
+            for name, value in gradients.items()
+        },
+    }
+    return gates, metrics
+
+
+def _gru_cuda_input_gradient(
+    module: nn.Module,
+    descriptors: torch.Tensor,
+    cotangent: torch.Tensor,
+    *,
+    persistent: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    value = descriptors.clone()
+    if not value.requires_grad:
+        value.requires_grad_(True)
+    with directional_gradient_training_scope("persistent_gru", module):
+        output = module.persistent_stream(value)[0] if persistent else module(value)
+        gradient = torch.autograd.grad(torch.sum(output * cotangent), value, create_graph=False)[0]
+    return output, gradient
+
+
+def persistent_gru_full_gradient_probe(
+    module: nn.Module,
+    descriptors: torch.Tensor,
+    *,
+    seed: int = SEED,
+) -> dict[str, Any]:
+    """Compare persistent GRU input gradients with native CUDA and manual FP64 paths."""
+
+    if (
+        descriptors.device.type != "cuda"
+        or descriptors.dtype != torch.float32
+        or tuple(descriptors.shape) != (1, GRADIENT_LENGTH, WIDTH)
+    ):
+        raise ValueError("formal GRU full-gradient probe requires CUDA FP32 [1,128,256]")
+    generator = torch.Generator(device=descriptors.device).manual_seed(seed)
+    direction = torch.randn(
+        descriptors.shape,
+        generator=generator,
+        device=descriptors.device,
+        dtype=descriptors.dtype,
+    )
+    direction = direction / direction.norm().clamp_min(torch.finfo(descriptors.dtype).eps)
+    cotangent = torch.randn(
+        descriptors.shape,
+        generator=generator,
+        device=descriptors.device,
+        dtype=descriptors.dtype,
+    )
+    cotangent = cotangent / cotangent.norm().clamp_min(torch.finfo(descriptors.dtype).eps)
+
+    state = {
+        name: value.detach().cpu().float().clone() for name, value in module.state_dict().items()
+    }
+    native = build_condition("persistent_gru", seed=SEED).eval().to(descriptors.device)
+    native.load_state_dict(state, strict=True)
+    if state_dict_sha256(module) != state_dict_sha256(native):
+        raise RuntimeError("persistent and native GRU weights differ")
+
+    persistent_output, persistent_gradient = _gru_cuda_input_gradient(
+        module,
+        descriptors,
+        cotangent,
+        persistent=True,
+    )
+    native_output, native_gradient = _gru_cuda_input_gradient(
+        native,
+        descriptors,
+        cotangent,
+        persistent=False,
+    )
+    manual_output, manual_input = manual_gru_fp64(
+        descriptors.to(device="cpu", dtype=torch.float64),
+        state,
+    )
+    manual_gradient = torch.autograd.grad(
+        torch.sum(manual_output * cotangent.to(device="cpu", dtype=torch.float64)),
+        manual_input,
+        create_graph=False,
+    )[0]
+    outputs = {
+        "cuda_persistent": persistent_output,
+        "cuda_native_full": native_output,
+        "cpu_fp64_manual": manual_output,
+    }
+    gradients = {
+        "cuda_persistent": persistent_gradient,
+        "cuda_native_full": native_gradient,
+        "cpu_fp64_manual": manual_gradient,
+    }
+    modes_restored = all(not item.training for item in module.modules()) and all(
+        not item.training for item in native.modules()
+    )
+    gates, metrics = evaluate_gru_full_gradient_gates(
+        outputs,
+        gradients,
+        modes_restored=modes_restored,
+    )
+    return {
+        "kind": "three_path_full_input_gradient",
+        "length": int(descriptors.shape[1]),
+        "objective": "sum(output*cotangent)",
+        "rng": {
+            "seed": seed,
+            "generation_order": ["direction", "cotangent"],
+            "normalization": "global_l2_each",
+            "direction_sha256": tensor_sha256(direction),
+            "cotangent_sha256": tensor_sha256(cotangent),
+            "direction_participates_in_gate": False,
+        },
+        "paths": {
+            name: {
+                "output_sha256": tensor_sha256(outputs[name]),
+                "gradient_sha256": tensor_sha256(gradients[name]),
+                "output_dtype": str(outputs[name].dtype),
+                "gradient_dtype": str(gradients[name].dtype),
+            }
+            for name in outputs
+        },
+        "thresholds": {
+            "persistent_manual_output_max_abs": MAX_PERSISTENT_MANUAL_OUTPUT_ABS,
+            "persistent_native_output_max_abs": MAX_PERSISTENT_NATIVE_OUTPUT_ABS,
+            "gradient_relative_l2": MAX_GRADIENT_RELATIVE_L2,
+        },
+        "finite_difference": False,
+        "metrics": metrics,
+        "gates": gates,
+        "passed": all(gates.values()),
+    }
 
 
 def directional_gradient_probe(
@@ -881,14 +1170,16 @@ def correctness_probe_from_descriptors(
         }
         by_length[str(length)] = condition_results
     gradient_prefix = descriptors[:, :GRADIENT_LENGTH]
-    gradient_probe = {
+    directional_probe = {
         name: directional_gradient_probe(name, modules[name], gradient_prefix, seed=SEED)
         for name in (
             "functional_mamba",
-            "persistent_gru",
             "transformer_functional_cat",
         )
     }
+    gru_full_gradient = persistent_gru_full_gradient_probe(
+        modules["persistent_gru"], gradient_prefix, seed=SEED
+    )
     return {
         "lengths": by_length,
         "transformer_state_dict_sha256": transformer_hashes,
@@ -900,7 +1191,10 @@ def correctness_probe_from_descriptors(
         ),
         "preallocated_capacity_bytes": preallocated_capacity_expected_bytes(),
         "condition_identity": condition_identity,
-        "gradient_probe": gradient_probe,
+        "gradient_probe": {
+            "directional": directional_probe,
+            "persistent_gru_full_input_gradient": gru_full_gradient,
+        },
     }
 
 
@@ -951,15 +1245,50 @@ def evaluate_correctness(correctness: dict[str, Any], execution: dict[str, Any])
         is True,
         "preallocated_capacity_bytes_exact": correctness.get("preallocated_capacity_bytes")
         == 3_788_800,
-        "t128_directional_jvp_gradcheck": set(correctness.get("gradient_probe", {}))
+        "t128_directional_jvp_gradcheck": set(
+            correctness.get("gradient_probe", {}).get("directional", {})
+        )
         == {
             "functional_mamba",
-            "persistent_gru",
             "transformer_functional_cat",
         }
         and all(
             item.get("length") == GRADIENT_LENGTH and item.get("passed") is True
-            for item in correctness.get("gradient_probe", {}).values()
+            for item in correctness.get("gradient_probe", {}).get("directional", {}).values()
+        ),
+        "t128_persistent_gru_full_input_gradient": (
+            correctness.get("gradient_probe", {})
+            .get("persistent_gru_full_input_gradient", {})
+            .get("kind")
+            == "three_path_full_input_gradient"
+            and correctness.get("gradient_probe", {})
+            .get("persistent_gru_full_input_gradient", {})
+            .get("length")
+            == GRADIENT_LENGTH
+            and correctness.get("gradient_probe", {})
+            .get("persistent_gru_full_input_gradient", {})
+            .get("finite_difference")
+            is False
+            and correctness.get("gradient_probe", {})
+            .get("persistent_gru_full_input_gradient", {})
+            .get("passed")
+            is True
+            and all(
+                correctness.get("gradient_probe", {})
+                .get("persistent_gru_full_input_gradient", {})
+                .get("gates", {})
+                .get(name)
+                is True
+                for name in (
+                    "all_outputs_and_gradients_finite",
+                    "all_outputs_and_gradients_nonzero",
+                    "persistent_manual_output_max_abs",
+                    "persistent_native_output_max_abs",
+                    "persistent_manual_gradient_relative_l2",
+                    "persistent_native_gradient_relative_l2",
+                    "target_modes_restored_to_eval",
+                )
+            )
         ),
         "native_vla_modules_absent": not execution.get("native_vla_modules", {}).get("before")
         and not execution.get("native_vla_modules", {}).get("after"),
@@ -2063,7 +2392,14 @@ def prepare_plan(path: Path) -> dict[str, Any]:
         ["git", "-C", str(REPO), "rev-parse", "HEAD"], text=True
     ).strip()
     verify_source(commit)
-    return _write_new_json(path, resolved_plan(commit))
+    attribution_evidence = verify_gru_attribution_evidence()
+    plan = resolved_plan(commit)
+    if any(
+        plan["qualified_prior_evidence"].get(name) != identity
+        for name, identity in attribution_evidence.items()
+    ):
+        raise ValueError("qualified GRU attribution evidence binding changed")
+    return _write_new_json(path, plan)
 
 
 def verify_plan(path: Path, expected_sha256: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -2088,6 +2424,12 @@ def verify_plan(path: Path, expected_sha256: str) -> tuple[dict[str, Any], dict[
     expected_plan = json.loads(json.dumps(resolved_plan(commit), sort_keys=True))
     if plan != expected_plan:
         raise ValueError("resolved plan contract changed")
+    attribution_evidence = verify_gru_attribution_evidence()
+    if any(
+        plan.get("qualified_prior_evidence", {}).get(name) != identity
+        for name, identity in attribution_evidence.items()
+    ):
+        raise ValueError("qualified GRU attribution evidence identity changed")
     return plan, identity
 
 
@@ -2164,12 +2506,24 @@ def _verify_material(spec: dict[str, Any], *, label: str) -> dict[str, Any]:
     return copy.deepcopy(spec)
 
 
+def verify_gru_attribution_evidence() -> dict[str, Any]:
+    return {
+        "gru_gradient_attribution_result": _verify_material(
+            GRU_ATTRIBUTION_RESULT, label="GRU gradient attribution result"
+        ),
+        "gru_gradient_attribution_gradients": _verify_material(
+            GRU_ATTRIBUTION_GRADIENTS, label="GRU gradient attribution gradients"
+        ),
+    }
+
+
 def verify_qualified_prior_evidence() -> dict[str, Any]:
     return {
         "functional_aggregate": _verify_material(
             FUNCTIONAL_AGGREGATE, label="functional aggregate"
         ),
         "functional_recheck": _verify_material(FUNCTIONAL_RECHECK, label="functional recheck"),
+        **verify_gru_attribution_evidence(),
     }
 
 
