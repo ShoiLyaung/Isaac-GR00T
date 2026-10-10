@@ -65,13 +65,13 @@ from torch.nn import functional as F
 
 
 REPO = Path(__file__).resolve().parents[2]
-EXPERIMENT = "g1-arena-online-state-scaling-r4"
-BASE_SOURCE_COMMIT = "5283d67477cff96139d6ae2dc6b8202d36c1618c"
-ARTIFACT_ROOT = Path("/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r4")
-PLAN_PATH = ARTIFACT_ROOT / "plan-r4/PLAN.json"
-CORRECTNESS_RUN_ID = "correctness-gpu0-r4"
-COST_RUN_IDS = {label: f"cost-gpu0-r4{label.lower()}" for label in "ABCDE"}
-AGGREGATE_RUN_ID = "aggregate-r4"
+EXPERIMENT = "g1-arena-online-state-scaling-r5"
+BASE_SOURCE_COMMIT = "7c49314cd855dbf9db1dd2505d8b98b741c6cde3"
+ARTIFACT_ROOT = Path("/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r5")
+PLAN_PATH = ARTIFACT_ROOT / "plan-r5/PLAN.json"
+CORRECTNESS_RUN_ID = "correctness-gpu0-r5"
+COST_RUN_IDS = {label: f"cost-gpu0-r5{label.lower()}" for label in "ABCDE"}
+AGGREGATE_RUN_ID = "aggregate-r5"
 
 CONDITIONS = (
     "functional_mamba",

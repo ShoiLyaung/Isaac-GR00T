@@ -32,6 +32,21 @@ runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
 
 
+def _function_source_bundle_sha256(names: tuple[str, ...]) -> str:
+    source = EXAMPLE.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(EXAMPLE))
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    lines = source.splitlines(keepends=True)
+    payload = "".join(
+        "".join(lines[functions[name].lineno - 1 : functions[name].end_lineno]) for name in names
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def _decision_cost(
     label: str,
     *,
@@ -168,14 +183,14 @@ class _PreallocatedLifecycleStub(torch.nn.Module):
 
 
 def test_frozen_five_process_orders_lengths_and_incomplete_status() -> None:
-    assert runner.EXPERIMENT == "g1-arena-online-state-scaling-r4"
-    assert runner.BASE_SOURCE_COMMIT == "5283d67477cff96139d6ae2dc6b8202d36c1618c"
+    assert runner.EXPERIMENT == "g1-arena-online-state-scaling-r5"
+    assert runner.BASE_SOURCE_COMMIT == "7c49314cd855dbf9db1dd2505d8b98b741c6cde3"
     assert runner.ARTIFACT_ROOT == Path(
-        "/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r4"
+        "/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r5"
     )
-    assert runner.PLAN_PATH == runner.ARTIFACT_ROOT / "plan-r4/PLAN.json"
-    assert runner.CORRECTNESS_RUN_ID == "correctness-gpu0-r4"
-    assert runner.AGGREGATE_RUN_ID == "aggregate-r4"
+    assert runner.PLAN_PATH == runner.ARTIFACT_ROOT / "plan-r5/PLAN.json"
+    assert runner.CORRECTNESS_RUN_ID == "correctness-gpu0-r5"
+    assert runner.AGGREGATE_RUN_ID == "aggregate-r5"
     assert runner.FUNCTIONAL_AGGREGATE["path"].endswith("aggregate-r2/RESULT.json")
     assert runner.FUNCTIONAL_RECHECK["path"].endswith("aggregate-r2/RESULT_RECHECK.json")
     assert runner.GRU_ATTRIBUTION_RESULT == {
@@ -203,11 +218,11 @@ def test_frozen_five_process_orders_lengths_and_incomplete_status() -> None:
     )
     assert runner.LENGTHS == (128, 256, 512, 925)
     assert runner.COST_RUN_IDS == {
-        "A": "cost-gpu0-r4a",
-        "B": "cost-gpu0-r4b",
-        "C": "cost-gpu0-r4c",
-        "D": "cost-gpu0-r4d",
-        "E": "cost-gpu0-r4e",
+        "A": "cost-gpu0-r5a",
+        "B": "cost-gpu0-r5b",
+        "C": "cost-gpu0-r5c",
+        "D": "cost-gpu0-r5d",
+        "E": "cost-gpu0-r5e",
     }
     for offset, label in enumerate(runner.COST_RUN_IDS):
         assert runner.CONDITION_ORDERS[label] == (
@@ -527,9 +542,68 @@ def test_cpu_transformer_directional_gradient_probe_is_finite_nonzero() -> None:
 
 
 def test_mamba_transformer_directional_probe_source_is_frozen_from_r3() -> None:
-    source = inspect.getsource(runner.directional_gradient_probe).encode()
-    assert hashlib.sha256(source).hexdigest() == (
+    assert _function_source_bundle_sha256(("directional_gradient_probe",)) == (
         "4bd6fe039a671d330f0a05b709ed51ada96cbb3b956cd623f86c907355d2dee0"
+    )
+
+
+def test_r4_gru_probe_manual_oracle_and_cost_sources_are_frozen() -> None:
+    assert _function_source_bundle_sha256(("manual_gru_fp64",)) == (
+        "f142af9f557d5d4c70d0bdb5fa62ac2c276c1c97e93a45f13188bf9ed0984a9d"
+    )
+    assert _function_source_bundle_sha256(("persistent_gru_full_gradient_probe",)) == (
+        "2d9420909146d161cde784dee57438bfc407330b5cece6791ec9841e2f9f8cbd"
+    )
+    gru_program = (
+        "directional_gradient_training_scope",
+        "_manual_layer_norm",
+        "manual_gru_fp64",
+        "_relative_l2",
+        "evaluate_gru_full_gradient_gates",
+        "_gru_cuda_input_gradient",
+        "persistent_gru_full_gradient_probe",
+    )
+    assert _function_source_bundle_sha256(gru_program) == (
+        "f87a483f82eccc594dcb7570dee21d574c05df3f73c601dc0c434ea7e7b9a58e"
+    )
+    cost_and_aggregate_program = (
+        "percentile",
+        "_latency_summary",
+        "_measurement_source",
+        "_descriptor_for_step",
+        "_untimed_prefix",
+        "_timed_prefix_frames",
+        "_rollback_preallocated_step",
+        "_is_cuda_kernel_event",
+        "_warm_next_step_branch",
+        "_timed_next_step_branch",
+        "measure_prefilled_next_step",
+        "benchmark_scope_length",
+        "_nvidia_smi_csv",
+        "gpu_telemetry",
+        "expected_execution_order",
+        "execute_cost_measurements",
+        "_finite_vector",
+        "_finite_matrix",
+        "_same_number",
+        "_memory_arithmetic_valid",
+        "_next_step_memory_lifecycle_valid",
+        "_latency_payload_valid",
+        "_prefill_expected_bytes",
+        "_next_step_payload_valid",
+        "_telemetry_point_valid",
+        "_measurement_payload_valid",
+        "evaluate_cost_result",
+        "_measurement",
+        "_safe_ratio",
+        "aggregate_decision_metrics",
+        "evaluate_aggregate_result",
+        "_cost_chain_valid",
+        "execute_cost_run",
+        "execute_aggregate_run",
+    )
+    assert _function_source_bundle_sha256(cost_and_aggregate_program) == (
+        "e7111b91b1e06b3c0f130dd60391a185984faac1a9b553f7faed6f6ebaffde3a"
     )
 
 
@@ -728,6 +802,10 @@ def test_gru_full_gradient_gate_recomputes_positive_and_negative_cases() -> None
     reason="explicit opt-in CUDA T128 GRU three-path full-gradient probe",
 )
 def test_cuda_persistent_gru_t128_full_gradient_probe_and_mode_contract() -> None:
+    runtime = runner.verify_environment()
+    assert runtime["matmul_tf32"] is False
+    assert runtime["cudnn_tf32"] is False
+
     device = torch.device("cuda", 0)
     module = runner.build_condition("persistent_gru").eval().to(device)
     descriptors = torch.randn(
@@ -764,6 +842,15 @@ def test_cuda_persistent_gru_t128_full_gradient_probe_and_mode_contract() -> Non
     assert all(result["gates"].values())
     assert result["passed"], result
     assert all(not child.training for child in module.modules())
+
+
+def test_cuda_preflight_source_orders_formal_runtime_before_frozen_probe() -> None:
+    source = inspect.getsource(test_cuda_persistent_gru_t128_full_gradient_probe_and_mode_contract)
+    verify_offset = source.index("runner.verify_environment()")
+    probe_offset = source.index("runner.persistent_gru_full_gradient_probe")
+    assert verify_offset < probe_offset
+    assert 'runtime["matmul_tf32"] is False' in source
+    assert 'runtime["cudnn_tf32"] is False' in source
 
 
 def test_latency_raw_and_memory_arithmetic_recompute_and_fail_closed() -> None:
@@ -993,7 +1080,7 @@ def test_attribution_binding_is_rechecked_for_prepare_verify_and_formal(
     monkeypatch.setattr(runner, "GRU_ATTRIBUTION_GRADIENTS", gradients)
 
     artifact_root = tmp_path / "artifact"
-    plan_path = artifact_root / "plan-r4/PLAN.json"
+    plan_path = artifact_root / "plan-r5/PLAN.json"
     monkeypatch.setattr(runner, "ARTIFACT_ROOT", artifact_root)
     monkeypatch.setattr(runner, "PLAN_PATH", plan_path)
     commit = "1" * 40
@@ -1021,7 +1108,7 @@ def test_resolved_plan_write_read_verify_roundtrip_preserves_json_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     artifact_root = tmp_path / "artifact"
-    plan_path = artifact_root / "plan-r4/PLAN.json"
+    plan_path = artifact_root / "plan-r5/PLAN.json"
     monkeypatch.setattr(runner, "ARTIFACT_ROOT", artifact_root)
     monkeypatch.setattr(runner, "PLAN_PATH", plan_path)
     commit = "1" * 40
