@@ -165,14 +165,14 @@ class _PreallocatedLifecycleStub(torch.nn.Module):
 
 
 def test_frozen_five_process_orders_lengths_and_incomplete_status() -> None:
-    assert runner.EXPERIMENT == "g1-arena-online-state-scaling-r2"
-    assert runner.BASE_SOURCE_COMMIT == "3c031d63922ff6fdd2d9a2eeb54c5dc991e407ff"
+    assert runner.EXPERIMENT == "g1-arena-online-state-scaling-r3"
+    assert runner.BASE_SOURCE_COMMIT == "748404e7749af1f7cca465fb74374f5ca0640235"
     assert runner.ARTIFACT_ROOT == Path(
-        "/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r2"
+        "/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r3"
     )
-    assert runner.PLAN_PATH == runner.ARTIFACT_ROOT / "plan-r2/PLAN.json"
-    assert runner.CORRECTNESS_RUN_ID == "correctness-gpu0-r2"
-    assert runner.AGGREGATE_RUN_ID == "aggregate-r2"
+    assert runner.PLAN_PATH == runner.ARTIFACT_ROOT / "plan-r3/PLAN.json"
+    assert runner.CORRECTNESS_RUN_ID == "correctness-gpu0-r3"
+    assert runner.AGGREGATE_RUN_ID == "aggregate-r3"
     assert runner.FUNCTIONAL_AGGREGATE["path"].endswith("aggregate-r2/RESULT.json")
     assert runner.FUNCTIONAL_RECHECK["path"].endswith("aggregate-r2/RESULT_RECHECK.json")
     assert runner.CONDITIONS == (
@@ -184,11 +184,11 @@ def test_frozen_five_process_orders_lengths_and_incomplete_status() -> None:
     )
     assert runner.LENGTHS == (128, 256, 512, 925)
     assert runner.COST_RUN_IDS == {
-        "A": "cost-gpu0-r2a",
-        "B": "cost-gpu0-r2b",
-        "C": "cost-gpu0-r2c",
-        "D": "cost-gpu0-r2d",
-        "E": "cost-gpu0-r2e",
+        "A": "cost-gpu0-r3a",
+        "B": "cost-gpu0-r3b",
+        "C": "cost-gpu0-r3c",
+        "D": "cost-gpu0-r3d",
+        "E": "cost-gpu0-r3e",
     }
     for offset, label in enumerate(runner.COST_RUN_IDS):
         assert runner.CONDITION_ORDERS[label] == (
@@ -463,6 +463,113 @@ def test_cpu_directional_gradient_probe_is_finite_nonzero(condition: str) -> Non
     assert result["passed"], result
 
 
+def test_persistent_gru_probe_uses_one_training_scope_and_restores_eval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = runner.build_condition("persistent_gru").eval()
+    descriptors = torch.randn(1, 4, 256, generator=torch.Generator().manual_seed(31))
+    original = runner.differentiable_stream
+    observed_flags: list[tuple[bool, ...]] = []
+
+    def recording_stream(name: str, target: torch.nn.Module, value: torch.Tensor) -> torch.Tensor:
+        observed_flags.append(tuple(child.training for child in target.modules()))
+        return original(name, target, value)
+
+    monkeypatch.setattr(runner, "differentiable_stream", recording_stream)
+    result = runner.directional_gradient_probe("persistent_gru", module, descriptors)
+
+    assert result["passed"], result
+    assert len(observed_flags) == 3
+    assert all(flags and all(flags) for flags in observed_flags)
+    assert all(not child.training for child in module.modules())
+
+
+def test_persistent_gru_probe_restores_exact_modes_after_forced_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = runner.build_condition("persistent_gru").eval()
+    descriptors = torch.randn(1, 4, 256, generator=torch.Generator().manual_seed(37))
+
+    def forced_failure(name: str, target: torch.nn.Module, value: torch.Tensor) -> torch.Tensor:
+        del name, value
+        assert all(child.training for child in target.modules())
+        raise RuntimeError("forced differentiable stream failure")
+
+    monkeypatch.setattr(runner, "differentiable_stream", forced_failure)
+    with pytest.raises(RuntimeError, match="forced differentiable stream failure"):
+        runner.directional_gradient_probe("persistent_gru", module, descriptors)
+    assert all(not child.training for child in module.modules())
+
+
+def test_non_gru_probe_does_not_change_module_modes(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = runner.build_condition("transformer_functional_cat").eval()
+    descriptors = torch.randn(1, 4, 256, generator=torch.Generator().manual_seed(41))
+    original = runner.differentiable_stream
+    observed_flags: list[tuple[bool, ...]] = []
+
+    def recording_stream(name: str, target: torch.nn.Module, value: torch.Tensor) -> torch.Tensor:
+        observed_flags.append(tuple(child.training for child in target.modules()))
+        return original(name, target, value)
+
+    monkeypatch.setattr(runner, "differentiable_stream", recording_stream)
+    result = runner.directional_gradient_probe("transformer_functional_cat", module, descriptors)
+
+    assert result["passed"], result
+    assert len(observed_flags) == 3
+    assert all(not any(flags) for flags in observed_flags)
+    assert all(not child.training for child in module.modules())
+
+
+@pytest.mark.parametrize("fault", ["entry_training", "count", "layers", "dropout"])
+def test_persistent_gru_probe_structure_is_fail_closed(fault: str) -> None:
+    module = runner.build_condition("persistent_gru").eval()
+    if fault == "entry_training":
+        next(child for child in module.modules() if isinstance(child, torch.nn.GRU)).train()
+    elif fault == "count":
+        module.layers[1].gru = torch.nn.Identity()
+    elif fault == "layers":
+        module.layers[0].gru.num_layers = 2
+    elif fault == "dropout":
+        module.layers[0].gru.dropout = 0.1
+    else:  # pragma: no cover - parametrization is frozen above
+        raise AssertionError(f"unknown test fault: {fault}")
+
+    descriptors = torch.randn(1, 4, 256, generator=torch.Generator().manual_seed(43))
+    with pytest.raises(ValueError, match="persistent GRU gradient probe requires"):
+        runner.directional_gradient_probe("persistent_gru", module, descriptors)
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(
+    os.environ.get("RUN_ONLINE_SCALING_GRU_CUDA_TEST") != "1" or not torch.cuda.is_available(),
+    reason="explicit opt-in CUDA T128 GRU directional probe",
+)
+def test_cuda_persistent_gru_t128_directional_probe_and_mode_contract() -> None:
+    device = torch.device("cuda", 0)
+    module = runner.build_condition("persistent_gru").eval().to(device)
+    descriptors = torch.randn(
+        1,
+        runner.GRADIENT_LENGTH,
+        256,
+        device=device,
+        generator=torch.Generator(device=device).manual_seed(47),
+    )
+
+    with torch.no_grad():
+        eval_output = runner.differentiable_stream("persistent_gru", module, descriptors)
+        module.train(True)
+        train_output = runner.differentiable_stream("persistent_gru", module, descriptors)
+        module.eval()
+    assert runner.max_abs(eval_output, train_output) <= 1e-6
+
+    result = runner.directional_gradient_probe("persistent_gru", module, descriptors)
+    assert result["gradient_finite"]
+    assert result["gradient_nonzero"]
+    assert result["relative_error"] <= 0.05
+    assert result["passed"], result
+    assert all(not child.training for child in module.modules())
+
+
 def test_latency_raw_and_memory_arithmetic_recompute_and_fail_closed() -> None:
     host = [[float(frame + sample + 1) for frame in range(4)] for sample in range(100)]
     cuda = [[value / 2 for value in row] for row in host]
@@ -668,7 +775,7 @@ def test_resolved_plan_write_read_verify_roundtrip_preserves_json_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     artifact_root = tmp_path / "artifact"
-    plan_path = artifact_root / "plan-r2/PLAN.json"
+    plan_path = artifact_root / "plan-r3/PLAN.json"
     monkeypatch.setattr(runner, "ARTIFACT_ROOT", artifact_root)
     monkeypatch.setattr(runner, "PLAN_PATH", plan_path)
     commit = "1" * 40

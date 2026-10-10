@@ -64,13 +64,13 @@ from torch import nn
 
 
 REPO = Path(__file__).resolve().parents[2]
-EXPERIMENT = "g1-arena-online-state-scaling-r2"
-BASE_SOURCE_COMMIT = "3c031d63922ff6fdd2d9a2eeb54c5dc991e407ff"
-ARTIFACT_ROOT = Path("/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r2")
-PLAN_PATH = ARTIFACT_ROOT / "plan-r2/PLAN.json"
-CORRECTNESS_RUN_ID = "correctness-gpu0-r2"
-COST_RUN_IDS = {label: f"cost-gpu0-r2{label.lower()}" for label in "ABCDE"}
-AGGREGATE_RUN_ID = "aggregate-r2"
+EXPERIMENT = "g1-arena-online-state-scaling-r3"
+BASE_SOURCE_COMMIT = "748404e7749af1f7cca465fb74374f5ca0640235"
+ARTIFACT_ROOT = Path("/home/sl/research/icra27-artifacts/g1-arena-online-state-scaling-r3")
+PLAN_PATH = ARTIFACT_ROOT / "plan-r3/PLAN.json"
+CORRECTNESS_RUN_ID = "correctness-gpu0-r3"
+COST_RUN_IDS = {label: f"cost-gpu0-r3{label.lower()}" for label in "ABCDE"}
+AGGREGATE_RUN_ID = "aggregate-r3"
 
 CONDITIONS = (
     "functional_mamba",
@@ -588,6 +588,34 @@ def differentiable_stream(name: str, module: nn.Module, descriptors: torch.Tenso
     raise ValueError(f"condition has no differentiable online path: {name}")
 
 
+@contextmanager
+def directional_gradient_training_scope(name: str, module: nn.Module) -> Iterator[None]:
+    """Temporarily enable the frozen two-GRU probe path for cuDNN backward."""
+
+    if name != "persistent_gru":
+        yield
+        return
+
+    submodules = tuple(module.modules())
+    training_flags = tuple(submodule.training for submodule in submodules)
+    if any(training_flags):
+        raise ValueError("persistent GRU gradient probe requires an all-eval module tree")
+    grus = tuple(submodule for submodule in submodules if isinstance(submodule, nn.GRU))
+    if len(grus) != 2:
+        raise ValueError("persistent GRU gradient probe requires exactly two nn.GRU modules")
+    if any(gru.num_layers != 1 or float(gru.dropout) != 0.0 for gru in grus):
+        raise ValueError(
+            "persistent GRU gradient probe requires one-layer nn.GRU modules with zero dropout"
+        )
+
+    try:
+        module.train(True)
+        yield
+    finally:
+        for submodule, training in zip(submodules, training_flags, strict=True):
+            submodule.training = training
+
+
 def directional_gradient_probe(
     name: str,
     module: nn.Module,
@@ -625,15 +653,16 @@ def directional_gradient_probe(
     )
     cotangent = cotangent / cotangent.norm().clamp_min(torch.finfo(descriptors.dtype).eps)
 
-    value = descriptors.detach().clone().requires_grad_(True)
-    output = differentiable_stream(name, module, value)
-    scalar = torch.sum(output * cotangent)
-    gradient = torch.autograd.grad(scalar, value, create_graph=False)[0]
-    reverse_directional = torch.sum(gradient * direction)
-    with torch.no_grad():
-        plus = differentiable_stream(name, module, descriptors + epsilon * direction)
-        minus = differentiable_stream(name, module, descriptors - epsilon * direction)
-        finite_difference = torch.sum(((plus - minus) / (2.0 * epsilon)) * cotangent)
+    with directional_gradient_training_scope(name, module):
+        value = descriptors.detach().clone().requires_grad_(True)
+        output = differentiable_stream(name, module, value)
+        scalar = torch.sum(output * cotangent)
+        gradient = torch.autograd.grad(scalar, value, create_graph=False)[0]
+        reverse_directional = torch.sum(gradient * direction)
+        with torch.no_grad():
+            plus = differentiable_stream(name, module, descriptors + epsilon * direction)
+            minus = differentiable_stream(name, module, descriptors - epsilon * direction)
+            finite_difference = torch.sum(((plus - minus) / (2.0 * epsilon)) * cotangent)
     absolute_error = torch.abs(reverse_directional - finite_difference)
     scale = torch.maximum(
         torch.maximum(torch.abs(reverse_directional), torch.abs(finite_difference)),
