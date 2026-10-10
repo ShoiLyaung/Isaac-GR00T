@@ -123,8 +123,7 @@ def test_mutable_alias_and_capacity_fail_closed() -> None:
 
     broken = state.clone()
     broken.layers[0][0][:, :, 4].zero_()
-    with torch.inference_mode(), pytest.raises(ValueError, match="unwritten capacity"):
-        module.preallocated_step(torch.randn(1, WIDTH), broken)
+    assert not broken.unwritten_is_sentinel()
 
     full = state.clone()
     full.live_index = KV_CAPACITY
@@ -145,6 +144,27 @@ def test_inference_only_and_forbidden_noncontrol_endpoints() -> None:
         module.streaming_stream(torch.randn(1, 2, WIDTH))
     with pytest.raises(RuntimeError, match="not the preallocated control"):
         module.streaming_step(torch.randn(1, WIDTH), copy.deepcopy(object()))
+
+
+def test_single_preallocated_step_does_not_scan_full_sentinel_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, module = _models()
+    state = module.new_preallocated_state(1)
+
+    def forbidden_full_tail_scan(self: PreallocatedKVState) -> bool:
+        del self
+        raise AssertionError("full sentinel scan entered timed transition")
+
+    monkeypatch.setattr(
+        PreallocatedKVState,
+        "unwritten_is_sentinel",
+        forbidden_full_tail_scan,
+    )
+    with torch.inference_mode():
+        output, returned = module.preallocated_step(torch.randn(1, WIDTH), state)
+    assert output.shape == (1, WIDTH)
+    assert returned is state
 
 
 def test_clone_has_independent_storage_and_live_prefix_equality() -> None:

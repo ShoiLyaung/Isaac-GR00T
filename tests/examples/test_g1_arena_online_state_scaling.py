@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib
 import importlib.util
 import json
@@ -22,6 +23,83 @@ SPEC = importlib.util.spec_from_file_location("online_state_scaling_runner", EXA
 assert SPEC is not None and SPEC.loader is not None
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
+
+
+def _decision_cost(
+    label: str,
+    *,
+    end_to_end_p95: float = 19.999,
+    state_ratio: float = 0.10,
+    next_ratio: float = 0.80,
+    prefix_ratio: float = 0.80,
+    length_ratio: float = 1.15,
+    allocator_ratio: float = 0.50,
+) -> dict[str, object]:
+    preallocated_live = 3_788_800
+    mamba_next_128 = 1.0
+    mamba_next_925 = mamba_next_128 * length_ratio
+    preallocated_next = mamba_next_925 / next_ratio
+    preallocated_prefix = 100.0
+    cat_delta = 1000
+    return {
+        "label": label,
+        "cost": {
+            "measurements": {
+                "functional_mamba": {
+                    "128": {"temporal_only": {"next_step": {"host_p95_ms": mamba_next_128}}},
+                    "925": {
+                        "end_to_end": {
+                            "latency": {"per_frame_flat": {"host_p95_ms": end_to_end_p95}}
+                        },
+                        "temporal_only": {
+                            "logical_state_bytes": preallocated_live * state_ratio,
+                            "next_step": {"host_p95_ms": mamba_next_925},
+                            "latency": {
+                                "complete_prefix_cumulative": {
+                                    "host_p95_ms": preallocated_prefix * prefix_ratio
+                                }
+                            },
+                        },
+                    },
+                },
+                "transformer_preallocated": {
+                    "925": {
+                        "temporal_only": {
+                            "logical_state_bytes": preallocated_live,
+                            "next_step": {"host_p95_ms": preallocated_next},
+                            "latency": {
+                                "complete_prefix_cumulative": {"host_p95_ms": preallocated_prefix}
+                            },
+                            "memory": {"delta_peak_allocated_bytes": cat_delta * allocator_ratio},
+                        }
+                    }
+                },
+                "transformer_functional_cat": {
+                    "925": {"temporal_only": {"memory": {"delta_peak_allocated_bytes": cat_delta}}}
+                },
+            }
+        },
+    }
+
+
+def _valid_telemetry() -> dict[str, object]:
+    return {
+        "gpu": {
+            "physical_index": "0",
+            "uuid": "GPU-unit",
+            "name": runner.FROZEN_RUNTIME["gpu_name"],
+            "driver_version": "999.0",
+            "utilization_percent": "0",
+            "sm_clock_mhz": "2100",
+            "temperature_c": "40",
+            "memory_used_mib": "10",
+            "memory_total_mib": "49140",
+        },
+        "process_pid": 123,
+        "process_ppid": 1,
+        "gpu0_compute_processes": [],
+        "gpu0_other_compute_processes": [],
+    }
 
 
 class _CPUFunctionalMambaStub(torch.nn.Module):
@@ -77,13 +155,14 @@ def test_frozen_five_process_orders_lengths_and_incomplete_status() -> None:
         )
     assert runner.WARMUP_SAMPLES == 20
     assert runner.MEASURED_SAMPLES == 100
+    assert set(runner.PROCESS_SEEDS.values()) == {230923}
     assert runner.IMPLEMENTATION_STATUS == {
         "preallocated_control": True,
         "independent_correctness": True,
         "cost_cli_contract": True,
-        "cost_measurement": False,
-        "aggregate_decision": False,
-        "formal_gpu_run_allowed": False,
+        "cost_measurement": True,
+        "aggregate_decision": True,
+        "formal_gpu_run_allowed": True,
     }
 
 
@@ -198,12 +277,14 @@ def test_recurrence_invariants_enforce_reset_return_and_replay_contract(
 def test_plan_and_dry_run_are_explicitly_nonformal_and_cost_fail_closed() -> None:
     payload = runner.dry_run_payload()
     assert payload["status"] == "dry_run_only"
-    assert payload["formal_execution_permitted"] is False
+    assert payload["formal_execution_permitted_after_committed_plan"] is True
     assert payload["result_schema"] == {
-        "status": "engineering_incomplete",
+        "status": "ready_not_run",
         "correctness_not_run": True,
-        "cost_not_implemented": True,
-        "aggregate_not_implemented": True,
+        "cost_not_run": True,
+        "cost_not_implemented": False,
+        "aggregate_not_run": True,
+        "aggregate_not_implemented": False,
         "training_allowed": False,
         "vla_model_instantiated": False,
         "optimizer_steps": 0,
@@ -213,7 +294,7 @@ def test_plan_and_dry_run_are_explicitly_nonformal_and_cost_fail_closed() -> Non
         "functional_streaming_controls": True,
         "transformer_parity_diagnosis": True,
     }
-    assert payload["plan"]["implementation_status"]["cost_measurement"] is False
+    assert payload["plan"]["implementation_status"]["cost_measurement"] is True
 
 
 def test_correctness_gates_fail_closed_before_gradient_and_full_lengths() -> None:
@@ -242,6 +323,190 @@ def test_cpu_directional_gradient_probe_is_finite_nonzero(condition: str) -> Non
     assert result["passed"], result
 
 
+def test_latency_raw_and_memory_arithmetic_recompute_and_fail_closed() -> None:
+    host = [[float(frame + sample + 1) for frame in range(4)] for sample in range(100)]
+    cuda = [[value / 2 for value in row] for row in host]
+    latency = runner._latency_summary(host, cuda)
+    assert runner._latency_payload_valid(latency, 4)
+    missing_raw = copy.deepcopy(latency)
+    missing_raw["raw"].pop("host_per_frame_ms")
+    assert not runner._latency_payload_valid(missing_raw, 4)
+    changed_summary = copy.deepcopy(latency)
+    changed_summary["last_frame"]["host_p95_ms"] += 1e-3
+    assert not runner._latency_payload_valid(changed_summary, 4)
+
+    memory = {
+        "baseline_allocated_bytes": 100,
+        "baseline_reserved_bytes": 200,
+        "absolute_peak_allocated_bytes": 150,
+        "absolute_peak_reserved_bytes": 260,
+        "delta_peak_allocated_bytes": 50,
+        "delta_peak_reserved_bytes": 60,
+    }
+    assert runner._memory_arithmetic_valid(memory)
+    corrupted = dict(memory, delta_peak_allocated_bytes=49)
+    assert not runner._memory_arithmetic_valid(corrupted)
+
+
+def test_preallocated_next_step_schema_uses_t_minus_one_live_and_fixed_capacity() -> None:
+    host = [1.0] * runner.MEASURED_SAMPLES
+    cuda = [0.5] * runner.MEASURED_SAMPLES
+    memory = {
+        "baseline_allocated_bytes": 100,
+        "baseline_reserved_bytes": 200,
+        "absolute_peak_allocated_bytes": 120,
+        "absolute_peak_reserved_bytes": 240,
+        "delta_peak_allocated_bytes": 20,
+        "delta_peak_reserved_bytes": 40,
+    }
+    length = 925
+    payload = {
+        "prefill_observations": length - 1,
+        "probe_finishes_at_observations": length,
+        "warmup_samples": runner.WARMUP_SAMPLES,
+        "measurements": runner.MEASURED_SAMPLES,
+        "allocator_peak_reset_after_prefill": True,
+        "raw": {"host_samples_ms": host, "cuda_samples_ms": cuda},
+        "host_p50_ms": 1.0,
+        "host_p95_ms": 1.0,
+        "cuda_p50_ms": 0.5,
+        "cuda_p95_ms": 0.5,
+        "logical_state_bytes": runner.transformer_kv_expected_bytes(
+            batch_size=1, observations=length - 1
+        ),
+        "capacity_state_bytes": runner.preallocated_capacity_expected_bytes(),
+        "memory": memory,
+        "profiler": {
+            "runs": 1,
+            "cuda_device_event_count": 10,
+            "cuda_kernel_count": 8,
+            "excluded_memcpy_memset_count": 2,
+            "profiled_state_observations": length,
+        },
+        "outputs_finite": True,
+        "observations_exact": True,
+        "preallocated_state_rolled_back": True,
+    }
+    assert runner._next_step_payload_valid(
+        payload, "transformer_preallocated", length, "temporal_only"
+    )
+    current = copy.deepcopy(payload)
+    current["logical_state_bytes"] = 0
+    current["capacity_state_bytes"] = 0
+    current["profiler"]["cuda_device_event_count"] = 0
+    current["profiler"]["cuda_kernel_count"] = 0
+    current["profiler"]["excluded_memcpy_memset_count"] = 0
+    assert runner._next_step_payload_valid(current, "current_descriptor", length, "temporal_only")
+    payload["logical_state_bytes"] += 4096
+    assert not runner._next_step_payload_valid(
+        payload, "transformer_preallocated", length, "temporal_only"
+    )
+
+
+def test_telemetry_requires_finite_isolated_gpu0_rows() -> None:
+    telemetry = _valid_telemetry()
+    assert runner._telemetry_point_valid(telemetry)
+    busy = copy.deepcopy(telemetry)
+    busy["gpu0_other_compute_processes"] = [
+        {
+            "gpu_uuid": "GPU-unit",
+            "pid": "999",
+            "process_name": "other",
+            "used_gpu_memory_mib": "100",
+        }
+    ]
+    assert not runner._telemetry_point_valid(busy)
+    nonfinite = copy.deepcopy(telemetry)
+    nonfinite["gpu"]["temperature_c"] = "nan"
+    assert not runner._telemetry_point_valid(nonfinite)
+
+
+def test_aggregate_threshold_boundaries_and_four_of_five_rule() -> None:
+    costs = [_decision_cost(label) for label in runner.COST_RUN_IDS]
+    decision = runner.aggregate_decision_metrics(costs)
+    assert decision["online_mamba_engineering_scaling_advantage"]
+    assert all(decision["decision_gates"].values())
+
+    strict_latency = copy.deepcopy(costs)
+    strict_latency[0]["cost"]["measurements"]["functional_mamba"]["925"]["end_to_end"]["latency"][
+        "per_frame_flat"
+    ]["host_p95_ms"] = 20.0
+    assert not runner.aggregate_decision_metrics(strict_latency)["decision_gates"][
+        "all_five_mamba_t925_end_to_end_p95_below_20ms"
+    ]
+
+    four_directional = [
+        _decision_cost(label, next_ratio=0.80 if index < 4 else 1.01)
+        for index, label in enumerate(runner.COST_RUN_IDS)
+    ]
+    assert runner.aggregate_decision_metrics(four_directional)["decision_gates"][
+        "mamba_next_step_at_least_20pct_lower_in_4of5_and_median"
+    ]
+    bad_median = [
+        _decision_cost(label, next_ratio=0.81 if index < 4 else 1.01)
+        for index, label in enumerate(runner.COST_RUN_IDS)
+    ]
+    assert not runner.aggregate_decision_metrics(bad_median)["decision_gates"][
+        "mamba_next_step_at_least_20pct_lower_in_4of5_and_median"
+    ]
+
+
+def test_cost_hash_chain_accepts_exact_files_and_rejects_corruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner, "ARTIFACT_ROOT", tmp_path)
+    identities = []
+    for label in ("A", "B"):
+        path = tmp_path / runner.COST_RUN_IDS[label] / "RESULT.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"label": label}) + "\n", encoding="utf-8")
+        identities.append(
+            {
+                "path": str(path.resolve()),
+                "bytes": path.stat().st_size,
+                "sha256": runner.sha256(path),
+            }
+        )
+    correctness_identity = {
+        "path": str((tmp_path / runner.CORRECTNESS_RUN_ID / "RESULT.json").resolve()),
+        "bytes": 10,
+        "sha256": "c" * 64,
+    }
+    result = {
+        "correctness_predecessor": correctness_identity,
+        "predecessor_chain": identities,
+        "cost_predecessor": identities[-1],
+    }
+    assert runner._cost_chain_valid(result, label="C", correctness_identity=correctness_identity)
+    corrupted = copy.deepcopy(result)
+    corrupted["predecessor_chain"][0]["sha256"] = "0" * 64
+    assert not runner._cost_chain_valid(
+        corrupted, label="C", correctness_identity=correctness_identity
+    )
+
+
+def test_write_once_result_artifact_identity_and_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner, "ARTIFACT_ROOT", tmp_path)
+    result = {
+        "kind": "correctness",
+        "status": "passed",
+        "gates": {"core": True},
+        "cost_allowed": True,
+    }
+    identity = runner.write_result_once("unit", result)
+    stored = json.loads(Path(identity["path"]).read_text(encoding="utf-8"))
+    assert stored["status"] == "passed"
+    assert stored["artifact"]["result_bytes"] == identity["bytes"]
+    assert (
+        stored["artifact"]["root_bytes_before"] + identity["bytes"]
+        == stored["artifact"]["root_bytes_after_write"]
+    )
+    with pytest.raises(FileExistsError):
+        runner.write_result_once("unit", result)
+
+
 def test_cli_dry_run_is_json_and_does_not_materialize_artifact() -> None:
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -258,5 +523,5 @@ def test_cli_dry_run_is_json_and_does_not_materialize_artifact() -> None:
     )
     payload = json.loads(completed.stdout)
     assert payload["status"] == "dry_run_only"
-    assert payload["result_schema"]["cost_not_implemented"]
+    assert payload["result_schema"]["cost_not_implemented"] is False
     assert runner.ARTIFACT_ROOT.exists() is before
