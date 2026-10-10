@@ -21,8 +21,7 @@ import sys
 import time
 from typing import Any, Iterator
 
-import gr00t
-import gr00t.experimental
+import functional_mamba_transition as predecessor_runner
 from gr00t.experimental.arena_codec_streaming_backbone import (
     CODEC_FIELDS,
     GRID_HEIGHT,
@@ -34,11 +33,11 @@ from gr00t.experimental.arena_codec_streaming_backbone import (
     CausalTransformerBackbone,
     trainable_parameter_count,
 )
-import gr00t.experimental.arena_functional_streaming_controls as controls_module
 from gr00t.experimental.arena_functional_mamba_transition import (
     FunctionalMamba2Backbone,
     FunctionalMamba2State,
 )
+import gr00t.experimental.arena_functional_streaming_controls as controls_module
 from gr00t.experimental.arena_functional_streaming_controls import (
     EXPECTED_TEMPORAL_PARAMETERS,
     CurrentDescriptorState,
@@ -59,15 +58,11 @@ import numpy as np
 import torch
 from torch import nn
 
-import functional_mamba_transition as predecessor_runner
-
 
 REPO = Path(__file__).resolve().parents[2]
 EXPERIMENT = "g1-arena-functional-streaming-controls-r1"
 BASE_SOURCE_COMMIT = "2c88d3f781ba545416bd7991fbe372800b812465"
-ARTIFACT_ROOT = Path(
-    "/home/sl/research/icra27-artifacts/g1-arena-functional-streaming-controls-r1"
-)
+ARTIFACT_ROOT = Path("/home/sl/research/icra27-artifacts/g1-arena-functional-streaming-controls-r1")
 PLAN_PATH = ARTIFACT_ROOT / "plan-r1/PLAN.json"
 CORRECTNESS_RUN_ID = "correctness-gpu0-r1"
 COST_RUN_IDS = {
@@ -128,7 +123,8 @@ INPUT_FIELD = predecessor_runner.INPUT_FIELD
 EXPECTED_ARCHIVE_FIELDS = predecessor_runner.EXPECTED_ARCHIVE_FIELDS
 INPUT_SHAPE = predecessor_runner.INPUT_SHAPE
 FROZEN_DEPENDENCY = predecessor_runner.FROZEN_DEPENDENCY
-FROZEN_RUNTIME = predecessor_runner.FROZEN_RUNTIME
+FROZEN_RUNTIME = copy.deepcopy(predecessor_runner.FROZEN_RUNTIME)
+FROZEN_RUNTIME["pythonpath"] = f"{predecessor_runner.OVERLAY_ROOT}:{REPO}"
 
 FUNCTIONAL_AGGREGATE_PATH = (
     Path("/home/sl/research/icra27-artifacts/g1-arena-functional-mamba-transition-r1")
@@ -153,6 +149,7 @@ SOURCE_IDENTITY_PATHS = (
     "gr00t/experimental/arena_codec_streaming_backbone.py",
     "gr00t/experimental/arena_functional_mamba_transition.py",
     "gr00t/experimental/arena_functional_streaming_controls.py",
+    "examples/G1_ARENA_N17/functional_mamba_transition.py",
     "examples/G1_ARENA_N17/functional_streaming_controls.py",
     "tests/gr00t/experimental/test_arena_functional_streaming_controls.py",
     "tests/examples/test_g1_arena_functional_streaming_controls.py",
@@ -407,6 +404,24 @@ def _source_file_identity(path: Path, commit: str) -> dict[str, Any]:
     }
 
 
+def verify_imported_source_paths() -> dict[str, str]:
+    expected = {
+        "predecessor_runner": (
+            REPO / "examples/G1_ARENA_N17/functional_mamba_transition.py"
+        ).resolve(),
+        "controls_module": (
+            REPO / "gr00t/experimental/arena_functional_streaming_controls.py"
+        ).resolve(),
+    }
+    actual = {
+        "predecessor_runner": Path(predecessor_runner.__file__).resolve(),
+        "controls_module": Path(controls_module.__file__).resolve(),
+    }
+    if actual != expected:
+        raise ValueError("imported streaming-control source escaped source root")
+    return {name: str(path) for name, path in actual.items()}
+
+
 def verify_source(expected_commit: str) -> dict[str, Any]:
     commit = subprocess.check_output(
         ["git", "-C", str(REPO), "rev-parse", "HEAD"],
@@ -443,16 +458,17 @@ def verify_source(expected_commit: str) -> dict[str, Any]:
     dirty.update(untracked.splitlines())
     if dirty:
         raise ValueError(f"streaming-control source is dirty: {sorted(dirty)}")
-    expected_module = (
-        REPO / "gr00t/experimental/arena_functional_streaming_controls.py"
-    ).resolve()
-    if Path(controls_module.__file__).resolve() != expected_module:
-        raise ValueError("imported streaming-control module escaped source root")
+    imported_paths = verify_imported_source_paths()
     entries = {
         relative: _source_file_identity(REPO / relative, commit)
         for relative in SOURCE_IDENTITY_PATHS
     }
-    return {"root": str(REPO.resolve()), "commit": commit, "entries": entries}
+    return {
+        "root": str(REPO.resolve()),
+        "commit": commit,
+        "imported_paths": imported_paths,
+        "entries": entries,
+    }
 
 
 def _verify_material(spec: dict[str, Any], expected_path: Path, label: str) -> dict[str, Any]:
@@ -510,7 +526,12 @@ def verify_dependencies() -> dict[str, Any]:
 
 
 def verify_environment() -> dict[str, Any]:
-    return predecessor_runner.verify_environment()
+    predecessor_runtime = predecessor_runner.FROZEN_RUNTIME
+    predecessor_runner.FROZEN_RUNTIME = FROZEN_RUNTIME
+    try:
+        return predecessor_runner.verify_environment()
+    finally:
+        predecessor_runner.FROZEN_RUNTIME = predecessor_runtime
 
 
 def tensor_sha256(value: torch.Tensor) -> str:
@@ -646,10 +667,14 @@ def mamba_official_functional_parity(
         outputs_finite = outputs_finite and bool(
             torch.isfinite(functional_output).all() and torch.isfinite(teacher_output).all()
         )
-        states_finite = states_finite and state_is_finite(next_state) and all(
-            bool(torch.isfinite(tensor).all())
-            for pair in teacher_state.layers
-            for tensor in pair
+        states_finite = (
+            states_finite
+            and state_is_finite(next_state)
+            and all(
+                bool(torch.isfinite(tensor).all())
+                for pair in teacher_state.layers
+                for tensor in pair
+            )
         )
         functional_state = next_state
     return {
@@ -731,9 +756,13 @@ def recurrence_invariants(
 @torch.inference_mode()
 def correctness_probe(codec: np.ndarray) -> dict[str, Any]:
     device = torch.device("cuda", 0)
-    raw = torch.from_numpy(np.array(codec[:CORRECTNESS_LENGTH], copy=True)).unsqueeze(0).to(
-        device=device,
-        dtype=torch.float32,
+    raw = (
+        torch.from_numpy(np.array(codec[:CORRECTNESS_LENGTH], copy=True))
+        .unsqueeze(0)
+        .to(
+            device=device,
+            dtype=torch.float32,
+        )
     )
     tokenizer = ArenaCodecSpatialTokenizer(seed=SEED).eval().to(device=device, dtype=torch.float32)
     descriptors = tokenizer(raw)
@@ -749,8 +778,7 @@ def correctness_probe(codec: np.ndarray) -> dict[str, Any]:
     assert isinstance(transformer, StreamingKVTransformerBackbone)
     transformer_no_new_parameters = (
         transformer.state_dict().keys() == transformer_reference.state_dict().keys()
-        and temporal_hashes["streaming_kv_transformer"]
-        == state_dict_sha256(transformer_reference)
+        and temporal_hashes["streaming_kv_transformer"] == state_dict_sha256(transformer_reference)
         and len(tuple(transformer.parameters())) == len(tuple(transformer_reference.parameters()))
     )
 
@@ -764,10 +792,11 @@ def correctness_probe(codec: np.ndarray) -> dict[str, Any]:
     transformer_full = transformer(descriptors)
     transformer_stream, transformer_state = transformer.streaming_stream(descriptors)
     invariants = {
-        name: recurrence_invariants(name, module, descriptors)
-        for name, module in modules.items()
+        name: recurrence_invariants(name, module, descriptors) for name, module in modules.items()
     }
-    parameter_ids = [id(parameter) for module in modules.values() for parameter in module.parameters()]
+    parameter_ids = [
+        id(parameter) for module in modules.values() for parameter in module.parameters()
+    ]
     torch.cuda.synchronize(device)
     return {
         "tokenizer": {
@@ -796,8 +825,7 @@ def correctness_probe(codec: np.ndarray) -> dict[str, Any]:
         "streaming_kv_transformer": {
             "full_stream_max_abs": max_abs(transformer_full, transformer_stream),
             "output_finite": bool(
-                torch.isfinite(transformer_full).all()
-                and torch.isfinite(transformer_stream).all()
+                torch.isfinite(transformer_full).all() and torch.isfinite(transformer_stream).all()
             ),
             "final_observations": transformer_state.observations,
         },
@@ -900,6 +928,72 @@ def _finalize_artifact_gate(
         result["status"] = "passed" if all(result["gates"].values()) else "gate_failed"
 
 
+def stored_result_evidence_matches(
+    result: dict[str, Any],
+    core_gates: dict[str, bool],
+    result_identity: dict[str, Any],
+) -> bool:
+    wall_gate = "wall_time_at_most_20min"
+    artifact_gate = "artifact_total_at_most_256mib"
+    expected_gate_names = set(core_gates) | {wall_gate, artifact_gate}
+    try:
+        gates = result["gates"]
+        artifact = result["artifact"]
+        result_path = Path(result_identity["path"]).resolve()
+        identity_bytes = int(result_identity["bytes"])
+        wall_seconds = float(result["wall_seconds"])
+        artifact_keys = {
+            "root",
+            "bytes_before_result",
+            "result_bytes",
+            "total_bytes",
+            "limit_bytes",
+            "traces_written",
+        }
+        before_bytes = int(artifact["bytes_before_result"])
+        result_bytes = int(artifact["result_bytes"])
+        total_bytes = int(artifact["total_bytes"])
+        limit_bytes = int(artifact["limit_bytes"])
+        traces_written = int(artifact["traces_written"])
+        actual_sha256 = sha256(result_path)
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+    wall_passes = bool(np.isfinite(wall_seconds)) and 0 <= wall_seconds <= MAX_WALL_SECONDS
+    artifact_passes = total_bytes <= MAX_ARTIFACT_BYTES
+    return (
+        isinstance(gates, dict)
+        and set(gates) == expected_gate_names
+        and all(isinstance(value, bool) for value in gates.values())
+        and all(core_gates.values())
+        and all(gates[name] == value for name, value in core_gates.items())
+        and gates[wall_gate] is wall_passes
+        and gates[artifact_gate] is artifact_passes
+        and all(gates.values())
+        and set(artifact) == artifact_keys
+        and type(result_identity["bytes"]) is int
+        and all(
+            type(artifact[name]) is int
+            for name in (
+                "bytes_before_result",
+                "result_bytes",
+                "total_bytes",
+                "limit_bytes",
+                "traces_written",
+            )
+        )
+        and artifact["root"] == str(ARTIFACT_ROOT.resolve())
+        and result_path.is_file()
+        and result_path.is_relative_to(ARTIFACT_ROOT.resolve())
+        and result_path.stat().st_size == identity_bytes
+        and result_bytes == identity_bytes
+        and result_identity.get("sha256") == actual_sha256
+        and before_bytes >= 0
+        and total_bytes == before_bytes + result_bytes
+        and limit_bytes == MAX_ARTIFACT_BYTES
+        and traces_written == 0
+    )
+
+
 def run_correctness(
     plan: dict[str, Any],
     plan_identity: dict[str, Any],
@@ -944,8 +1038,7 @@ def run_correctness(
         "gates": gates,
         "optimizer_steps": optimizer_evidence["steps_observed"],
         "vla_model_instantiated": bool(
-            execution["native_vla_modules"]["before"]
-            or execution["native_vla_modules"]["after"]
+            execution["native_vla_modules"]["before"] or execution["native_vla_modules"]["after"]
         ),
         "cost_allowed": all(gates.values()),
         "training_allowed": False,
@@ -974,9 +1067,7 @@ def _nvidia_smi_csv(query_scope: str, fields: str, *, gpu_id: int | None = None)
 
 
 def gpu_telemetry() -> dict[str, Any]:
-    gpu_fields = (
-        "index,uuid,name,driver_version,utilization.gpu,clocks.current.sm,temperature.gpu"
-    )
+    gpu_fields = "index,uuid,name,driver_version,utilization.gpu,clocks.current.sm,temperature.gpu"
     gpu_rows = _nvidia_smi_csv("gpu", gpu_fields, gpu_id=0)
     if len(gpu_rows) != 1 or len(gpu_rows[0]) != 7:
         raise RuntimeError("nvidia-smi returned an unexpected GPU0 identity row")
@@ -1205,9 +1296,13 @@ def benchmark_scope_length(
     torch.cuda.empty_cache()
     tokenizer.to(device=device, dtype=torch.float32)
     module.to(device=device, dtype=torch.float32)
-    raw = torch.from_numpy(np.array(codec[:length], copy=True)).unsqueeze(0).to(
-        device=device,
-        dtype=torch.float32,
+    raw = (
+        torch.from_numpy(np.array(codec[:length], copy=True))
+        .unsqueeze(0)
+        .to(
+            device=device,
+            dtype=torch.float32,
+        )
     )
     if scope == "temporal_only":
         source = tokenizer(raw)
@@ -1434,9 +1529,10 @@ def benchmark_cost_process(
     }
     if parameter_identity != expected_parameter_identity:
         raise RuntimeError("cost process weights do not match correctness predecessor")
-    temporal = lambda condition, length: measurements[condition][str(length)]["temporal_only"][
-        "host_wall_samples_ms"
-    ]
+
+    def temporal(condition: str, length: int) -> list[float]:
+        return measurements[condition][str(length)]["temporal_only"]["host_wall_samples_ms"]
+
     bootstrap = bootstrap_growth_effect(
         temporal("functional_mamba", 128),
         temporal("functional_mamba", 925),
@@ -1471,8 +1567,8 @@ def _finite_samples(values: Any, expected: int = MEASURED_SAMPLES) -> bool:
         array = np.asarray(values, dtype=np.float64)
     except (TypeError, ValueError):
         return False
-    return array.shape == (expected,) and bool(np.isfinite(array).all()) and bool(
-        np.all(array >= 0)
+    return (
+        array.shape == (expected,) and bool(np.isfinite(array).all()) and bool(np.all(array >= 0))
     )
 
 
@@ -1562,13 +1658,10 @@ def _measurement_integrity(cost: dict[str, Any]) -> bool:
                     and memory["absolute_peak_allocated_bytes"]
                     >= memory["baseline_allocated_bytes"]
                     and memory["delta_peak_allocated_bytes"]
-                    == memory["absolute_peak_allocated_bytes"]
-                    - memory["baseline_allocated_bytes"]
-                    and memory["absolute_peak_reserved_bytes"]
-                    >= memory["baseline_reserved_bytes"]
+                    == memory["absolute_peak_allocated_bytes"] - memory["baseline_allocated_bytes"]
+                    and memory["absolute_peak_reserved_bytes"] >= memory["baseline_reserved_bytes"]
                     and memory["delta_peak_reserved_bytes"]
-                    == memory["absolute_peak_reserved_bytes"]
-                    - memory["baseline_reserved_bytes"]
+                    == memory["absolute_peak_reserved_bytes"] - memory["baseline_reserved_bytes"]
                     and residency.get("condition") == condition
                     and residency.get("all_model_parameters_on_cuda0") is True
                     and residency.get("resident_input_device") == "cuda:0"
@@ -1601,12 +1694,8 @@ def _fixed_state_growth(cost: dict[str, Any], condition: str, scope: str) -> flo
 
 
 def _kv_ratio_relative_error(cost: dict[str, Any], scope: str) -> float:
-    first = _measurement(cost, "streaming_kv_transformer", 128, scope)[
-        "state_unique_storage_bytes"
-    ]
-    last = _measurement(cost, "streaming_kv_transformer", 925, scope)[
-        "state_unique_storage_bytes"
-    ]
+    first = _measurement(cost, "streaming_kv_transformer", 128, scope)["state_unique_storage_bytes"]
+    last = _measurement(cost, "streaming_kv_transformer", 925, scope)["state_unique_storage_bytes"]
     return abs((last / first) / (925 / 128) - 1.0)
 
 
@@ -1618,7 +1707,12 @@ def _latency_growth(cost: dict[str, Any], condition: str, scope: str) -> float:
 
 def _peak_scaling_passes(cost: dict[str, Any]) -> bool:
     for scope in SCOPES:
-        for metric in ("absolute_peak_allocated_bytes", "delta_peak_allocated_bytes"):
+        for metric in (
+            "absolute_peak_allocated_bytes",
+            "delta_peak_allocated_bytes",
+            "absolute_peak_reserved_bytes",
+            "delta_peak_reserved_bytes",
+        ):
             ratios = []
             for length in LENGTHS:
                 mamba = _measurement(cost, "functional_mamba", length, scope)["memory"][metric]
@@ -1631,7 +1725,7 @@ def _peak_scaling_passes(cost: dict[str, Any]) -> bool:
                 if mamba <= 0 or transformer <= 0:
                     return False
                 ratios.append(transformer / mamba)
-            if any(right < left for left, right in zip(ratios, ratios[1:], strict=True)):
+            if any(right < left for left, right in zip(ratios, ratios[1:])):
                 return False
             mamba_t925 = _measurement(cost, "functional_mamba", 925, scope)["memory"][metric]
             transformer_t925 = _measurement(
@@ -1664,12 +1758,8 @@ def evaluate_cost_gates(
         "temporal_only",
     )
     recomputed_bootstrap = bootstrap_growth_effect(
-        _measurement(cost, "functional_mamba", 128, "temporal_only")[
-            "host_wall_samples_ms"
-        ],
-        _measurement(cost, "functional_mamba", 925, "temporal_only")[
-            "host_wall_samples_ms"
-        ],
+        _measurement(cost, "functional_mamba", 128, "temporal_only")["host_wall_samples_ms"],
+        _measurement(cost, "functional_mamba", 925, "temporal_only")["host_wall_samples_ms"],
         _measurement(cost, "streaming_kv_transformer", 128, "temporal_only")[
             "host_wall_samples_ms"
         ],
@@ -1682,18 +1772,24 @@ def evaluate_cost_gates(
     start = telemetry["before"]
     after = telemetry["after"]
     try:
+        expected_warm_signature = [
+            (item["condition"], item["length"], item["scope"])
+            for item in _expected_execution_order(label)
+        ]
+        actual_warm_signature = [
+            (record["condition"], record["length"], record["scope"]) for record in warm_records
+        ]
         start_environment = (
             _telemetry_number(start, "utilization_percent") == 0
             and _telemetry_number(start, "temperature_c") <= MAX_START_TEMPERATURE_C
             and not start["gpu0_compute_processes"]
         )
-        warm_environment = len(warm_records) == len(CONDITIONS) * len(LENGTHS) * len(SCOPES) and all(
+        warm_environment = actual_warm_signature == expected_warm_signature and all(
             record["condition"] in CONDITIONS
             and record["length"] in LENGTHS
             and record["scope"] in SCOPES
             and _telemetry_number(record["telemetry"], "sm_clock_mhz") >= MIN_WARM_SM_CLOCK_MHZ
-            and _telemetry_number(record["telemetry"], "temperature_c")
-            <= MAX_WARM_TEMPERATURE_C
+            and _telemetry_number(record["telemetry"], "temperature_c") <= MAX_WARM_TEMPERATURE_C
             and not record["telemetry"]["gpu0_other_compute_processes"]
             for record in warm_records
         )
@@ -1726,8 +1822,7 @@ def evaluate_cost_gates(
         ),
         "transformer_kv_growth_matches_925_over_128_within_1pct": measurements_valid
         and all(
-            _kv_ratio_relative_error(cost, scope) <= MAX_KV_RATIO_RELATIVE_ERROR
-            for scope in SCOPES
+            _kv_ratio_relative_error(cost, scope) <= MAX_KV_RATIO_RELATIVE_ERROR for scope in SCOPES
         ),
         "transformer_over_mamba_absolute_and_delta_peak_ratios_nondecreasing_and_t925_mamba_at_most_60pct": measurements_valid
         and _peak_scaling_passes(cost),
@@ -1738,13 +1833,10 @@ def evaluate_cost_gates(
             for scope in SCOPES
         ),
         "temporal_transformer_host_p95_growth_at_least_1p10x_mamba": measurements_valid
-        and temporal_growth_transformer
-        >= MIN_TRANSFORMER_TO_MAMBA_GROWTH * temporal_growth_mamba,
+        and temporal_growth_transformer >= MIN_TRANSFORMER_TO_MAMBA_GROWTH * temporal_growth_mamba,
         "mamba_t925_prefilled_next_step_host_p95_below_5ms": measurements_valid
         and all(
-            _measurement(cost, "functional_mamba", 925, scope)["next_step"][
-                "host_wall_p95_ms"
-            ]
+            _measurement(cost, "functional_mamba", 925, scope)["next_step"]["host_wall_p95_ms"]
             < MAX_MAMBA_NEXT_STEP_P95_MS
             for scope in SCOPES
         ),
@@ -1781,6 +1873,12 @@ def verify_passed_result(
     if len(expected_sha256) != 64 or actual_sha256 != expected_sha256:
         raise ValueError("predecessor result identity changed")
     result = read_json(resolved)
+    result_identity = {
+        "path": str(resolved),
+        "bytes": resolved.stat().st_size,
+        "sha256": actual_sha256,
+        "run_id": expected_run_id,
+    }
     if (
         result.get("experiment_id") != EXPERIMENT
         or result.get("run_id") != expected_run_id
@@ -1794,12 +1892,36 @@ def verify_passed_result(
         or result.get("training_allowed") is not False
     ):
         raise ValueError("predecessor result contract changed or did not pass")
-    return result, {
-        "path": str(resolved),
-        "bytes": resolved.stat().st_size,
-        "sha256": actual_sha256,
-        "run_id": expected_run_id,
-    }
+    if expected_run_id == CORRECTNESS_RUN_ID:
+        try:
+            recomputed = evaluate_correctness_gates(
+                result["correctness"],
+                result["execution_evidence"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("correctness predecessor core gates do not recompute") from error
+        if not stored_result_evidence_matches(result, recomputed, result_identity):
+            raise ValueError("correctness predecessor core gates do not recompute")
+    return result, result_identity
+
+
+def verify_recomputed_cost_gates(
+    result: dict[str, Any],
+    expected_parameter_identity: dict[str, Any],
+    result_identity: dict[str, Any],
+) -> dict[str, bool]:
+    try:
+        recomputed = evaluate_cost_gates(
+            result["cost"],
+            result["telemetry"],
+            result["execution_evidence"],
+            expected_parameter_identity,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("cost predecessor core gates do not recompute") from error
+    if not stored_result_evidence_matches(result, recomputed, result_identity):
+        raise ValueError("cost predecessor core gates do not recompute")
+    return recomputed
 
 
 def run_cost(
@@ -1829,6 +1951,7 @@ def run_cost(
     )
     labels = tuple(COST_RUN_IDS)
     index = labels.index(label)
+    predecessor = None
     predecessor_identity = None
     if index == 0:
         if predecessor_path is not None or predecessor_sha256 is not None:
@@ -1837,7 +1960,7 @@ def run_cost(
         if predecessor_path is None or predecessor_sha256 is None:
             raise ValueError("cost process B/C/D requires the immediately preceding cost result")
         previous_label = labels[index - 1]
-        _, predecessor_identity = verify_passed_result(
+        predecessor, predecessor_identity = verify_passed_result(
             predecessor_path,
             predecessor_sha256,
             expected_path=ARTIFACT_ROOT / COST_RUN_IDS[previous_label] / "RESULT.json",
@@ -1851,13 +1974,18 @@ def run_cost(
     environment = verify_environment()
     correctness_parameters = correctness["correctness"]["parameters"]
     expected_parameter_identity = {
-        "tokenizer_state_dict_sha256": correctness["correctness"]["tokenizer"][
-            "state_dict_sha256"
-        ],
+        "tokenizer_state_dict_sha256": correctness["correctness"]["tokenizer"]["state_dict_sha256"],
         "all_tokenizer_hashes_equal": True,
         "temporal_state_dict_sha256": correctness_parameters["temporal_state_dict_sha256"],
         "temporal_parameter_counts": correctness_parameters["actual_temporal_counts"],
     }
+    if predecessor is not None:
+        assert predecessor_identity is not None
+        verify_recomputed_cost_gates(
+            predecessor,
+            expected_parameter_identity,
+            predecessor_identity,
+        )
     with optimizer_construction_guard() as optimizer_evidence:
         cost, warm_telemetry = benchmark_cost_process(
             codec,
@@ -1907,9 +2035,7 @@ def run_cost(
         "cost": cost,
         "reported_end_to_end_growth": {
             **end_to_end_growth,
-            "transformer_grows_more_than_mamba": end_to_end_growth[
-                "streaming_kv_transformer"
-            ]
+            "transformer_grows_more_than_mamba": end_to_end_growth["streaming_kv_transformer"]
             > end_to_end_growth["functional_mamba"],
             "gate": False,
         },
@@ -1917,8 +2043,7 @@ def run_cost(
         "gates": gates,
         "optimizer_steps": optimizer_evidence["steps_observed"],
         "vla_model_instantiated": bool(
-            execution["native_vla_modules"]["before"]
-            or execution["native_vla_modules"]["after"]
+            execution["native_vla_modules"]["before"] or execution["native_vla_modules"]["after"]
         ),
         "next_cost_allowed": all(gates.values()) and label != "D",
         "aggregate_allowed": all(gates.values()) and label == "D",
@@ -1941,9 +2066,7 @@ def evaluate_aggregate_gates(
     expected_run_ids = list(COST_RUN_IDS.values())
     correctness_parameters = correctness["correctness"]["parameters"]
     expected_parameter_identity = {
-        "tokenizer_state_dict_sha256": correctness["correctness"]["tokenizer"][
-            "state_dict_sha256"
-        ],
+        "tokenizer_state_dict_sha256": correctness["correctness"]["tokenizer"]["state_dict_sha256"],
         "all_tokenizer_hashes_equal": True,
         "temporal_state_dict_sha256": correctness_parameters["temporal_state_dict_sha256"],
         "temporal_parameter_counts": correctness_parameters["actual_temporal_counts"],
@@ -1952,39 +2075,41 @@ def evaluate_aggregate_gates(
         correctness["correctness"],
         correctness["execution_evidence"],
     )
+    correctness_evidence_matches = stored_result_evidence_matches(
+        correctness,
+        correctness_core,
+        correctness["result_identity"],
+    )
     cost_core_matches = []
-    for result in costs:
-        recomputed = evaluate_cost_gates(
-            result["cost"],
-            result["telemetry"],
-            result["execution_evidence"],
-            expected_parameter_identity,
-        )
-        cost_core_matches.append(
-            all(result["gates"].get(name) == value for name, value in recomputed.items())
-            and all(recomputed.values())
-        )
+    for index, result in enumerate(costs):
+        try:
+            recomputed = evaluate_cost_gates(
+                result["cost"],
+                result["telemetry"],
+                result["execution_evidence"],
+                expected_parameter_identity,
+            )
+            identity = cost_identities[index]
+        except (IndexError, KeyError, TypeError, ValueError):
+            cost_core_matches.append(False)
+        else:
+            cost_core_matches.append(stored_result_evidence_matches(result, recomputed, identity))
     chain_valid = len(costs) == 4 and len(cost_identities) == 4
     if chain_valid:
         correctness_sha = correctness["result_identity"]["sha256"]
         chain_valid = (
             costs[0]["cost_predecessor"] is None
             and all(
-                result["correctness_predecessor"]["sha256"] == correctness_sha
-                for result in costs
+                result["correctness_predecessor"]["sha256"] == correctness_sha for result in costs
             )
             and all(
-                costs[index]["cost_predecessor"]["sha256"]
-                == cost_identities[index - 1]["sha256"]
+                costs[index]["cost_predecessor"]["sha256"] == cost_identities[index - 1]["sha256"]
                 for index in range(1, 4)
             )
         )
     return {
         "correctness_result_passed_and_core_gates_recompute": (
-            correctness["status"] == "passed"
-            and all(correctness["gates"].values())
-            and all(correctness_core.values())
-            and all(correctness["gates"].get(name) == value for name, value in correctness_core.items())
+            correctness["status"] == "passed" and correctness_evidence_matches
         ),
         "exact_four_ordered_cost_results_passed_without_averaging": (
             len(costs) == 4
@@ -2004,13 +2129,11 @@ def evaluate_aggregate_gates(
             and result["cost"]["length_order"] == list(LENGTH_ORDERS[label])
             and result["cost"]["execution_order"] == _expected_execution_order(label)
             and result["cost"]["bootstrap"]["point_estimate"] >= MIN_RELATIVE_GROWTH_POINT
-            and result["cost"]["bootstrap"]["ci95_percentile"][0]
-            >= MIN_RELATIVE_GROWTH_CI95_LOWER
+            and result["cost"]["bootstrap"]["ci95_percentile"][0] >= MIN_RELATIVE_GROWTH_CI95_LOWER
             for label, result in zip(expected_labels, costs, strict=True)
         ),
         "all_four_weight_identities_match_correctness": all(
-            result["cost"]["parameter_identity"] == expected_parameter_identity
-            for result in costs
+            result["cost"]["parameter_identity"] == expected_parameter_identity for result in costs
         ),
         "all_components_vla_free_and_zero_optimizer": (
             correctness["vla_model_instantiated"] is False

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import pytest
-import torch
-
 from gr00t.experimental.arena_codec_streaming_backbone import (
     SEED,
     WIDTH,
@@ -20,6 +17,21 @@ from gr00t.experimental.arena_functional_streaming_controls import (
     transformer_kv_expected_bytes,
     unique_storage_state_bytes,
 )
+import pytest
+import torch
+
+
+def test_streaming_kv_current_position_matches_full_path_without_prefix_allocation() -> None:
+    module = StreamingKVTransformerBackbone(seed=SEED).eval()
+    for index in (0, 127, 924):
+        expected = module.position(index + 1, WIDTH, torch.device("cpu"), torch.float32)[-1]
+        actual = module._position_at(
+            index,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        assert actual.shape == (WIDTH,)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_streaming_kv_reuses_exact_full_parameter_set_and_matches_t128() -> None:
@@ -30,9 +42,10 @@ def test_streaming_kv_reuses_exact_full_parameter_set_and_matches_t128() -> None
         torch.equal(full.state_dict()[name], streaming.state_dict()[name])
         for name in full.state_dict()
     )
-    assert trainable_parameter_count(streaming) == EXPECTED_TEMPORAL_PARAMETERS[
-        "streaming_kv_transformer"
-    ]
+    assert (
+        trainable_parameter_count(streaming)
+        == EXPECTED_TEMPORAL_PARAMETERS["streaming_kv_transformer"]
+    )
     assert len(tuple(streaming.parameters())) == len(tuple(full.parameters()))
 
     descriptors = torch.randn(1, 128, WIDTH)
@@ -72,7 +85,9 @@ def test_streaming_kv_is_chunk_exact_immutable_and_linear_through_t925() -> None
             second_step_input,
         )
     assert states_equal(second_step_input, state_before)
-    input_storages = {tensor.untyped_storage().data_ptr() for pair in state_before.layers for tensor in pair}
+    input_storages = {
+        tensor.untyped_storage().data_ptr() for pair in state_before.layers for tensor in pair
+    }
     output_storages = {
         tensor.untyped_storage().data_ptr() for pair in second_step_output.layers for tensor in pair
     }
@@ -81,7 +96,9 @@ def test_streaming_kv_is_chunk_exact_immutable_and_linear_through_t925() -> None
 
 def test_unique_storage_bytes_rejects_any_kv_alias() -> None:
     shared = torch.zeros(1, 8, 4, 32)
-    state = StreamingKVState(((shared, shared), (torch.ones_like(shared), torch.randn_like(shared))), 1, 4)
+    state = StreamingKVState(
+        ((shared, shared), (torch.ones_like(shared), torch.randn_like(shared))), 1, 4
+    )
     with pytest.raises(ValueError, match="aliased storage"):
         unique_storage_state_bytes(state)
 
@@ -95,7 +112,10 @@ def test_persistent_gru_full_step_exact_and_fixed_state_storage() -> None:
         actual, state = module.persistent_stream(descriptors)
     assert torch.equal(actual, expected)
     assert state.observations == 128
-    assert unique_storage_state_bytes(state) == 2 * WIDTH * torch.tensor([], dtype=torch.float32).element_size()
+    assert (
+        unique_storage_state_bytes(state)
+        == 2 * WIDTH * torch.tensor([], dtype=torch.float32).element_size()
+    )
 
     input_state = state.clone()
     before = input_state.clone()
@@ -103,9 +123,9 @@ def test_persistent_gru_full_step_exact_and_fixed_state_storage() -> None:
         _, output_state = module.persistent_step(torch.randn(1, WIDTH), input_state)
     assert states_equal(input_state, before)
     assert unique_storage_state_bytes(output_state) == unique_storage_state_bytes(input_state)
-    assert not {
-        tensor.untyped_storage().data_ptr() for tensor in input_state.hidden
-    } & {tensor.untyped_storage().data_ptr() for tensor in output_state.hidden}
+    assert not {tensor.untyped_storage().data_ptr() for tensor in input_state.hidden} & {
+        tensor.untyped_storage().data_ptr() for tensor in output_state.hidden
+    }
 
 
 def test_current_descriptor_is_parameter_free_and_tracks_episode_reset() -> None:
@@ -117,4 +137,3 @@ def test_current_descriptor_is_parameter_free_and_tracks_episode_reset() -> None
     assert state == CurrentDescriptorState(batch_size=2, observations=7)
     assert state.reset() == CurrentDescriptorState(batch_size=2, observations=0)
     assert unique_storage_state_bytes(state) == 0
-

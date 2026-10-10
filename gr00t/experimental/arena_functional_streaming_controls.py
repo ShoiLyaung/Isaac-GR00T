@@ -191,9 +191,10 @@ class StreamingKVTransformerBackbone(CausalTransformerBackbone):
                 or attention.dropout != 0.0
             ):
                 raise ValueError("Arena streaming KV Transformer architecture changed")
-        if trainable_parameter_count(self) != EXPECTED_TEMPORAL_PARAMETERS[
-            "streaming_kv_transformer"
-        ]:
+        if (
+            trainable_parameter_count(self)
+            != EXPECTED_TEMPORAL_PARAMETERS["streaming_kv_transformer"]
+        ):
             raise ValueError("Arena streaming KV Transformer parameter contract changed")
 
     def new_kv_state(self, batch_size: int) -> StreamingKVState:
@@ -242,6 +243,27 @@ class StreamingKVTransformerBackbone(CausalTransformerBackbone):
         return value.reshape(batch, time, ATTENTION_HEADS, ATTENTION_HEAD_WIDTH).transpose(1, 2)
 
     @staticmethod
+    def _position_at(
+        index: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Compute only the current sinusoidal position used by the full path."""
+
+        if index < 0:
+            raise ValueError("streaming KV position index must be nonnegative")
+        position = torch.tensor(float(index), device=device, dtype=torch.float32)
+        divisor = torch.exp(
+            torch.arange(0, WIDTH, 2, device=device, dtype=torch.float32)
+            * (-math.log(10_000.0) / WIDTH)
+        )
+        value = torch.empty(WIDTH, device=device, dtype=torch.float32)
+        value[0::2] = torch.sin(position * divisor)
+        value[1::2] = torch.cos(position * divisor)
+        return value.to(dtype=dtype)
+
+    @staticmethod
     def _validate_pair(
         pair: KVPair,
         *,
@@ -255,7 +277,12 @@ class StreamingKVTransformerBackbone(CausalTransformerBackbone):
                 raise ValueError("empty streaming KV state unexpectedly contains a cache")
             return
         expected = (batch, ATTENTION_HEADS, observations, ATTENTION_HEAD_WIDTH)
-        if key is None or value is None or tuple(key.shape) != expected or tuple(value.shape) != expected:
+        if (
+            key is None
+            or value is None
+            or tuple(key.shape) != expected
+            or tuple(value.shape) != expected
+        ):
             raise ValueError("streaming KV cache shape does not match observation count")
         if (
             key.device != reference.device
@@ -274,12 +301,11 @@ class StreamingKVTransformerBackbone(CausalTransformerBackbone):
         if batch != state.batch_size or len(state.layers) != len(self.layers.layers):
             raise ValueError("streaming KV state does not match batch or layer count")
         unique_storage_state_bytes(state)
-        position = self.position(
-            state.observations + 1,
-            WIDTH,
-            descriptor.device,
-            descriptor.dtype,
-        )[-1]
+        position = self._position_at(
+            state.observations,
+            device=descriptor.device,
+            dtype=descriptor.dtype,
+        )
         current = (descriptor + position).unsqueeze(1)
         updated_layers = []
         for layer, pair in zip(self.layers.layers, state.layers, strict=True):
@@ -296,9 +322,7 @@ class StreamingKVTransformerBackbone(CausalTransformerBackbone):
             value_heads = self._as_heads(value)
             previous_key, previous_value = pair
             cache_key = (
-                key_heads
-                if previous_key is None
-                else torch.cat((previous_key, key_heads), dim=2)
+                key_heads if previous_key is None else torch.cat((previous_key, key_heads), dim=2)
             )
             cache_value = (
                 value_heads
@@ -434,8 +458,7 @@ def states_equal(first: StreamingState, second: StreamingState) -> bool:
     first_tensors = state_tensors(first)
     second_tensors = state_tensors(second)
     return len(first_tensors) == len(second_tensors) and all(
-        torch.equal(left, right)
-        for left, right in zip(first_tensors, second_tensors, strict=True)
+        torch.equal(left, right) for left, right in zip(first_tensors, second_tensors, strict=True)
     )
 
 
@@ -469,4 +492,3 @@ def transformer_kv_expected_bytes(
     if batch_size < 1 or observations < 0 or element_size < 1:
         raise ValueError("invalid Transformer KV byte-count arguments")
     return LAYERS * 2 * batch_size * observations * WIDTH * element_size
-
