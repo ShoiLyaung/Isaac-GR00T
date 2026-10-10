@@ -1096,6 +1096,72 @@ def _is_cuda_kernel_event(event: Any) -> bool:
 
 
 @torch.inference_mode()
+def _warm_next_step_branch(
+    name: str,
+    module: nn.Module,
+    tokenizer: ArenaCodecSpatialTokenizer,
+    probe: torch.Tensor,
+    *,
+    scope: str,
+    prefilled: Any,
+    expected_observations: int,
+) -> dict[str, Any]:
+    """Consume one branch and return scalars so immutable state can be released."""
+
+    descriptor = _descriptor_for_step(probe, scope=scope, tokenizer=tokenizer)
+    output, next_state = online_step(name, module, descriptor, prefilled)
+    evidence = {
+        "output_finite": bool(torch.isfinite(output).all()),
+        "observations_exact": next_state.observations == expected_observations,
+        "branch_logical_state_bytes": _state_logical_bytes(next_state),
+        "returned_is_prefilled": next_state is prefilled,
+    }
+    if name == "transformer_preallocated":
+        _rollback_preallocated_step(prefilled, expected_observations - 1)
+    return evidence
+
+
+@torch.inference_mode()
+def _timed_next_step_branch(
+    name: str,
+    module: nn.Module,
+    tokenizer: ArenaCodecSpatialTokenizer,
+    probe: torch.Tensor,
+    *,
+    scope: str,
+    prefilled: Any,
+    expected_observations: int,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Time one branch; tensor locals die before the caller audits baseline."""
+
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    torch.cuda.synchronize(device)
+    host_start = time.perf_counter_ns()
+    start.record()
+    descriptor = _descriptor_for_step(probe, scope=scope, tokenizer=tokenizer)
+    output, next_state = online_step(name, module, descriptor, prefilled)
+    end.record()
+    end.synchronize()
+    peak_allocated = torch.cuda.max_memory_allocated(device)
+    peak_reserved = torch.cuda.max_memory_reserved(device)
+    evidence = {
+        "host_ms": (time.perf_counter_ns() - host_start) / 1_000_000,
+        "cuda_ms": float(start.elapsed_time(end)),
+        "output_finite": bool(torch.isfinite(output).all()),
+        "observations_exact": next_state.observations == expected_observations,
+        "branch_logical_state_bytes": _state_logical_bytes(next_state),
+        "returned_is_prefilled": next_state is prefilled,
+        "peak_allocated_bytes": peak_allocated,
+        "peak_reserved_bytes": peak_reserved,
+    }
+    if name == "transformer_preallocated":
+        _rollback_preallocated_step(prefilled, expected_observations - 1)
+    return evidence
+
+
+@torch.inference_mode()
 def measure_prefilled_next_step(
     name: str,
     module: nn.Module,
@@ -1120,41 +1186,81 @@ def measure_prefilled_next_step(
     prefill_logical_bytes = _state_logical_bytes(prefilled)
     prefill_capacity_bytes = _state_capacity_bytes(prefilled)
     for _ in range(WARMUP_SAMPLES):
-        descriptor = _descriptor_for_step(probe, scope=scope, tokenizer=tokenizer)
-        warm_output, next_state = online_step(name, module, descriptor, prefilled)
-        if name == "transformer_preallocated":
-            if next_state is not prefilled:
-                raise RuntimeError("preallocated next-step replaced mutable state")
-            _rollback_preallocated_step(prefilled, length - 1)
-    del descriptor, warm_output, next_state
+        warm = _warm_next_step_branch(
+            name,
+            module,
+            tokenizer,
+            probe,
+            scope=scope,
+            prefilled=prefilled,
+            expected_observations=length,
+        )
+        if not warm["output_finite"] or not warm["observations_exact"]:
+            raise RuntimeError("next-step warm-up produced invalid output or state")
+        if warm["returned_is_prefilled"] is not (name == "transformer_preallocated"):
+            raise RuntimeError("next-step warm-up violated mutable/immutable state semantics")
+        del warm
+        torch.cuda.synchronize(device)
+        gc.collect()
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize(device)
-    torch.cuda.reset_peak_memory_stats(device)
     baseline_allocated = torch.cuda.memory_allocated(device)
     baseline_reserved = torch.cuda.memory_reserved(device)
     host_samples = []
     cuda_samples = []
+    sample_baseline_allocated = []
+    sample_baseline_reserved = []
+    sample_peak_allocated = []
+    sample_peak_reserved = []
+    sample_restored_allocated = []
+    sample_restored_reserved = []
+    branch_logical_state_bytes = []
+    returned_is_prefilled = []
     outputs_finite = True
     observations_exact = True
     for _ in range(MEASURED_SAMPLES):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
+        gc.collect()
         torch.cuda.synchronize(device)
-        host_start = time.perf_counter_ns()
-        start.record()
-        descriptor = _descriptor_for_step(probe, scope=scope, tokenizer=tokenizer)
-        output, next_state = online_step(name, module, descriptor, prefilled)
-        end.record()
-        end.synchronize()
-        host_samples.append((time.perf_counter_ns() - host_start) / 1_000_000)
-        cuda_samples.append(float(start.elapsed_time(end)))
-        outputs_finite = outputs_finite and bool(torch.isfinite(output).all())
-        observations_exact = observations_exact and next_state.observations == length
-        if name == "transformer_preallocated":
-            _rollback_preallocated_step(prefilled, length - 1)
-    absolute_peak_allocated = torch.cuda.max_memory_allocated(device)
-    absolute_peak_reserved = torch.cuda.max_memory_reserved(device)
+        allocated_before = torch.cuda.memory_allocated(device)
+        reserved_before = torch.cuda.memory_reserved(device)
+        if allocated_before != baseline_allocated:
+            raise RuntimeError("next-step branch state survived into the next sample baseline")
+        sample_baseline_allocated.append(allocated_before)
+        sample_baseline_reserved.append(reserved_before)
+        torch.cuda.reset_peak_memory_stats(device)
+        sample = _timed_next_step_branch(
+            name,
+            module,
+            tokenizer,
+            probe,
+            scope=scope,
+            prefilled=prefilled,
+            expected_observations=length,
+            device=device,
+        )
+        host_samples.append(sample["host_ms"])
+        cuda_samples.append(sample["cuda_ms"])
+        outputs_finite = outputs_finite and sample["output_finite"]
+        observations_exact = observations_exact and sample["observations_exact"]
+        branch_logical_state_bytes.append(sample["branch_logical_state_bytes"])
+        returned_is_prefilled.append(sample["returned_is_prefilled"])
+        sample_peak_allocated.append(sample["peak_allocated_bytes"])
+        sample_peak_reserved.append(sample["peak_reserved_bytes"])
+        del sample
+        gc.collect()
+        torch.cuda.synchronize(device)
+        restored_allocated = torch.cuda.memory_allocated(device)
+        restored_reserved = torch.cuda.memory_reserved(device)
+        sample_restored_allocated.append(restored_allocated)
+        sample_restored_reserved.append(restored_reserved)
+        if restored_allocated != baseline_allocated:
+            raise RuntimeError("next-step branch state was not released after the sample")
+    absolute_peak_allocated = max(sample_peak_allocated)
+    absolute_peak_reserved = max(sample_peak_reserved)
+    pre_profiler_baseline_allocated = torch.cuda.memory_allocated(device)
+    if pre_profiler_baseline_allocated != baseline_allocated:
+        raise RuntimeError("last measured branch survived into profiler baseline")
     with torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
@@ -1163,7 +1269,7 @@ def measure_prefilled_next_step(
     ) as profile:
         with torch.profiler.record_function(f"{name}_{scope}_prefilled_next_step_t{length}"):
             descriptor = _descriptor_for_step(probe, scope=scope, tokenizer=tokenizer)
-            _, profiled_state = online_step(name, module, descriptor, prefilled)
+            profiled_output, profiled_state = online_step(name, module, descriptor, prefilled)
             torch.cuda.synchronize(device)
     profiled_observations = profiled_state.observations
     if name == "transformer_preallocated":
@@ -1174,6 +1280,9 @@ def measure_prefilled_next_step(
         if str(getattr(event, "device_type", "")).lower().endswith("cuda")
     ]
     kernels = [event for event in device_events if _is_cuda_kernel_event(event)]
+    del descriptor, profiled_output, profiled_state
+    gc.collect()
+    torch.cuda.synchronize(device)
     return {
         "prefill_observations": prefill_observations,
         "probe_finishes_at_observations": length,
@@ -1194,7 +1303,22 @@ def measure_prefilled_next_step(
             "absolute_peak_reserved_bytes": absolute_peak_reserved,
             "delta_peak_allocated_bytes": absolute_peak_allocated - baseline_allocated,
             "delta_peak_reserved_bytes": absolute_peak_reserved - baseline_reserved,
+            "sample_baseline_allocated_bytes": sample_baseline_allocated,
+            "sample_baseline_reserved_bytes": sample_baseline_reserved,
+            "sample_peak_allocated_bytes": sample_peak_allocated,
+            "sample_peak_reserved_bytes": sample_peak_reserved,
+            "sample_restored_allocated_bytes": sample_restored_allocated,
+            "sample_restored_reserved_bytes": sample_restored_reserved,
+            "baseline_allocated_stable": sample_baseline_allocated
+            == [baseline_allocated] * MEASURED_SAMPLES,
+            "allocated_restored_after_each_sample": sample_restored_allocated
+            == [baseline_allocated] * MEASURED_SAMPLES,
+            "pre_profiler_baseline_allocated_bytes": pre_profiler_baseline_allocated,
+            "prefilled_baseline_recovered_before_profiler": pre_profiler_baseline_allocated
+            == baseline_allocated,
         },
+        "branch_logical_state_bytes": branch_logical_state_bytes,
+        "returned_is_prefilled": returned_is_prefilled,
         "profiler": {
             "runs": 1,
             "cuda_device_event_count": len(device_events),
@@ -1520,7 +1644,7 @@ def _memory_arithmetic_valid(memory: Any) -> bool:
         "delta_peak_allocated_bytes",
         "delta_peak_reserved_bytes",
     }
-    if set(memory) != keys:
+    if not keys.issubset(memory):
         return False
     try:
         values = {key: int(memory[key]) for key in keys}
@@ -1534,6 +1658,49 @@ def _memory_arithmetic_valid(memory: Any) -> bool:
         == values["absolute_peak_allocated_bytes"] - values["baseline_allocated_bytes"]
         and values["delta_peak_reserved_bytes"]
         == values["absolute_peak_reserved_bytes"] - values["baseline_reserved_bytes"]
+    )
+
+
+def _next_step_memory_lifecycle_valid(memory: Any) -> bool:
+    if not _memory_arithmetic_valid(memory):
+        return False
+    vector_names = (
+        "sample_baseline_allocated_bytes",
+        "sample_baseline_reserved_bytes",
+        "sample_peak_allocated_bytes",
+        "sample_peak_reserved_bytes",
+        "sample_restored_allocated_bytes",
+        "sample_restored_reserved_bytes",
+    )
+    if not all(
+        _finite_vector(memory.get(name), MEASURED_SAMPLES, positive=False) for name in vector_names
+    ):
+        return False
+    baseline_allocated = memory["baseline_allocated_bytes"]
+    baseline_allocated_samples = memory["sample_baseline_allocated_bytes"]
+    baseline_reserved_samples = memory["sample_baseline_reserved_bytes"]
+    peak_allocated = memory["sample_peak_allocated_bytes"]
+    peak_reserved = memory["sample_peak_reserved_bytes"]
+    restored_allocated = memory["sample_restored_allocated_bytes"]
+    return all(
+        (
+            baseline_allocated_samples == [baseline_allocated] * MEASURED_SAMPLES,
+            restored_allocated == [baseline_allocated] * MEASURED_SAMPLES,
+            all(
+                peak >= baseline
+                for peak, baseline in zip(peak_allocated, baseline_allocated_samples, strict=True)
+            ),
+            all(
+                peak >= baseline
+                for peak, baseline in zip(peak_reserved, baseline_reserved_samples, strict=True)
+            ),
+            memory["absolute_peak_allocated_bytes"] == max(peak_allocated),
+            memory["absolute_peak_reserved_bytes"] == max(peak_reserved),
+            memory.get("baseline_allocated_stable") is True,
+            memory.get("allocated_restored_after_each_sample") is True,
+            memory.get("pre_profiler_baseline_allocated_bytes") == baseline_allocated,
+            memory.get("prefilled_baseline_recovered_before_profiler") is True,
+        )
     )
 
 
@@ -1597,7 +1764,7 @@ def _next_step_payload_valid(next_step: Any, name: str, length: int, scope: str)
             _same_number(next_step.get("cuda_p95_ms"), percentile(cuda, 95)),
             next_step.get("logical_state_bytes") == expected_live,
             next_step.get("capacity_state_bytes") == expected_capacity,
-            _memory_arithmetic_valid(next_step.get("memory")),
+            _next_step_memory_lifecycle_valid(next_step.get("memory")),
             profiler.get("runs") == 1,
             isinstance(profiler.get("cuda_kernel_count"), int),
             profiler.get("cuda_kernel_count", -1) >= 0,
@@ -1612,6 +1779,10 @@ def _next_step_payload_valid(next_step: Any, name: str, length: int, scope: str)
             next_step.get("outputs_finite") is True,
             next_step.get("observations_exact") is True,
             next_step.get("preallocated_state_rolled_back") is True,
+            next_step.get("branch_logical_state_bytes")
+            == [EXPECTED_STATE_BYTES[name][length]] * MEASURED_SAMPLES,
+            next_step.get("returned_is_prefilled")
+            == [name == "transformer_preallocated"] * MEASURED_SAMPLES,
         )
     )
 

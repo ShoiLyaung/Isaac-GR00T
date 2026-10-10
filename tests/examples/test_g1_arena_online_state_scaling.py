@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 import importlib
 import importlib.util
 import json
@@ -8,8 +9,11 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import weakref
 
 from gr00t.experimental.arena_functional_mamba_transition import FunctionalMamba2State
+from gr00t.experimental.arena_functional_streaming_controls import StreamingKVState
+from gr00t.experimental.arena_online_state_scaling import KV_SENTINEL
 import pytest
 import torch
 
@@ -129,6 +133,37 @@ class _CPUFunctionalMambaStub(torch.nn.Module):
         )
 
 
+class _FunctionalCatLifecycleStub(torch.nn.Module):
+    branch_ref: weakref.ReferenceType[StreamingKVState] | None = None
+
+    def streaming_step(
+        self, descriptor: torch.Tensor, state: StreamingKVState
+    ) -> tuple[torch.Tensor, StreamingKVState]:
+        observations = state.observations + 1
+        shape = (1, 8, observations, 32)
+        next_state = StreamingKVState(
+            tuple((torch.zeros(shape), torch.zeros(shape)) for _ in range(2)),
+            batch_size=1,
+            observations=observations,
+        )
+        self.branch_ref = weakref.ref(next_state)
+        return descriptor, next_state
+
+
+class _PreallocatedLifecycleStub(torch.nn.Module):
+    branch_ref: weakref.ReferenceType[runner.PreallocatedKVState] | None = None
+
+    def preallocated_step(
+        self, descriptor: torch.Tensor, state: runner.PreallocatedKVState
+    ) -> tuple[torch.Tensor, runner.PreallocatedKVState]:
+        index = state.live_index
+        for tensor in state.tensors():
+            tensor[:, :, index : index + 1].zero_()
+        state.live_index += 1
+        self.branch_ref = weakref.ref(state)
+        return descriptor, state
+
+
 def test_frozen_five_process_orders_lengths_and_incomplete_status() -> None:
     assert runner.CONDITIONS == (
         "functional_mamba",
@@ -242,6 +277,101 @@ def test_generic_dispatch_keeps_preallocated_mutable_semantics_separate() -> Non
         )
     assert functional_returned is not functional_state
     assert functional_returned.observations == 1
+
+
+def test_next_step_branch_lifecycle_releases_functional_kv_and_keeps_preallocated() -> None:
+    prefill_observations = 924
+    prefill_shape = (1, 8, prefill_observations, 32)
+    functional_prefill = StreamingKVState(
+        tuple((torch.zeros(prefill_shape), torch.zeros(prefill_shape)) for _ in range(2)),
+        batch_size=1,
+        observations=prefill_observations,
+    )
+    functional_module = _FunctionalCatLifecycleStub()
+    functional = runner._warm_next_step_branch(
+        "transformer_functional_cat",
+        functional_module,
+        torch.nn.Identity(),
+        torch.zeros(1, 256),
+        scope="temporal_only",
+        prefilled=functional_prefill,
+        expected_observations=925,
+    )
+    assert functional["branch_logical_state_bytes"] == 3_788_800
+    assert functional["returned_is_prefilled"] is False
+    assert runner._state_logical_bytes(functional_prefill) == 3_784_704
+    gc.collect()
+    assert functional_module.branch_ref is not None
+    assert functional_module.branch_ref() is None
+
+    shape = (1, 8, 925, 32)
+    preallocated = runner.PreallocatedKVState(
+        tuple(
+            (
+                torch.full(shape, KV_SENTINEL),
+                torch.full(shape, KV_SENTINEL),
+            )
+            for _ in range(2)
+        ),
+        batch_size=1,
+        capacity=925,
+        live_index=prefill_observations,
+    )
+    # Mark the live prefix as committed while preserving the one-slot tail.
+    for tensor in preallocated.tensors():
+        tensor[:, :, :prefill_observations].zero_()
+    preallocated_module = _PreallocatedLifecycleStub()
+    mutable = runner._warm_next_step_branch(
+        "transformer_preallocated",
+        preallocated_module,
+        torch.nn.Identity(),
+        torch.zeros(1, 256),
+        scope="temporal_only",
+        prefilled=preallocated,
+        expected_observations=925,
+    )
+    assert mutable["branch_logical_state_bytes"] == 3_788_800
+    assert mutable["returned_is_prefilled"] is True
+    assert preallocated.live_index == prefill_observations
+    assert preallocated.unwritten_is_sentinel()
+    assert preallocated_module.branch_ref is not None
+    assert preallocated_module.branch_ref() is preallocated
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(
+    os.environ.get("RUN_ONLINE_SCALING_CUDA_TEST") != "1" or not torch.cuda.is_available(),
+    reason="explicit opt-in GPU lifecycle check",
+)
+def test_cuda_functional_t925_next_step_restores_prefill_allocated_baseline() -> None:
+    device = torch.device("cuda", 0)
+    module = runner.build_condition("transformer_functional_cat").eval().to(device)
+    descriptors = torch.randn(1, 925, 256, device=device)
+    _, prefilled = runner._untimed_prefix(
+        "transformer_functional_cat",
+        module,
+        torch.nn.Identity(),
+        descriptors[:, :924],
+        scope="temporal_only",
+    )
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize(device)
+    baseline = torch.cuda.memory_allocated(device)
+    evidence = runner._warm_next_step_branch(
+        "transformer_functional_cat",
+        module,
+        torch.nn.Identity(),
+        descriptors[:, 924],
+        scope="temporal_only",
+        prefilled=prefilled,
+        expected_observations=925,
+    )
+    assert evidence["branch_logical_state_bytes"] == 3_788_800
+    del evidence
+    gc.collect()
+    torch.cuda.synchronize(device)
+    assert torch.cuda.memory_allocated(device) == baseline
 
 
 @pytest.mark.parametrize("condition", runner.CONDITIONS)
@@ -358,6 +488,16 @@ def test_preallocated_next_step_schema_uses_t_minus_one_live_and_fixed_capacity(
         "absolute_peak_reserved_bytes": 240,
         "delta_peak_allocated_bytes": 20,
         "delta_peak_reserved_bytes": 40,
+        "sample_baseline_allocated_bytes": [100] * runner.MEASURED_SAMPLES,
+        "sample_baseline_reserved_bytes": [200] * runner.MEASURED_SAMPLES,
+        "sample_peak_allocated_bytes": [120] * runner.MEASURED_SAMPLES,
+        "sample_peak_reserved_bytes": [240] * runner.MEASURED_SAMPLES,
+        "sample_restored_allocated_bytes": [100] * runner.MEASURED_SAMPLES,
+        "sample_restored_reserved_bytes": [240] * runner.MEASURED_SAMPLES,
+        "baseline_allocated_stable": True,
+        "allocated_restored_after_each_sample": True,
+        "pre_profiler_baseline_allocated_bytes": 100,
+        "prefilled_baseline_recovered_before_profiler": True,
     }
     length = 925
     payload = {
@@ -376,6 +516,11 @@ def test_preallocated_next_step_schema_uses_t_minus_one_live_and_fixed_capacity(
         ),
         "capacity_state_bytes": runner.preallocated_capacity_expected_bytes(),
         "memory": memory,
+        "branch_logical_state_bytes": [
+            runner.EXPECTED_STATE_BYTES["transformer_preallocated"][length]
+        ]
+        * runner.MEASURED_SAMPLES,
+        "returned_is_prefilled": [True] * runner.MEASURED_SAMPLES,
         "profiler": {
             "runs": 1,
             "cuda_device_event_count": 10,
@@ -393,6 +538,8 @@ def test_preallocated_next_step_schema_uses_t_minus_one_live_and_fixed_capacity(
     current = copy.deepcopy(payload)
     current["logical_state_bytes"] = 0
     current["capacity_state_bytes"] = 0
+    current["branch_logical_state_bytes"] = [0] * runner.MEASURED_SAMPLES
+    current["returned_is_prefilled"] = [False] * runner.MEASURED_SAMPLES
     current["profiler"]["cuda_device_event_count"] = 0
     current["profiler"]["cuda_kernel_count"] = 0
     current["profiler"]["excluded_memcpy_memset_count"] = 0
