@@ -59,6 +59,9 @@ def test_smoke_and_relative_gates_are_serializable() -> None:
     assert json.loads(canonical_json_bytes(gates)) == gates
     prior = {"aggregates": {"seed_equal": dict(ordered["aggregates"]["seed_equal"])}}
     assert all(experiment.reproduction_gates(ordered, prior).values())
+    prior["aggregates"]["seed_equal"].pop("swap_checkpoint_exact")
+    with pytest.raises(ValueError, match="metric set"):
+        experiment.reproduction_gates(ordered, prior)
 
 
 def test_nine_train_calls_finish_before_first_target_scoring(
@@ -167,3 +170,72 @@ def test_learning_rate_hash_uses_actual_curve_values() -> None:
     assert experiment.learning_rate_curve_sha256(first) != experiment.learning_rate_curve_sha256(
         second
     )
+
+
+def test_build_cli_disables_privileged_target_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discover_calls = []
+
+    class FakeSourceCache:
+        root = tmp_path / "source-cache"
+
+    def fake_corpus_discover(root, split, **kwargs):
+        discover_calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(runner.ShardedMemoryCorpus, "discover", fake_corpus_discover)
+    monkeypatch.setattr(
+        runner.FeatureCacheCorpus,
+        "discover",
+        lambda root, split: FakeSourceCache(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_read",
+        lambda path, digest, status: (
+            {"status": "passed", "targets_opened": False},
+            {"path": str(path.resolve()), "bytes": 1, "sha256": digest},
+        ),
+    )
+    monkeypatch.setattr(runner, "verify_source_cache_receipt", lambda *args: {"ok": True})
+    monkeypatch.setattr(
+        runner,
+        "build_temporal_moment_caches",
+        lambda source, corpus, output: {
+            "records": {condition: [] for condition in CONDITIONS},
+            "permutation_identity": {},
+            "permutation_sha256": [],
+        },
+    )
+    monkeypatch.setattr(runner, "write_new_json", lambda path, result: {})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "temporal_moment_sufficiency.py",
+            "--build-cache",
+            "--corpus-root",
+            str(tmp_path / "corpus"),
+            "--source-cache-root",
+            str(tmp_path / "source-cache"),
+            "--corpus-result",
+            str(tmp_path / "corpus-result.json"),
+            "--source-cache-result",
+            str(tmp_path / "source-result.json"),
+            "--output-root",
+            str(tmp_path / "output"),
+        ],
+    )
+    assert runner.main() == 0
+    assert discover_calls == [{"verify_privileged_targets": False}]
+
+
+def test_source_cache_receipt_rejects_unrelated_root(tmp_path: Path) -> None:
+    source_cache = type("Source", (), {"root": tmp_path / "actual"})()
+    with pytest.raises(ValueError, match="root"):
+        runner.verify_source_cache_receipt(
+            source_cache,
+            {},
+            {"path": str(tmp_path / "other/RESULT.json")},
+        )

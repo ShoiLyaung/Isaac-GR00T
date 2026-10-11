@@ -224,6 +224,8 @@ def score_predictions(
 def reproduction_gates(historical: Mapping[str, Any], prior: Mapping[str, Any]) -> dict[str, bool]:
     observed = historical["aggregates"]["seed_equal"]
     expected = prior["aggregates"]["seed_equal"]
+    if set(observed) != set(expected):
+        raise ValueError("historical aggregate metric set changed")
     return {
         f"historical_reproduces_{metric}": bool(
             abs(float(observed[metric]) - float(expected[metric])) <= HISTORICAL_TOLERANCE

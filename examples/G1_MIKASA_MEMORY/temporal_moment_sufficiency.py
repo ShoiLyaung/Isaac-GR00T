@@ -48,6 +48,55 @@ def _read(path: Path, digest: str, status: str) -> tuple[dict, dict]:
     return value, {"path": str(path.resolve()), "bytes": len(raw), "sha256": observed}
 
 
+def verify_source_cache_receipt(
+    source_cache: FeatureCacheCorpus,
+    result: dict,
+    result_identity: dict,
+) -> dict:
+    result_root = Path(result_identity["path"]).parent.resolve()
+    if source_cache.root.resolve() != result_root:
+        raise ValueError("source cache root does not match frozen RESULT root")
+    if (
+        result.get("status") != "passed"
+        or result.get("schema") != "g1-mikasa-native-rgb-memory-backbone-r1/feature-cache-result-v1"
+        or result.get("targets_opened") is not False
+        or result.get("confirmation_materialized") is not False
+        or result.get("train_groups") != 24
+    ):
+        raise ValueError("source cache RESULT contract changed")
+    train_records = [
+        record for record in result.get("group_records", []) if record.get("split") == "train"
+    ]
+    by_group = {record.get("group_id"): record for record in train_records}
+    if tuple(sorted(by_group)) != source_cache.group_ids:
+        raise ValueError("source cache RESULT train group set changed")
+    for group_id in source_cache.group_ids:
+        record = by_group[group_id]
+        feature = source_cache._records[group_id]
+        manifest_path = source_cache.root / "train" / f"group_{group_id:03d}" / "MANIFEST.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise ValueError("source cache manifest is missing or unsafe")
+        manifest_raw = manifest_path.read_bytes()
+        if record.get("feature") != {
+            "file": feature.path.name,
+            "bytes": feature.bytes,
+            "sha256": feature.sha256,
+        }:
+            raise ValueError(f"source cache feature receipt changed for group {group_id}")
+        if record.get("manifest") != {
+            "bytes": len(manifest_raw),
+            "sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        }:
+            raise ValueError(f"source cache manifest receipt changed for group {group_id}")
+        if record.get("source_model_input_sha256") != source_cache.source_model_sha256[group_id]:
+            raise ValueError(f"source cache source identity changed for group {group_id}")
+    return {
+        "root": str(result_root),
+        "groups_verified": len(source_cache.group_ids),
+        "materials_verified": 2 * len(source_cache.group_ids),
+    }
+
+
 def reject_path(path: Path | None) -> None:
     if path is not None and any(part.lower() in {"dev", "confirmation"} for part in path.parts):
         raise PermissionError("dev and confirmation paths are forbidden")
@@ -107,9 +156,14 @@ def main() -> int:
     source_value, source_id = _read(args.source_cache_result, CACHE_SHA, "passed")
     if source_value.get("targets_opened") is not False:
         raise ValueError("source cache is not target blind")
-    corpus = ShardedMemoryCorpus.discover(args.corpus_root, "train")
     source_cache = FeatureCacheCorpus.discover(args.source_cache_root, "train")
+    source_cache_binding = verify_source_cache_receipt(source_cache, source_value, source_id)
     if args.build_cache:
+        corpus = ShardedMemoryCorpus.discover(
+            args.corpus_root,
+            "train",
+            verify_privileged_targets=False,
+        )
         built = build_temporal_moment_caches(source_cache, corpus, args.output_root)
         result = {
             "status": "passed",
@@ -121,6 +175,7 @@ def main() -> int:
             "permutation_sha256": built["permutation_sha256"],
             "corpus_result": corpus_id,
             "source_cache_result": source_id,
+            "source_cache_binding": source_cache_binding,
             "targets_opened": False,
             "original_dev_opened": False,
             "confirmation_opened": False,
@@ -132,6 +187,7 @@ def main() -> int:
             raise RuntimeError("temporal-moment cache exceeds 512 MiB")
         write_new_json(args.output_root / "RESULT.json", result)
     else:
+        corpus = ShardedMemoryCorpus.discover(args.corpus_root, "train")
         if any(
             value is None
             for value in (
@@ -168,6 +224,7 @@ def main() -> int:
             provenance={
                 "corpus": corpus_id,
                 "source_cache": source_id,
+                "source_cache_binding": source_cache_binding,
                 "moment_cache": moment_id,
                 "historical_result": prior_id,
             },
