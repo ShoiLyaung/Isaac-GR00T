@@ -165,7 +165,12 @@ class FactorizedMapping:
             raise ValueError("factorized mapping condition set changed")
 
     @classmethod
-    def discover(cls, root: Path, result: Mapping[str, Any]) -> "FactorizedMapping":
+    def discover(
+        cls,
+        root: Path,
+        result: Mapping[str, Any],
+        expected_provenance: Mapping[str, Any],
+    ) -> "FactorizedMapping":
         resolved = root.resolve()
         if (
             root.is_symlink()
@@ -174,9 +179,17 @@ class FactorizedMapping:
             or result.get("mapping_root") != str(resolved)
             or result.get("schema") != SCHEMA
             or result.get("targets_opened") is not False
+            or result.get("dev_opened") is not False
+            or result.get("confirmation_opened") is not False
             or result.get("all_descriptors_distances_finite") is not True
+            or result.get("provenance") != dict(expected_provenance)
         ):
             raise ValueError("factorized mapping receipt changed")
+        if {entry.name for entry in resolved.iterdir()} != {
+            "RESULT.json",
+            *[f"{condition}.npz" for condition in CONDITIONS],
+        }:
+            raise ValueError("factorized mapping root entry set changed")
         materials = {}
         for condition, spec in result.get("materials", {}).items():
             material = MaterialIdentity(Path(spec["path"]), spec["bytes"], spec["sha256"])

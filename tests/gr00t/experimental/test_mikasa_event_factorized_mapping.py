@@ -51,6 +51,19 @@ def test_shape_and_checkpoint_neighbors_are_frozen_independently() -> None:
     assert checkpoint["neighbor_group"].tolist() == [3]
 
 
+def test_equal_distance_ties_are_lexicographic_for_each_independent_view() -> None:
+    fit_ids = [(4, 5), (2, 3), (2, 1)]
+    query = np.zeros((1, 2), np.float32)
+    shape = factorized._freeze_view(np.zeros((3, 2), np.float32), query, fit_ids)
+    checkpoint = factorized._freeze_view(np.zeros((3, 2), np.float32), query.copy(), fit_ids)
+    assert (shape["neighbor_group"][0], shape["neighbor_row"][0]) == (2, 1)
+    assert (
+        checkpoint["neighbor_group"][0],
+        checkpoint["neighbor_row"][0],
+    ) == (2, 1)
+    assert shape["neighbor_group"] is not checkpoint["neighbor_group"]
+
+
 def test_mapping_freeze_source_contains_no_target_access() -> None:
     assert "load_target_group" not in inspect.getsource(factorized.freeze_factorized_mapping)
 

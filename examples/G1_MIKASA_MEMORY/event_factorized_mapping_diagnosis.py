@@ -148,7 +148,11 @@ def main() -> int:
         )
         if mapping_result.get("cache") != cache_id:
             raise ValueError("factorized mapping cache provenance changed")
-        mapping = FactorizedMapping.discover(args.mapping_root, mapping_result)
+        mapping = FactorizedMapping.discover(
+            args.mapping_root,
+            mapping_result,
+            provenance,
+        )
         evidence = score_factorized(mapping, corpus)
         gate_values = unchanged_gates(evidence)
         result = {
