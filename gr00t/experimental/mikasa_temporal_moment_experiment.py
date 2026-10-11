@@ -254,12 +254,29 @@ def reproduction_gates(historical: Mapping[str, Any], prior: Mapping[str, Any]) 
     expected = prior["aggregates"]["seed_equal"]
     if set(observed) != set(expected):
         raise ValueError("historical aggregate metric set changed")
-    return {
+    gates = {
         f"historical_reproduces_{metric}": bool(
             abs(float(observed[metric]) - float(expected[metric])) <= HISTORICAL_TOLERANCE
         )
         for metric in sorted(observed)
     }
+    observed_by_seed = historical["aggregates"].get("by_seed")
+    expected_by_seed = prior["aggregates"].get("by_seed")
+    if not isinstance(observed_by_seed, Mapping) or not isinstance(expected_by_seed, Mapping):
+        raise ValueError("historical per-seed aggregates missing")
+    if set(observed_by_seed) != set(expected_by_seed):
+        raise ValueError("historical aggregate seed set changed")
+    for seed in sorted(observed_by_seed):
+        observed_seed = observed_by_seed[seed]
+        expected_seed = expected_by_seed[seed]
+        if set(observed_seed) != set(expected_seed) or set(observed_seed) != set(observed):
+            raise ValueError(f"historical metric set changed for seed {seed}")
+        for metric in sorted(observed_seed):
+            gates[f"historical_reproduces_seed_{seed}_{metric}"] = bool(
+                abs(float(observed_seed[metric]) - float(expected_seed[metric]))
+                <= HISTORICAL_TOLERANCE
+            )
+    return gates
 
 
 def relative_gates(

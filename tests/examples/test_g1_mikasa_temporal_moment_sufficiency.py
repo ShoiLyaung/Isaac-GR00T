@@ -48,7 +48,13 @@ def _evidence(mae: float, order: float) -> dict:
         "swap_checkpoint_exact": 1.0,
         "swap_checkpoint_max_abs": 0.0,
     }
-    return {"records": records, "aggregates": {"seed_equal": aggregate}}
+    return {
+        "records": records,
+        "aggregates": {
+            "by_seed": {str(seed): dict(aggregate) for seed in (230923, 230924, 230925)},
+            "seed_equal": aggregate,
+        },
+    }
 
 
 def test_smoke_and_relative_gates_are_serializable() -> None:
@@ -59,11 +65,22 @@ def test_smoke_and_relative_gates_are_serializable() -> None:
     gates = experiment.relative_gates(ordered, control, "control")
     assert gates and all(gates.values())
     assert json.loads(canonical_json_bytes(gates)) == gates
-    prior = {"aggregates": {"seed_equal": dict(ordered["aggregates"]["seed_equal"])}}
+    prior = {"aggregates": json.loads(json.dumps(ordered["aggregates"]))}
     assert all(experiment.reproduction_gates(ordered, prior).values())
     prior["aggregates"]["seed_equal"].pop("swap_checkpoint_exact")
     with pytest.raises(ValueError, match="metric set"):
         experiment.reproduction_gates(ordered, prior)
+
+
+def test_historical_reproduction_detects_seed_cancellation_drift() -> None:
+    observed = _evidence(0.02, 0.9)
+    expected = {"aggregates": json.loads(json.dumps(observed["aggregates"]))}
+    expected["aggregates"]["by_seed"]["230923"]["first_mae_m"] += 2e-6
+    expected["aggregates"]["by_seed"]["230924"]["first_mae_m"] -= 2e-6
+    gates = experiment.reproduction_gates(observed, expected)
+    assert gates["historical_reproduces_first_mae_m"] is True
+    assert gates["historical_reproduces_seed_230923_first_mae_m"] is False
+    assert gates["historical_reproduces_seed_230924_first_mae_m"] is False
 
 
 def test_nine_train_calls_finish_before_first_target_scoring(
