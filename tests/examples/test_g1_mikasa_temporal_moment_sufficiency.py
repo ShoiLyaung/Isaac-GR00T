@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 from pathlib import Path
@@ -42,6 +43,8 @@ def _evidence(mae: float, order: float) -> dict:
         "first_mae_m": mae,
         "complete_mae_m": mae,
         "swap_shape_exact": 1.0,
+        "swap_checkpoint_exact": 1.0,
+        "swap_checkpoint_max_abs": 0.0,
     }
     return {"records": records, "aggregates": {"seed_equal": aggregate}}
 
@@ -83,7 +86,11 @@ def test_nine_train_calls_finish_before_first_target_scoring(
     def fake_train(data, stats, *, seed, checkpoint_path, **kwargs):
         condition = checkpoint_path.parts[-3]
         events.append(("train", condition, seed))
-        return {"steps": 1500, "schedule_sha256": f"schedule-{seed}"}
+        return {
+            "steps": 1500,
+            "schedule_sha256": f"schedule-{seed}",
+            "curve": [{"step": step, "lr": float(step) / 1500} for step in range(1, 1501)],
+        }
 
     def fake_score(predictions, corpus, target_mean):
         events.append(("score", predictions["prediction"]))
@@ -95,7 +102,9 @@ def test_nine_train_calls_finish_before_first_target_scoring(
     monkeypatch.setattr(experiment, "evaluate_calibration_gates", lambda evidence: {"abs": True})
     monkeypatch.setattr(experiment, "relative_gates", lambda *args: {"rel": True})
     monkeypatch.setattr(experiment, "reproduction_gates", lambda *args: {"repro": True})
-    monkeypatch.setattr(experiment, "learning_rate_sha256", lambda: "lr")
+    monkeypatch.setattr(
+        experiment, "verify_historical_checkpoints", lambda checkpoints, prior: {"ok": True}
+    )
     result = experiment.run_temporal_moment(
         FakeCorpus(),
         object(),
@@ -121,3 +130,40 @@ def test_write_once_and_dev_confirmation_paths_are_rejected(tmp_path: Path) -> N
     for name in ("dev", "confirmation"):
         with pytest.raises(PermissionError):
             runner.reject_path(tmp_path / name / "secret")
+
+
+def test_historical_checkpoints_bind_path_bytes_and_sha(tmp_path: Path) -> None:
+    checkpoints, training = {}, []
+    for seed in (230923, 230924, 230925):
+        path = tmp_path / f"seed_{seed}" / "checkpoint_final.pt"
+        path.parent.mkdir()
+        body = f"checkpoint-{seed}".encode()
+        path.write_bytes(body)
+        checkpoints[seed] = path
+        training.append(
+            {
+                "seed": seed,
+                "checkpoint": {
+                    "path": str(path.resolve()),
+                    "bytes": len(body),
+                    "sha256": hashlib.sha256(body).hexdigest(),
+                },
+            }
+        )
+    verified = experiment.verify_historical_checkpoints(checkpoints, {"training": training})
+    assert set(verified) == {"230923", "230924", "230925"}
+    checkpoints[230923].write_bytes(b"changed")
+    with pytest.raises(ValueError, match="receipt changed"):
+        experiment.verify_historical_checkpoints(checkpoints, {"training": training})
+
+
+def test_learning_rate_hash_uses_actual_curve_values() -> None:
+    first = [{"step": step, "lr": step / 1500} for step in range(1, 1501)]
+    second = [dict(record) for record in first]
+    assert experiment.learning_rate_curve_sha256(first) == experiment.learning_rate_curve_sha256(
+        second
+    )
+    second[700]["lr"] += 1e-9
+    assert experiment.learning_rate_curve_sha256(first) != experiment.learning_rate_curve_sha256(
+        second
+    )

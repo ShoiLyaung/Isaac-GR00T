@@ -52,13 +52,43 @@ def model_state_sha256(model: torch.nn.Module) -> str:
     return digest.hexdigest()
 
 
-def learning_rate_sha256() -> str:
-    from gr00t.experimental.mikasa_segment_slot_experiment import _lr_multiplier
-
+def learning_rate_curve_sha256(curve: list[Mapping[str, Any]]) -> str:
+    if len(curve) != TRAIN_STEPS:
+        raise ValueError("learning-rate curve length changed")
     digest = hashlib.sha256()
-    for step in range(TRAIN_STEPS):
-        digest.update(np.float64(3e-4 * _lr_multiplier(step, TRAIN_STEPS)).tobytes())
+    for expected_step, record in enumerate(curve, start=1):
+        if record.get("step") != expected_step:
+            raise ValueError("learning-rate curve step identity changed")
+        digest.update(np.float64(record["lr"]).tobytes())
     return digest.hexdigest()
+
+
+def verify_historical_checkpoints(
+    checkpoints: Mapping[int, Path], prior_result: Mapping[str, Any]
+) -> dict[str, Any]:
+    if set(checkpoints) != set(TRAIN_SEEDS):
+        raise ValueError("historical checkpoint seed set changed")
+    training = prior_result.get("training")
+    if not isinstance(training, list) or len(training) != len(TRAIN_SEEDS):
+        raise ValueError("historical checkpoint receipts missing")
+    receipts = {int(record["seed"]): record["checkpoint"] for record in training}
+    if set(receipts) != set(TRAIN_SEEDS):
+        raise ValueError("historical checkpoint receipt seeds changed")
+    verified = {}
+    for seed, path in sorted(checkpoints.items()):
+        if path.is_symlink() or not path.is_file():
+            raise FileNotFoundError(path)
+        receipt = receipts[seed]
+        raw = path.read_bytes()
+        observed = {
+            "path": str(path.resolve()),
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+        if observed != receipt:
+            raise ValueError(f"historical checkpoint receipt changed for seed {seed}")
+        verified[str(seed)] = observed
+    return verified
 
 
 @torch.inference_mode()
@@ -112,9 +142,14 @@ def score_predictions(
                 prediction["normalized_checkpoints"].reshape(6, 48)
             ).reshape(6, 2, 12, 2)
             error = (physical - checkpoint_target).abs()
+            swap_checkpoint_error = (
+                prediction["swapped_checkpoints"] - prediction["normalized_checkpoints"].flip(1)
+            ).abs()
             finite = (
                 torch.isfinite(prediction["shape_logits"]).all(dim=(1, 2))
                 & torch.isfinite(prediction["normalized_checkpoints"]).all(dim=(1, 2))
+                & torch.isfinite(prediction["swapped_shape_logits"]).all(dim=(1, 2))
+                & torch.isfinite(prediction["swapped_checkpoints"]).all(dim=(1, 2))
                 & torch.isfinite(physical).all(dim=(1, 2, 3))
             )
             for row in range(6):
@@ -130,6 +165,13 @@ def score_predictions(
                         "swap_shape_exact": float(
                             torch.equal(swapped_shape[row], shape[row].flip(0))
                         ),
+                        "swap_checkpoint_exact": float(
+                            torch.equal(
+                                prediction["swapped_checkpoints"][row],
+                                prediction["normalized_checkpoints"][row].flip(0),
+                            )
+                        ),
+                        "swap_checkpoint_max_abs": float(swap_checkpoint_error[row].max()),
                         "finite": bool(finite[row]),
                     }
                 )
@@ -141,6 +183,8 @@ def score_predictions(
         "first_mae_m",
         "complete_mae_m",
         "swap_shape_exact",
+        "swap_checkpoint_exact",
+        "swap_checkpoint_max_abs",
     )
     per_seed = {
         str(seed): {metric: group_equal_mean(by_seed[seed], metric) for metric in metrics}
@@ -241,6 +285,9 @@ def run_temporal_moment(
     if output_root.exists():
         raise FileExistsError(output_root)
     split = validate_frozen_split(corpus.group_ids)
+    historical_checkpoint_binding = verify_historical_checkpoints(
+        historical_checkpoints, prior_result
+    )
     stats = TargetStats.fit(FitTargetCorpus(corpus))
     target_mean = fit_target_mean(corpus)
     # Historical forward pass occurs before training, without opening targets.
@@ -264,7 +311,7 @@ def run_temporal_moment(
             checkpoints[condition][seed] = path
             initial_hashes.setdefault(str(seed), []).append(initial_hash)
             schedule_hashes.setdefault(str(seed), []).append(run["schedule_sha256"])
-            lr_hashes.setdefault(str(seed), []).append(learning_rate_sha256())
+            lr_hashes.setdefault(str(seed), []).append(learning_rate_curve_sha256(run["curve"]))
             completed_steps += int(run["steps"])
     if completed_steps != 3 * len(TRAIN_SEEDS) * TRAIN_STEPS:
         raise RuntimeError("temporal-moment training did not finish all 13,500 steps")
@@ -315,6 +362,7 @@ def run_temporal_moment(
         },
         "gates": gates,
         "provenance": dict(provenance),
+        "historical_checkpoint_binding": historical_checkpoint_binding,
         "original_dev_opened": False,
         "confirmation_opened": False,
         "event_token_mamba_design_allowed": all(gates.values()),
