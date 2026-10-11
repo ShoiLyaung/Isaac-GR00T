@@ -7,6 +7,15 @@ import pytest
 
 
 def test_zero_motion_and_stable_top64_energy_centroid() -> None:
+    assert event.extraction_contract() == {
+        "schema": "g1-mikasa-event-trajectory-sufficiency-r1/extraction-v1",
+        "top_pixels": 64,
+        "slot_boundaries": [[0, 66], [66, 130]],
+        "tokens_per_slot": 65,
+        "descriptor_dim": 1567,
+        "epsilon": 1e-6,
+        "cameras": 2,
+    }
     previous = np.zeros((128, 128, 3), np.uint8)
     token, valid = event.stable_top64_token(previous, previous.copy())
     np.testing.assert_array_equal(token, np.asarray((0.5, 0.5, 0.0), np.float32))
@@ -108,3 +117,48 @@ def test_score_opens_all_fit_targets_before_calibration_once(tmp_path) -> None:
     result = event.score_mapping(event.FrozenMapping(tmp_path, materials), corpus)
     assert corpus.opens == list(event.FIT_GROUPS) * 2 + list(event.CALIBRATION_GROUPS)
     assert set(result["conditions"]) == set(event.CONDITIONS)
+
+
+def test_mapping_material_validation_rejects_negative_distance_and_wrong_cal_order(
+    tmp_path,
+) -> None:
+    payload = {
+        "mean": np.zeros(event.DESCRIPTOR_DIM, np.float32),
+        "std": np.ones(event.DESCRIPTOR_DIM, np.float32),
+        "neighbor_group": np.full(36, event.FIT_GROUPS[0], np.int64),
+        "neighbor_row": np.zeros(36, np.int64),
+        "distance": np.zeros(36, np.float32),
+        "cal_group": np.repeat(event.CALIBRATION_GROUPS, 6).astype(np.int64),
+        "cal_row": np.tile(np.arange(6), 6).astype(np.int64),
+    }
+    path = tmp_path / "ordered.npz"
+    path.write_bytes(event._npz_bytes(payload))
+    event.validate_mapping_material("ordered", path)
+    payload["distance"][0] = -1
+    path.write_bytes(event._npz_bytes(payload))
+    with pytest.raises(ValueError, match="nonnegative"):
+        event.validate_mapping_material("ordered", path)
+
+
+def test_event_cache_load_validates_shapes_dtypes_and_canonical_mask(tmp_path) -> None:
+    arrays = {
+        "raw": np.zeros((6, 2, 2, 65, 3), np.float32),
+        "canonical": np.zeros((6, 2, 2, 65, 2), np.float32),
+        "valid": np.zeros((6, 2, 2, 65), np.bool_),
+        "post_proprio": np.zeros((6, 7), np.float32),
+    }
+    path = tmp_path / "events.npz"
+    body = event._npz_bytes(arrays)
+    path.write_bytes(body)
+    material = MaterialIdentity(path, len(body), __import__("hashlib").sha256(body).hexdigest())
+    cache = event.EventCache.__new__(event.EventCache)
+    cache.materials = {0: material}
+    assert cache.load_group(0)["raw"].shape == (6, 2, 2, 65, 3)
+    arrays["canonical"][0, 0, 0, 0, 0] = 1
+    body = event._npz_bytes(arrays)
+    path.write_bytes(body)
+    cache.materials[0] = MaterialIdentity(
+        path, len(body), __import__("hashlib").sha256(body).hexdigest()
+    )
+    with pytest.raises(ValueError, match="zero canonical"):
+        cache.load_group(0)

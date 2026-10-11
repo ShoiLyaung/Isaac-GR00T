@@ -59,6 +59,10 @@ def test_absolute_relative_group_gates_and_serialization() -> None:
         "conditions": conditions,
         "fit_target_mean_control": {"first_mae_m": 0.05, "complete_mae_m": 0.05},
         "baseline_records": baseline,
+        "technical": {
+            "mapping_descriptors_distances_finite": True,
+            "metrics_finite": True,
+        },
     }
     result = gates(evidence)
     assert result and all(result.values())

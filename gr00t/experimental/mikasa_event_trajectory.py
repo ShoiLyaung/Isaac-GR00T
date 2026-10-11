@@ -44,6 +44,18 @@ DESCRIPTOR_DIM: Final = 2 * 2 * 65 * 6 + 7
 EPSILON: Final = 1e-6
 
 
+def extraction_contract() -> dict[str, Any]:
+    return {
+        "schema": "g1-mikasa-event-trajectory-sufficiency-r1/extraction-v1",
+        "top_pixels": TOP_PIXELS,
+        "slot_boundaries": [list(value) for value in SLOT_BOUNDARIES],
+        "tokens_per_slot": TOKENS_PER_SLOT,
+        "descriptor_dim": DESCRIPTOR_DIM,
+        "epsilon": EPSILON,
+        "cameras": CAMERAS,
+    }
+
+
 def stable_top64_token(previous: np.ndarray, current: np.ndarray) -> tuple[np.ndarray, bool]:
     if previous.shape != (128, 128, 3) or current.shape != previous.shape:
         raise ValueError("event frames must be [128,128,3]")
@@ -200,6 +212,8 @@ class EventCache:
         cls, root: Path, result: Mapping[str, Any], corpus: ShardedMemoryCorpus
     ) -> "EventCache":
         resolved = root.resolve()
+        if {entry.name for entry in resolved.iterdir()} != {"train", "RESULT.json"}:
+            raise ValueError("event cache root entry set changed")
         if root.is_symlink() or result.get("cache_root") != str(resolved):
             raise ValueError("event cache root receipt changed")
         if (
@@ -208,6 +222,7 @@ class EventCache:
             or result.get("targets_opened") is not False
             or result.get("dev_opened") is not False
             or result.get("confirmation_opened") is not False
+            or result.get("extraction_contract") != extraction_contract()
         ):
             raise ValueError("event cache boundary receipt changed")
         materials = {}
@@ -255,7 +270,30 @@ class EventCache:
             expected = {"raw", "canonical", "valid", "post_proprio"}
             if set(archive.files) != expected:
                 raise ValueError("event cache archive keys changed")
-            return {key: np.ascontiguousarray(archive[key]) for key in expected}
+            arrays = {key: np.ascontiguousarray(archive[key]) for key in expected}
+        expected_specs = {
+            "raw": ((6, 2, 2, 65, 3), np.float32),
+            "canonical": ((6, 2, 2, 65, 2), np.float32),
+            "valid": ((6, 2, 2, 65), np.bool_),
+            "post_proprio": ((6, 7), np.float32),
+        }
+        for key, (shape, dtype) in expected_specs.items():
+            value = arrays[key]
+            if value.shape != shape or value.dtype != dtype:
+                raise ValueError(f"event cache {key} shape/dtype changed")
+            if np.issubdtype(dtype, np.floating) and not np.isfinite(value).all():
+                raise ValueError(f"event cache {key} contains nonfinite values")
+        if not np.all(arrays["canonical"][~arrays["valid"]] == 0):
+            raise ValueError("invalid event tokens must have zero canonical position")
+        recomputed = canonicalize_positions(arrays["raw"], arrays["valid"])
+        if not np.allclose(arrays["canonical"], recomputed, rtol=0, atol=1e-6):
+            raise ValueError("event canonical position invariant changed")
+        if arrays["valid"][:, 1, :, 63:].any() or not np.array_equal(
+            arrays["raw"][:, 1, :, 63:],
+            np.broadcast_to(arrays["raw"][:, 1, :, 62:63], (6, 2, 2, 3)),
+        ):
+            raise ValueError("slot1 63-to-65 padding contract changed")
+        return arrays
 
 
 def build_cache(corpus: ShardedMemoryCorpus, output_root: Path, deadline: float) -> dict[str, Any]:
@@ -292,6 +330,7 @@ def freeze_mapping(cache: EventCache, output_root: Path, deadline: float) -> dic
         raise FileExistsError(output_root)
     arrays = {group_id: cache.load_group(group_id) for group_id in cache.materials}
     materials = {}
+    all_descriptors_distances_finite = True
     for condition in CONDITIONS:
         fit_desc, fit_ids, permutations = [], [], {}
         cal_desc, cal_ids = [], []
@@ -311,6 +350,15 @@ def freeze_mapping(cache: EventCache, output_root: Path, deadline: float) -> dic
         std[std < 1e-6] = 1.0
         normalized_fit = (fit - mean) / std
         normalized_cal = (cal - mean) / std
+        all_descriptors_distances_finite &= bool(
+            np.isfinite(fit).all()
+            and np.isfinite(cal).all()
+            and np.isfinite(normalized_fit).all()
+            and np.isfinite(normalized_cal).all()
+            and np.isfinite(mean).all()
+            and np.isfinite(std).all()
+            and (std > 0).all()
+        )
         neighbor_group, neighbor_row, distances = [], [], []
         for query in normalized_cal:
             distance, group_id, row = lexicographic_neighbor(query, normalized_fit, fit_ids)
@@ -330,9 +378,78 @@ def freeze_mapping(cache: EventCache, output_root: Path, deadline: float) -> dic
             payload[f"permutation_{group_id}"] = permutation
         path = output_root / f"{condition}.npz"
         materials[condition] = write_new_bytes(path, _npz_bytes(payload))
+        all_descriptors_distances_finite &= bool(np.isfinite(payload["distance"]).all())
     if time.monotonic() > deadline:
         raise TimeoutError("event mapping exceeded deadline")
-    return {"materials": materials}
+    if not all_descriptors_distances_finite:
+        raise ValueError("event descriptors or mapping distances are nonfinite")
+    return {
+        "materials": materials,
+        "all_descriptors_distances_finite": True,
+    }
+
+
+def validate_mapping_material(condition: str, path: Path) -> None:
+    with np.load(path, allow_pickle=False) as archive:
+        base_keys = {
+            "mean",
+            "std",
+            "neighbor_group",
+            "neighbor_row",
+            "distance",
+            "cal_group",
+            "cal_row",
+        }
+        expected_permutations = (
+            {f"permutation_{group_id}" for group_id in EXPECTED_SPLIT_GROUPS["train"]}
+            if condition.startswith("shuffle_")
+            else set()
+        )
+        if set(archive.files) != base_keys | expected_permutations:
+            raise ValueError(f"mapping archive keys changed for {condition}")
+        mean, std = archive["mean"], archive["std"]
+        neighbor_group = archive["neighbor_group"]
+        neighbor_row = archive["neighbor_row"]
+        distance = archive["distance"]
+        cal_group, cal_row = archive["cal_group"], archive["cal_row"]
+        if (
+            mean.shape != (DESCRIPTOR_DIM,)
+            or std.shape != (DESCRIPTOR_DIM,)
+            or mean.dtype != np.float32
+            or std.dtype != np.float32
+            or not np.isfinite(mean).all()
+            or not np.isfinite(std).all()
+            or not (std > 0).all()
+        ):
+            raise ValueError("mapping normalization contract changed")
+        for value, label in (
+            (neighbor_group, "neighbor_group"),
+            (neighbor_row, "neighbor_row"),
+            (cal_group, "cal_group"),
+            (cal_row, "cal_row"),
+        ):
+            if value.shape != (36,) or value.dtype != np.int64:
+                raise ValueError(f"mapping {label} shape/dtype changed")
+        if distance.shape != (36,) or distance.dtype != np.float32:
+            raise ValueError("mapping distance shape/dtype changed")
+        if not np.isfinite(distance).all() or np.any(distance < 0):
+            raise ValueError("mapping distances must be finite and nonnegative")
+        if not set(neighbor_group.tolist()).issubset(set(FIT_GROUPS)) or np.any(
+            (neighbor_row < 0) | (neighbor_row > 5)
+        ):
+            raise ValueError("mapping neighbor indices changed")
+        if not np.array_equal(cal_group, np.repeat(CALIBRATION_GROUPS, 6)) or not np.array_equal(
+            cal_row, np.tile(np.arange(6), 6)
+        ):
+            raise ValueError("mapping calibration row order changed")
+        if condition.startswith("shuffle_"):
+            base_seed = int(condition.split("_")[1])
+            for group_id in EXPECTED_SPLIT_GROUPS["train"]:
+                value = archive[f"permutation_{group_id}"]
+                if value.shape != (2, 2, 65) or value.dtype != np.int64:
+                    raise ValueError("mapping permutation shape/dtype changed")
+                if not np.array_equal(value, group_permutations(base_seed, group_id)):
+                    raise ValueError("mapping permutation content changed")
 
 
 class FrozenMapping:
@@ -347,6 +464,11 @@ class FrozenMapping:
         cls, root: Path, result: Mapping[str, Any], corpus: ShardedMemoryCorpus
     ) -> "FrozenMapping":
         resolved = root.resolve()
+        if {entry.name for entry in resolved.iterdir()} != {
+            "RESULT.json",
+            *[f"{condition}.npz" for condition in CONDITIONS],
+        }:
+            raise ValueError("mapping root entry set changed")
         if (
             root.is_symlink()
             or result.get("status") != "passed"
@@ -355,6 +477,7 @@ class FrozenMapping:
             or result.get("targets_opened") is not False
             or result.get("dev_opened") is not False
             or result.get("confirmation_opened") is not False
+            or result.get("all_descriptors_distances_finite") is not True
         ):
             raise ValueError("mapping receipt root/boundary changed")
         cache_spec = result.get("cache")
@@ -379,6 +502,7 @@ class FrozenMapping:
             if material.path.resolve() != resolved / f"{condition}.npz":
                 raise ValueError("mapping material escapes root")
             material.verify()
+            validate_mapping_material(condition, material.path)
             materials[condition] = material
         return cls(root, materials)
 
@@ -440,6 +564,15 @@ def score_mapping(
             "records": records,
             "group_equal": {metric: group_equal_mean(records, metric) for metric in metrics},
         }
+    all_metrics_finite = all(
+        np.isfinite(float(value))
+        for condition in evidence.values()
+        for record in condition["records"]
+        for key, value in record.items()
+        if key != "group_id"
+    )
+    if not all_metrics_finite:
+        raise ValueError("event scoring metrics are nonfinite")
     return {
         "conditions": evidence,
         "fit_target_mean_control": {
@@ -447,6 +580,10 @@ def score_mapping(
             for metric in ("first_mae_m", "complete_mae_m")
         },
         "baseline_records": baseline_records,
+        "technical": {
+            "mapping_descriptors_distances_finite": True,
+            "metrics_finite": True,
+        },
     }
 
 
@@ -455,6 +592,13 @@ def gates(evidence: Mapping[str, Any]) -> dict[str, bool]:
     aggregate = ordered["group_equal"]
     control_mean = evidence["fit_target_mean_control"]
     result: dict[str, Any] = {
+        "all_descriptors_distances_metrics_finite": (
+            evidence.get("technical")
+            == {
+                "mapping_descriptors_distances_finite": True,
+                "metrics_finite": True,
+            }
+        ),
         "first_shape_accuracy_at_least_90pct": aggregate["first_shape_accuracy"] >= 0.90,
         "second_shape_accuracy_at_least_90pct": aggregate["second_shape_accuracy"] >= 0.90,
         "ordered_pair_accuracy_at_least_80pct": aggregate["ordered_pair_accuracy"] >= 0.80,

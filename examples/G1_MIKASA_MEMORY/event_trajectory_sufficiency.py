@@ -19,6 +19,7 @@ from gr00t.experimental.mikasa_event_trajectory import (  # noqa: E402
     EventCache,
     FrozenMapping,
     build_cache,
+    extraction_contract,
     freeze_mapping,
     gates,
     score_mapping,
@@ -75,6 +76,11 @@ def verify_corpus(corpus: ShardedMemoryCorpus, result: dict, identity: dict) -> 
                 "sha256": material.sha256,
             }:
                 raise ValueError(f"corpus {key} identity changed")
+        target_path = shard.privileged_target.path
+        if target_path.is_symlink() or not target_path.is_file():
+            raise ValueError("declared privileged target path is missing or unsafe")
+        if target_path.resolve().parent != shard.manifest.path.resolve().parent:
+            raise ValueError("declared privileged target escapes group root")
     return {"root": str(root), "groups": 24, "target_bytes_opened": False}
 
 
@@ -128,6 +134,7 @@ def main() -> int:
             "status": "passed",
             "mode": "event_trajectory_cache",
             "cache_root": str(args.output_root.resolve()),
+            "extraction_contract": extraction_contract(),
             "group_records": built["records"],
             "corpus": corpus_identity,
             "corpus_binding": corpus_binding,
@@ -152,6 +159,7 @@ def main() -> int:
             "mode": "event_trajectory_mapping",
             "mapping_root": str(args.output_root.resolve()),
             "materials": built["materials"],
+            "all_descriptors_distances_finite": built["all_descriptors_distances_finite"],
             "cache": cache_identity,
             "targets_opened": False,
             "dev_opened": False,
