@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import importlib
+import json
+from pathlib import Path
+import sys
+
+from gr00t.experimental.mikasa_native_rgb_memory_runtime import (
+    EXPECTED_SPLIT_GROUPS,
+    canonical_json_bytes,
+    write_new_json,
+)
+from gr00t.experimental.mikasa_temporal_moment_cache import CONDITIONS
+import gr00t.experimental.mikasa_temporal_moment_experiment as experiment
+import numpy as np
+import pytest
+import torch
+
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "examples/G1_MIKASA_MEMORY"))
+runner = importlib.import_module("temporal_moment_sufficiency")
+
+
+def _evidence(mae: float, order: float) -> dict:
+    groups = (1, 5, 16, 22, 23, 28)
+    records = {
+        seed: [
+            {
+                "group_id": group,
+                "first_mae_m": mae,
+                "complete_mae_m": mae,
+            }
+            for group in groups
+        ]
+        for seed in (230923, 230924, 230925)
+    }
+    aggregate = {
+        "first_shape_accuracy": 0.95,
+        "second_shape_accuracy": 0.95,
+        "ordered_pair_accuracy": order,
+        "first_mae_m": mae,
+        "complete_mae_m": mae,
+        "swap_shape_exact": 1.0,
+    }
+    return {"records": records, "aggregates": {"seed_equal": aggregate}}
+
+
+def test_smoke_and_relative_gates_are_serializable() -> None:
+    smoke = runner.smoke()
+    assert smoke["status"] == "passed"
+    assert smoke["mamba_loaded"] is False
+    ordered, control = _evidence(0.02, 0.9), _evidence(0.03, 0.6)
+    gates = experiment.relative_gates(ordered, control, "control")
+    assert gates and all(gates.values())
+    assert json.loads(canonical_json_bytes(gates)) == gates
+    prior = {"aggregates": {"seed_equal": dict(ordered["aggregates"]["seed_equal"])}}
+    assert all(experiment.reproduction_gates(ordered, prior).values())
+
+
+def test_nine_train_calls_finish_before_first_target_scoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = []
+
+    class FakeCorpus:
+        group_ids = EXPECTED_SPLIT_GROUPS["train"]
+
+    monkeypatch.setattr(experiment, "validate_frozen_split", lambda groups: {"ok": True})
+    monkeypatch.setattr(experiment.TargetStats, "fit", lambda corpus: object())
+    monkeypatch.setattr(experiment, "FitTargetCorpus", lambda corpus: object())
+    monkeypatch.setattr(experiment, "fit_target_mean", lambda corpus: np.zeros(48, np.float32))
+    monkeypatch.setattr(experiment, "FitOnlyData", lambda corpus, cache: object())
+
+    predict_count = 0
+
+    def fake_predict(checkpoints, cache, *, device):
+        nonlocal predict_count
+        predict_count += 1
+        events.append(("predict", predict_count))
+        return {"prediction": predict_count}
+
+    def fake_train(data, stats, *, seed, checkpoint_path, **kwargs):
+        condition = checkpoint_path.parts[-3]
+        events.append(("train", condition, seed))
+        return {"steps": 1500, "schedule_sha256": f"schedule-{seed}"}
+
+    def fake_score(predictions, corpus, target_mean):
+        events.append(("score", predictions["prediction"]))
+        return _evidence(0.02, 0.9)
+
+    monkeypatch.setattr(experiment, "predict_calibration", fake_predict)
+    monkeypatch.setattr(experiment, "train_fit_seed", fake_train)
+    monkeypatch.setattr(experiment, "score_predictions", fake_score)
+    monkeypatch.setattr(experiment, "evaluate_calibration_gates", lambda evidence: {"abs": True})
+    monkeypatch.setattr(experiment, "relative_gates", lambda *args: {"rel": True})
+    monkeypatch.setattr(experiment, "reproduction_gates", lambda *args: {"repro": True})
+    monkeypatch.setattr(experiment, "learning_rate_sha256", lambda: "lr")
+    result = experiment.run_temporal_moment(
+        FakeCorpus(),
+        object(),
+        {condition: object() for condition in CONDITIONS},
+        {seed: Path(f"seed_{seed}/checkpoint_final.pt") for seed in (230923, 230924, 230925)},
+        {},
+        tmp_path / "run",
+        device=torch.device("cpu"),
+        provenance={},
+    )
+    train_indices = [index for index, event in enumerate(events) if event[0] == "train"]
+    score_indices = [index for index, event in enumerate(events) if event[0] == "score"]
+    assert len(train_indices) == 9
+    assert max(train_indices) < min(score_indices)
+    assert result["calibration_opened_after_optimizer_steps"] == 13500
+
+
+def test_write_once_and_dev_confirmation_paths_are_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "RESULT.json"
+    write_new_json(path, {"status": "passed"})
+    with pytest.raises(FileExistsError):
+        write_new_json(path, {"status": "changed"})
+    for name in ("dev", "confirmation"):
+        with pytest.raises(PermissionError):
+            runner.reject_path(tmp_path / name / "secret")
