@@ -5,9 +5,11 @@ import importlib
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 from gr00t.experimental.mikasa_native_rgb_memory_runtime import (
     EXPECTED_SPLIT_GROUPS,
+    MaterialIdentity,
     canonical_json_bytes,
     write_new_json,
 )
@@ -89,18 +91,19 @@ def test_nine_train_calls_finish_before_first_target_scoring(
     def fake_train(data, stats, *, seed, checkpoint_path, **kwargs):
         condition = checkpoint_path.parts[-3]
         events.append(("train", condition, seed))
-        return {
+        run = {
             "steps": 1500,
             "schedule_sha256": f"schedule-{seed}",
             "curve": [{"step": step, "lr": float(step) / 1500} for step in range(1, 1501)],
         }
+        return run, f"initial-{seed}"
 
     def fake_score(predictions, corpus, target_mean):
         events.append(("score", predictions["prediction"]))
         return _evidence(0.02, 0.9)
 
     monkeypatch.setattr(experiment, "predict_calibration", fake_predict)
-    monkeypatch.setattr(experiment, "train_fit_seed", fake_train)
+    monkeypatch.setattr(experiment, "train_with_actual_initial_hash", fake_train)
     monkeypatch.setattr(experiment, "score_predictions", fake_score)
     monkeypatch.setattr(experiment, "evaluate_calibration_gates", lambda evidence: {"abs": True})
     monkeypatch.setattr(experiment, "relative_gates", lambda *args: {"rel": True})
@@ -116,6 +119,7 @@ def test_nine_train_calls_finish_before_first_target_scoring(
         {},
         tmp_path / "run",
         device=torch.device("cpu"),
+        deadline=experiment.time.monotonic() + 60,
         provenance={},
     )
     train_indices = [index for index, event in enumerate(events) if event[0] == "train"]
@@ -123,6 +127,35 @@ def test_nine_train_calls_finish_before_first_target_scoring(
     assert len(train_indices) == 9
     assert max(train_indices) < min(score_indices)
     assert result["calibration_opened_after_optimizer_steps"] == 13500
+
+
+def test_actual_training_constructor_hash_detects_replaced_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_train(*args, seed, **kwargs):
+        experiment.calibration_training.MikasaSegmentSlotModel(seed=seed)
+        return {"seed": seed}
+
+    monkeypatch.setattr(experiment, "train_fit_seed", fake_train)
+    run, observed = experiment.train_with_actual_initial_hash(object(), object(), seed=230923)
+    assert run["seed"] == 230923
+    assert observed == experiment.model_state_sha256(experiment.MikasaSegmentSlotModel(seed=230923))
+
+    original = experiment.calibration_training.MikasaSegmentSlotModel
+
+    def changed_constructor(*args, **kwargs):
+        model = original(*args, **kwargs)
+        with torch.no_grad():
+            next(model.parameters()).add_(1.0)
+        return model
+
+    monkeypatch.setattr(
+        experiment.calibration_training,
+        "MikasaSegmentSlotModel",
+        changed_constructor,
+    )
+    with pytest.raises(RuntimeError, match="initialization changed"):
+        experiment.train_with_actual_initial_hash(object(), object(), seed=230923)
 
 
 def test_write_once_and_dev_confirmation_paths_are_rejected(tmp_path: Path) -> None:
@@ -199,6 +232,7 @@ def test_build_cli_disables_privileged_target_verification(
         ),
     )
     monkeypatch.setattr(runner, "verify_source_cache_receipt", lambda *args: {"ok": True})
+    monkeypatch.setattr(runner, "verify_corpus_receipt", lambda *args: {"ok": True})
     monkeypatch.setattr(
         runner,
         "build_temporal_moment_caches",
@@ -231,6 +265,81 @@ def test_build_cli_disables_privileged_target_verification(
     assert discover_calls == [{"verify_privileged_targets": False}]
 
 
+def test_run_cli_also_defers_privileged_target_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discover_calls = []
+
+    class FakeSourceCache:
+        root = tmp_path / "source-cache"
+
+    class FakeMomentCache:
+        def verify_receipt(self, result, source):
+            return None
+
+    monkeypatch.setattr(
+        runner.ShardedMemoryCorpus,
+        "discover",
+        lambda root, split, **kwargs: discover_calls.append(kwargs) or object(),
+    )
+    monkeypatch.setattr(
+        runner.FeatureCacheCorpus, "discover", lambda root, split: FakeSourceCache()
+    )
+    monkeypatch.setattr(
+        runner.TemporalMomentCache,
+        "discover",
+        lambda root, condition, source: FakeMomentCache(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_read",
+        lambda path, digest, status: (
+            {"status": status, "targets_opened": False},
+            {"path": str(path.resolve()), "bytes": 1, "sha256": digest},
+        ),
+    )
+    monkeypatch.setattr(runner, "verify_source_cache_receipt", lambda *args: {})
+    monkeypatch.setattr(runner, "verify_corpus_receipt", lambda *args: {})
+    monkeypatch.setattr(
+        runner,
+        "run_temporal_moment",
+        lambda *args, **kwargs: {
+            "status": "passed",
+            "mode": "mikasa_temporal_moment_sufficiency",
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "temporal_moment_sufficiency.py",
+            "--run",
+            "--corpus-root",
+            str(tmp_path / "corpus"),
+            "--source-cache-root",
+            str(tmp_path / "source-cache"),
+            "--moment-cache-root",
+            str(tmp_path / "moment-cache"),
+            "--corpus-result",
+            str(tmp_path / "corpus-result.json"),
+            "--source-cache-result",
+            str(tmp_path / "source-result.json"),
+            "--moment-cache-result",
+            str(tmp_path / "moment-result.json"),
+            "--expected-moment-cache-sha256",
+            "1" * 64,
+            "--prior-result",
+            str(tmp_path / "prior.json"),
+            "--historical-checkpoint-root",
+            str(tmp_path / "checkpoints"),
+            "--output-root",
+            str(tmp_path / "output"),
+        ],
+    )
+    assert runner.main() == 0
+    assert discover_calls == [{"verify_privileged_targets": False}]
+
+
 def test_source_cache_receipt_rejects_unrelated_root(tmp_path: Path) -> None:
     source_cache = type("Source", (), {"root": tmp_path / "actual"})()
     with pytest.raises(ValueError, match="root"):
@@ -239,3 +348,57 @@ def test_source_cache_receipt_rejects_unrelated_root(tmp_path: Path) -> None:
             {},
             {"path": str(tmp_path / "other/RESULT.json")},
         )
+
+
+def test_corpus_receipt_binds_declared_model_manifest_and_target_without_opening_target(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "corpus"
+    group = root / "train/group_000"
+    group.mkdir(parents=True)
+    identities = {}
+    for name, body in (
+        ("MANIFEST.json", b"manifest"),
+        ("model_inputs.npz", b"model"),
+        ("privileged_targets.npz", b"target"),
+    ):
+        path = group / name
+        path.write_bytes(body)
+        identities[name] = MaterialIdentity(path, len(body), hashlib.sha256(body).hexdigest())
+    corpus = SimpleNamespace(
+        root=root,
+        group_ids=(0,),
+        _by_group={
+            0: SimpleNamespace(
+                manifest=identities["MANIFEST.json"],
+                model_input=identities["model_inputs.npz"],
+                privileged_target=identities["privileged_targets.npz"],
+            )
+        },
+    )
+    record = {
+        "group_id": 0,
+        "split": "train",
+        "directory": "train/group_000",
+        "manifest": {
+            "name": "MANIFEST.json",
+            "bytes": 8,
+            "sha256": identities["MANIFEST.json"].sha256,
+        },
+        "model_inputs": {
+            "name": "model_inputs.npz",
+            "bytes": 5,
+            "sha256": identities["model_inputs.npz"].sha256,
+        },
+        "privileged_targets": {
+            "name": "privileged_targets.npz",
+            "bytes": 6,
+            "sha256": identities["privileged_targets.npz"].sha256,
+        },
+    }
+    result_identity = {"path": str((root / "RESULT.json").resolve())}
+    binding = runner.verify_corpus_receipt(corpus, {"group_records": [record]}, result_identity)
+    assert binding["target_bytes_opened"] is False
+    record["model_inputs"]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="model_inputs"):
+        runner.verify_corpus_receipt(corpus, {"group_records": [record]}, result_identity)

@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import time
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -17,6 +18,7 @@ if str(REPO) not in sys.path:
 from gr00t.experimental.mikasa_native_rgb_memory_runtime import (  # noqa: E402
     FeatureCacheCorpus,
     ShardedMemoryCorpus,
+    canonical_json_bytes,
     write_new_json,
 )
 from gr00t.experimental.mikasa_segment_slot_experiment import TRAIN_SEEDS  # noqa: E402
@@ -97,6 +99,57 @@ def verify_source_cache_receipt(
     }
 
 
+def verify_corpus_receipt(
+    corpus: ShardedMemoryCorpus,
+    result: dict,
+    result_identity: dict,
+) -> dict:
+    result_root = Path(result_identity["path"]).parent.resolve()
+    if corpus.root.resolve() != result_root:
+        raise ValueError("corpus root does not match frozen RESULT root")
+    train_records = [
+        record for record in result.get("group_records", []) if record.get("split") == "train"
+    ]
+    by_group = {record.get("group_id"): record for record in train_records}
+    if tuple(sorted(by_group)) != corpus.group_ids:
+        raise ValueError("corpus RESULT train group set changed")
+    for group_id in corpus.group_ids:
+        record = by_group[group_id]
+        shard = corpus._by_group[group_id]
+        if record.get("directory") != f"train/group_{group_id:03d}":
+            raise ValueError(f"corpus directory receipt changed for group {group_id}")
+        expected = {
+            "manifest": {
+                "name": shard.manifest.path.name,
+                "bytes": shard.manifest.bytes,
+                "sha256": shard.manifest.sha256,
+            },
+            "model_inputs": {
+                "name": shard.model_input.path.name,
+                "bytes": shard.model_input.bytes,
+                "sha256": shard.model_input.sha256,
+            },
+            "privileged_targets": {
+                "name": shard.privileged_target.path.name,
+                "bytes": shard.privileged_target.bytes,
+                "sha256": shard.privileged_target.sha256,
+            },
+        }
+        for name, identity in expected.items():
+            if record.get(name) != identity:
+                raise ValueError(f"corpus {name} receipt changed for group {group_id}")
+        target_path = shard.privileged_target.path
+        if target_path.is_symlink() or not target_path.is_file():
+            raise ValueError("declared privileged target path is missing or unsafe")
+        if target_path.resolve().parent != shard.manifest.path.resolve().parent:
+            raise ValueError("declared privileged target escapes group root")
+    return {
+        "root": str(result_root),
+        "groups_verified": len(corpus.group_ids),
+        "target_bytes_opened": False,
+    }
+
+
 def reject_path(path: Path | None) -> None:
     if path is not None and any(part.lower() in {"dev", "confirmation"} for part in path.parts):
         raise PermissionError("dev and confirmation paths are forbidden")
@@ -119,6 +172,7 @@ def smoke() -> dict:
 
 
 def main() -> int:
+    command_started = time.monotonic()
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--smoke", action="store_true")
@@ -152,7 +206,7 @@ def main() -> int:
         )
     ):
         parser.error("formal modes require corpus/cache roots and receipts")
-    _, corpus_id = _read(args.corpus_result, CORPUS_SHA, "passed")
+    corpus_value, corpus_id = _read(args.corpus_result, CORPUS_SHA, "passed")
     source_value, source_id = _read(args.source_cache_result, CACHE_SHA, "passed")
     if source_value.get("targets_opened") is not False:
         raise ValueError("source cache is not target blind")
@@ -164,6 +218,7 @@ def main() -> int:
             "train",
             verify_privileged_targets=False,
         )
+        corpus_binding = verify_corpus_receipt(corpus, corpus_value, corpus_id)
         built = build_temporal_moment_caches(source_cache, corpus, args.output_root)
         result = {
             "status": "passed",
@@ -174,20 +229,28 @@ def main() -> int:
             "permutation_identity": built["permutation_identity"],
             "permutation_sha256": built["permutation_sha256"],
             "corpus_result": corpus_id,
+            "corpus_binding": corpus_binding,
             "source_cache_result": source_id,
             "source_cache_binding": source_cache_binding,
             "targets_opened": False,
             "original_dev_opened": False,
             "confirmation_opened": False,
         }
-        if (
-            sum(p.stat().st_size for p in args.output_root.rglob("*") if p.is_file())
-            > 512 * 1024 * 1024
-        ):
+        projected = sum(p.stat().st_size for p in args.output_root.rglob("*") if p.is_file()) + len(
+            canonical_json_bytes(result)
+        )
+        if projected > 512 * 1024 * 1024:
             raise RuntimeError("temporal-moment cache exceeds 512 MiB")
+        if time.monotonic() > command_started + 600:
+            raise TimeoutError("temporal-moment cache exceeded 600 seconds")
         write_new_json(args.output_root / "RESULT.json", result)
     else:
-        corpus = ShardedMemoryCorpus.discover(args.corpus_root, "train")
+        corpus = ShardedMemoryCorpus.discover(
+            args.corpus_root,
+            "train",
+            verify_privileged_targets=False,
+        )
+        corpus_binding = verify_corpus_receipt(corpus, corpus_value, corpus_id)
         if any(
             value is None
             for value in (
@@ -221,8 +284,10 @@ def main() -> int:
             prior,
             args.output_root,
             device=torch.device("cuda:0"),
+            deadline=command_started + 60 * 60,
             provenance={
                 "corpus": corpus_id,
+                "corpus_binding": corpus_binding,
                 "source_cache": source_id,
                 "source_cache_binding": source_cache_binding,
                 "moment_cache": moment_id,

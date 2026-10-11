@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 import hashlib
 from pathlib import Path
 import statistics
@@ -26,6 +27,7 @@ from gr00t.experimental.mikasa_segment_slot_experiment import (
     TRAIN_STEPS,
     load_checkpoint,
 )
+import gr00t.experimental.mikasa_segment_slot_train_calibration as calibration_training
 from gr00t.experimental.mikasa_segment_slot_train_calibration import (
     CALIBRATION_GROUPS,
     FitOnlyData,
@@ -50,6 +52,32 @@ def model_state_sha256(model: torch.nn.Module) -> str:
         digest.update(name.encode())
         digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
     return digest.hexdigest()
+
+
+@contextmanager
+def capture_actual_training_initialization():
+    original = calibration_training.MikasaSegmentSlotModel
+    observed: list[str] = []
+
+    def constructor(*args, **kwargs):
+        model = original(*args, **kwargs)
+        observed.append(model_state_sha256(model))
+        return model
+
+    calibration_training.MikasaSegmentSlotModel = constructor
+    try:
+        yield observed
+    finally:
+        calibration_training.MikasaSegmentSlotModel = original
+
+
+def train_with_actual_initial_hash(*args, seed: int, **kwargs):
+    expected = model_state_sha256(MikasaSegmentSlotModel(seed=seed))
+    with capture_actual_training_initialization() as observed:
+        run = train_fit_seed(*args, seed=seed, **kwargs)
+    if observed != [expected]:
+        raise RuntimeError("actual training model initialization changed")
+    return run, observed[0]
 
 
 def learning_rate_curve_sha256(curve: list[Mapping[str, Any]]) -> str:
@@ -282,6 +310,7 @@ def run_temporal_moment(
     output_root: Path,
     *,
     device: torch.device,
+    deadline: float,
     provenance: Mapping[str, Any],
 ) -> dict[str, Any]:
     if output_root.exists():
@@ -296,7 +325,6 @@ def run_temporal_moment(
     historical_predictions = predict_calibration(
         historical_checkpoints, original_cache, device=device
     )
-    deadline = time.monotonic() + 60 * 60
     training, checkpoints = {}, {}
     initial_hashes, schedule_hashes, lr_hashes = {}, {}, {}
     completed_steps = 0
@@ -304,10 +332,14 @@ def run_temporal_moment(
         data = FitOnlyData(corpus, condition_caches[condition])
         training[condition], checkpoints[condition] = [], {}
         for seed in TRAIN_SEEDS:
-            initial_hash = model_state_sha256(MikasaSegmentSlotModel(seed=seed))
             path = output_root / "checkpoints" / condition / f"seed_{seed}" / "checkpoint_final.pt"
-            run = train_fit_seed(
-                data, stats, seed=seed, device=device, deadline=deadline, checkpoint_path=path
+            run, initial_hash = train_with_actual_initial_hash(
+                data,
+                stats,
+                seed=seed,
+                device=device,
+                deadline=deadline,
+                checkpoint_path=path,
             )
             training[condition].append(run)
             checkpoints[condition][seed] = path
