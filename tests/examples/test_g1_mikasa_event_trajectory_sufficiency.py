@@ -87,3 +87,50 @@ def test_runner_exposes_exact_three_cpu_stages() -> None:
     assert 'mode.add_argument("--map"' in source
     assert 'mode.add_argument("--score"' in source
     assert "verify_privileged_targets=False" in source
+
+
+def test_score_rejects_existing_output_before_receipts_or_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "existing-output"
+    output.mkdir()
+    calls = {"read": 0, "discover": 0, "target": 0}
+
+    class FakeCorpus:
+        def load_target_group(self, group_id):
+            calls["target"] += 1
+            raise AssertionError("target opened before write-once rejection")
+
+    def fake_read(*args, **kwargs):
+        calls["read"] += 1
+        raise AssertionError("receipt opened before write-once rejection")
+
+    def fake_discover(*args, **kwargs):
+        calls["discover"] += 1
+        return FakeCorpus()
+
+    monkeypatch.setattr(runner, "_read", fake_read)
+    monkeypatch.setattr(runner.ShardedMemoryCorpus, "discover", fake_discover)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "event_trajectory_sufficiency.py",
+            "--score",
+            "--corpus-root",
+            str(tmp_path / "corpus"),
+            "--corpus-result",
+            str(tmp_path / "corpus-result.json"),
+            "--mapping-root",
+            str(tmp_path / "mapping"),
+            "--mapping-result",
+            str(tmp_path / "mapping-result.json"),
+            "--expected-mapping-sha256",
+            "1" * 64,
+            "--output-root",
+            str(output),
+        ],
+    )
+    with pytest.raises(FileExistsError):
+        runner.main()
+    assert calls == {"read": 0, "discover": 0, "target": 0}

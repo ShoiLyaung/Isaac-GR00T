@@ -122,6 +122,8 @@ def main() -> int:
             reject_path(value)
     if args.corpus_root is None or args.corpus_result is None or args.output_root is None:
         parser.error("formal stages require corpus root/result and output root")
+    if args.output_root.exists():
+        raise FileExistsError(args.output_root)
     corpus_result, corpus_identity = _read(args.corpus_result, CORPUS_SHA)
     corpus = ShardedMemoryCorpus.discover(
         args.corpus_root, "train", verify_privileged_targets=False
