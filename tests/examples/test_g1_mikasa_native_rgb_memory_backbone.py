@@ -7,6 +7,7 @@ import sys
 
 import gr00t.experimental.mikasa_native_rgb_memory_experiment as experiment
 import gr00t.experimental.mikasa_native_rgb_memory_runtime as runtime
+import numpy as np
 import pytest
 
 
@@ -276,6 +277,59 @@ def test_dev_gate_uses_all_controls_groups_seeds_and_interventions() -> None:
     }
     gates = experiment.evaluate_dev_gates(evidence, cost)
     assert gates and all(gates.values())
+    assert all(type(value) is bool for value in gates.values())
+    assert json.loads(runtime.canonical_json_bytes(gates)) == gates
     evidence["aggregates"]["mamba_full"]["seed_equal"]["order_correct"] = 0.79
     failed = experiment.evaluate_dev_gates(evidence, cost)
+    assert all(type(value) is bool for value in failed.values())
+    runtime.canonical_json_bytes(failed)
     assert failed["mamba_full_order_accuracy_at_least_80pct"] is False
+
+
+def test_dev_gate_result_is_canonical_json_with_only_python_bools() -> None:
+    values = {
+        "mamba_current": (1.0, 0.55),
+        "mamba_one_frame": (1.0, 0.60),
+        "mamba_last_segment": (1.0, 0.65),
+        "mamba_full": (0.70, 0.90),
+        "gru_full": (0.69, 0.91),
+        "transformer_full": (0.72, 0.88),
+    }
+    records = {
+        condition: {
+            seed: [
+                {"group_id": group_id, "first_mae_m": mae, "complete_mae_m": mae}
+                for group_id in range(6)
+            ]
+            for seed in experiment.TRAIN_SEEDS
+        }
+        for condition, (mae, _) in values.items()
+    }
+    aggregates = {
+        condition: {
+            "seed_equal": {
+                "first_mae_m": mae,
+                "complete_mae_m": mae,
+                "order_correct": accuracy,
+            }
+        }
+        for condition, (mae, accuracy) in values.items()
+    }
+    interventions = {
+        str(seed): {
+            "substitute": {"order_correct": np.float64(0.90)},
+            "zero": {"first_mae_m": np.float64(0.80)},
+            "shuffle": {"first_mae_m": np.float64(0.80)},
+        }
+        for seed in experiment.TRAIN_SEEDS
+    }
+    gates = experiment.evaluate_dev_gates(
+        {"records": records, "aggregates": aggregates, "interventions": interventions},
+        {
+            "three_blocks_passed": True,
+            "mamba_transformer_p95_ratio_t1040": 0.70,
+            "mamba_transformer_peak_allocated_ratio_t1040": 0.80,
+        },
+    )
+    assert all(type(value) is bool for value in gates.values())
+    assert json.loads(runtime.canonical_json_bytes(gates)) == gates

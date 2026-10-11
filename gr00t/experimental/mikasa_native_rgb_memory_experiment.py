@@ -516,7 +516,7 @@ def evaluate_dev_gates(evidence: Mapping[str, Any], cost: Mapping[str, Any]) -> 
             gates[f"{metric}_direction_5of6_and_all_seeds_vs_{control}"] = (
                 direction_count >= 5 and all_seed_medians
             )
-    return gates
+    return {name: bool(value) for name, value in gates.items()}
 
 
 def run_overfit(
