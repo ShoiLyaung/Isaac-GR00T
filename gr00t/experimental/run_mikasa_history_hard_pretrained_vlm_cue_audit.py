@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Final
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
@@ -68,7 +69,8 @@ from gr00t.experimental.mikasa_history_hard_pretrained_vlm_cue_audit import (
 
 
 REPO: Final = Path(__file__).resolve().parents[2]
-BASE_COMMIT: Final = "7aa3ec5a31d6c3276abda0e660c378ce939aa70b"
+BASE_COMMIT: Final = "3aa07d3bce8b84da3d959a48c50e5ecf105a9f29"
+EXPECTED_BRANCH: Final = "codex/g1-mikasa-history-hard-pretrained-vlm-cue-audit-local-processor-r1"
 SOURCE_PATHS: Final = (
     "gr00t/experimental/mikasa_history_hard_pretrained_vlm_cue_audit.py",
     "gr00t/experimental/run_mikasa_history_hard_pretrained_vlm_cue_audit.py",
@@ -82,7 +84,38 @@ DEPENDENCY_PATHS: Final = (
     "gr00t/model/gr00t_n1d7/processing_gr00t_n1d7.py",
     "gr00t/model/modules/qwen3_backbone.py",
 )
-PHASES: Final = ("source_acceptance", "layout", "cache", "train_audit", "dev")
+PHASES: Final = (
+    "source_acceptance",
+    "processor_smoke",
+    "layout",
+    "cache",
+    "train_audit",
+    "dev",
+)
+
+PREDECESSOR_IDENTITIES: Final = {
+    "r1_failure": (
+        Path(
+            "/home/sl/research/icra27-artifacts/"
+            "g1-mikasa-history-hard-pretrained-vlm-cue-audit-r1/"
+            "layout-probe-gpu0-r1.FAILED.json"
+        ),
+        1_291,
+        "fa3fd4b235c5812317e6fb7b92440acac9de6ca101ebc1776c0ebf7b0edb7a8f",
+    ),
+    "offline_repair_failure": (
+        Path(
+            "/home/sl/research/icra27-artifacts/"
+            "g1-mikasa-history-hard-pretrained-vlm-cue-audit-offline-repair-r1/"
+            "layout-probe-gpu0-r1.FAILED.json"
+        ),
+        1_387,
+        "f730a0d5197edc08bf821b1a6ae55f50a85d857218a677a5a7057dd711c7c2c3",
+    ),
+}
+REMOTE_MODEL_ID: Final = "nvidia/Cosmos-Reason2-2B"
+PROCESSOR_SMOKE_WALL_SECONDS: Final = 5 * 60.0
+PROCESSOR_SMOKE_ARTIFACT_LIMIT: Final = 16 * 1024 * 1024
 
 PRE_RUN: Final = Path(
     "/home/sl/research/icra27-artifacts/"
@@ -200,7 +233,7 @@ def source_identity(repo: Path) -> dict[str, Any]:
     for line in raw.splitlines():
         status_code, path = line.split("\t", maxsplit=1)
         observed[path] = status_code
-    expected = {path: "A" for path in SOURCE_PATHS}
+    expected = {path: "M" for path in SOURCE_PATHS}
     if observed != expected:
         raise RuntimeError(f"cue-audit exact source diff changed: {observed}")
     bound_paths = (*SOURCE_PATHS, *DEPENDENCY_PATHS)
@@ -218,10 +251,13 @@ def source_identity(repo: Path) -> dict[str, Any]:
         if path.is_symlink() or value != _git(repo, "show", f"HEAD:{relative}"):
             raise RuntimeError(f"cue-audit source differs from HEAD: {relative}")
         files[relative] = {"bytes": len(value), "sha256": sha256_bytes(value)}
+    branch = _git(repo, "branch", "--show-current").decode().strip()
+    if branch != EXPECTED_BRANCH:
+        raise RuntimeError(f"cue-audit local-processor branch changed: {branch}")
     return {
         "base_commit": BASE_COMMIT,
         "head_commit": head,
-        "branch": _git(repo, "branch", "--show-current").decode().strip(),
+        "branch": branch,
         "exact_diff": observed,
         "files": {path: files[path] for path in SOURCE_PATHS},
         "dependency_files": {path: files[path] for path in DEPENDENCY_PATHS},
@@ -338,8 +374,29 @@ def validate_hf_snapshot() -> dict[str, Any]:
     }
 
 
+def validate_predecessors() -> dict[str, Any]:
+    identities = {
+        name: _regular_identity(path, size, digest)
+        for name, (path, size, digest) in PREDECESSOR_IDENTITIES.items()
+    }
+    for name, (path, _size, _digest) in PREDECESSOR_IDENTITIES.items():
+        value = json.loads(path.read_bytes())
+        if (
+            value.get("status") != "technical_failed"
+            or value.get("model_forward_calls") != 0
+            or value.get("target_npz_opened") != []
+            or value.get("retry_count") != 0
+        ):
+            raise RuntimeError(f"predecessor failure boundary changed: {name}")
+    return identities
+
+
 def validate_external_materials() -> dict[str, Any]:
-    return {"checkpoint_and_processor": validate_pre_run(), "hf_snapshot": validate_hf_snapshot()}
+    return {
+        "predecessors": validate_predecessors(),
+        "checkpoint_and_processor": validate_pre_run(),
+        "hf_snapshot": validate_hf_snapshot(),
+    }
 
 
 def bind_runtime_external_materials(source: Mapping[str, Any]) -> dict[str, Any]:
@@ -353,6 +410,10 @@ def bind_runtime_external_materials(source: Mapping[str, Any]) -> dict[str, Any]
 def protocol() -> dict[str, Any]:
     return {
         "experiment_id": EXPERIMENT_ID,
+        "repair_variable": "localize only bounded collator build_processor resolution",
+        "predecessor_failure_sha256": {
+            name: identity[2] for name, identity in PREDECESSOR_IDENTITIES.items()
+        },
         "phases": list(PHASES),
         "camera_order": list(CAMERAS),
         "prompt": PROMPT,
@@ -360,6 +421,8 @@ def protocol() -> dict[str, Any]:
         "public_boundary": "model.backbone.model.get_image_features",
         "pre_run_sha256": PRE_RUN_SHA256,
         "hf_revision": HF_REVISION,
+        "processor_smoke_wall_seconds": PROCESSOR_SMOKE_WALL_SECONDS,
+        "processor_smoke_artifact_limit_bytes": PROCESSOR_SMOKE_ARTIFACT_LIMIT,
         "hf_snapshot_files": sorted(HF_SNAPSHOT_IDENTITIES),
         "privileged_label_manifest_sha256_frozen_but_unopened": (PRIVILEGED_LABEL_MANIFEST_SHA256),
         "merged_tokens_per_image": 64,
@@ -534,33 +597,129 @@ def _formal_runtime(device_name: str) -> tuple[torch.device, dict[str, Any]]:
     }
 
 
-def _load_model_and_processor(device: torch.device):
-    from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7
-    from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import Gr00tN1d7Processor
-
-    loading = {
+def _frozen_loading_kwargs() -> dict[str, Any]:
+    return {
         "local_files_only": True,
         "trust_remote_code": True,
         "revision": HF_REVISION,
         "cache_dir": str(HF_CACHE_ROOT),
     }
-    model, info = Gr00tN1d7.from_pretrained(
-        CHECKPOINT,
-        local_files_only=True,
-        output_loading_info=True,
-        ignore_mismatched_sizes=False,
-        transformers_loading_kwargs=loading,
-    )
-    if any(
-        info.get(key)
-        for key in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs")
+
+
+@contextmanager
+def _forbidden_network_calls():
+    calls: list[str] = []
+
+    def forbid(name: str):
+        def fail(*_args, **_kwargs):
+            calls.append(name)
+            raise RuntimeError(f"network call forbidden during local processor repair: {name}")
+
+        return fail
+
+    with (
+        patch("huggingface_hub.model_info", forbid("model_info")),
+        patch("huggingface_hub.hf_api.HfApi.model_info", forbid("HfApi.model_info")),
+        patch("requests.sessions.Session.request", forbid("requests.Session.request")),
     ):
-        raise RuntimeError(f"strict Yuqi17000 checkpoint load failed: {info}")
-    processor = Gr00tN1d7Processor.from_pretrained(
-        PROCESSOR_ROOT,
-        local_files_only=True,
-        transformers_loading_kwargs=loading,
+        yield calls
+
+
+@contextmanager
+def _local_collator_processor_builder():
+    from transformers import Qwen3VLProcessor
+
+    from gr00t.model.gr00t_n1d7 import processing_gr00t_n1d7 as processing
+
+    calls: list[dict[str, Any]] = []
+
+    def local_builder(model_name: str, loading_kwargs: Mapping[str, Any]):
+        if model_name != REMOTE_MODEL_ID:
+            raise RuntimeError(f"collator builder expected the official model ID: {model_name}")
+        expected = _frozen_loading_kwargs()
+        if dict(loading_kwargs) != expected:
+            raise RuntimeError("collator builder loading kwargs changed")
+        processor = Qwen3VLProcessor.from_pretrained(str(HF_SNAPSHOT_ROOT), **expected)
+        calls.append(
+            {
+                "requested_model_name": model_name,
+                "resolved_snapshot": str(HF_SNAPSHOT_ROOT),
+                "processor_class": f"{type(processor).__module__}.{type(processor).__qualname__}",
+                "tokenizer_name_or_path": str(processor.tokenizer.name_or_path),
+            }
+        )
+        return processor
+
+    with patch.object(processing, "build_processor", local_builder):
+        yield calls
+
+
+def _validate_local_builder_calls(calls: Sequence[Mapping[str, Any]]) -> bool:
+    return bool(
+        len(calls) == 1
+        and calls[0].get("requested_model_name") == REMOTE_MODEL_ID
+        and calls[0].get("resolved_snapshot") == str(HF_SNAPSHOT_ROOT)
+        and str(calls[0].get("processor_class", "")).endswith(".Qwen3VLProcessor")
+        and calls[0].get("tokenizer_name_or_path") == str(HF_SNAPSHOT_ROOT)
     )
+
+
+def _construct_collator_smoke() -> dict[str, Any]:
+    from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import Gr00tN1d7DataCollator
+
+    with _forbidden_network_calls() as network_calls:
+        with _local_collator_processor_builder() as builder_calls:
+            collator = Gr00tN1d7DataCollator(
+                model_name=REMOTE_MODEL_ID,
+                model_type="qwen",
+                transformers_loading_kwargs=_frozen_loading_kwargs(),
+            )
+    receipt = {
+        "collator_class": f"{type(collator).__module__}.{type(collator).__qualname__}",
+        "collator_model_name": collator.model_name,
+        "collator_model_type": collator.model_type,
+        "builder_calls": list(builder_calls),
+        "network_calls": list(network_calls),
+        "padding_side": collator.processor.tokenizer.padding_side,
+    }
+    if (
+        receipt["collator_model_name"] != REMOTE_MODEL_ID
+        or receipt["collator_model_type"] != "qwen"
+        or receipt["padding_side"] != "left"
+        or not _validate_local_builder_calls(builder_calls)
+        or network_calls
+    ):
+        raise RuntimeError(f"local collator processor smoke failed: {receipt}")
+    return receipt
+
+
+def _load_model_and_processor(device: torch.device):
+    from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7
+    from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import Gr00tN1d7Processor
+
+    loading = _frozen_loading_kwargs()
+    with _forbidden_network_calls() as network_calls:
+        with _local_collator_processor_builder() as builder_calls:
+            model, info = Gr00tN1d7.from_pretrained(
+                CHECKPOINT,
+                local_files_only=True,
+                output_loading_info=True,
+                ignore_mismatched_sizes=False,
+                transformers_loading_kwargs=loading,
+            )
+        if any(
+            info.get(key)
+            for key in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs")
+        ):
+            raise RuntimeError(f"strict Yuqi17000 checkpoint load failed: {info}")
+        processor = Gr00tN1d7Processor.from_pretrained(
+            PROCESSOR_ROOT,
+            local_files_only=True,
+            model_name=str(HF_SNAPSHOT_ROOT),
+            transformers_loading_kwargs=loading,
+        )
+    if network_calls or not _validate_local_builder_calls(builder_calls):
+        raise RuntimeError("local collator processor repair did not remain exact and offline")
     processor.eval()
     model = model.to(device=device, dtype=torch.bfloat16).eval()
     model.requires_grad_(False)
@@ -568,13 +727,24 @@ def _load_model_and_processor(device: torch.device):
         model.config.tune_visual is not True
         or model.config.tune_llm is not False
         or model.config.backbone_embedding_dim != EMBED_DIM
+        or model.config.model_name != REMOTE_MODEL_ID
+        or model.collator.model_name != REMOTE_MODEL_ID
+        or processor.model_name != str(HF_SNAPSHOT_ROOT)
     ):
         raise RuntimeError("loaded Yuqi visual contract changed")
     if any(
         parameter.requires_grad or parameter.grad is not None for parameter in model.parameters()
     ):
         raise RuntimeError("frozen model has trainable parameters or gradients")
-    return model, processor, info
+    loading_info = dict(info)
+    loading_info["local_processor_repair"] = {
+        "serialized_model_name": model.config.model_name,
+        "collator_model_name": model.collator.model_name,
+        "compatibility_processor_model_name": processor.model_name,
+        "builder_calls": list(builder_calls),
+        "network_calls": list(network_calls),
+    }
+    return model, processor, loading_info
 
 
 @contextmanager
@@ -708,6 +878,18 @@ def _public_boundary_exact(receipt: Mapping[str, Any], images: int) -> bool:
     )
 
 
+def _local_processor_repair_exact(loading: Mapping[str, Any]) -> bool:
+    repair = loading.get("local_processor_repair")
+    return bool(
+        isinstance(repair, Mapping)
+        and repair.get("serialized_model_name") == REMOTE_MODEL_ID
+        and repair.get("collator_model_name") == REMOTE_MODEL_ID
+        and repair.get("compatibility_processor_model_name") == str(HF_SNAPSHOT_ROOT)
+        and _validate_local_builder_calls(repair.get("builder_calls", ()))
+        and repair.get("network_calls") == []
+    )
+
+
 def _write_result(
     output_root: Path, result: Mapping[str, Any], *, limit: int | None = None
 ) -> None:
@@ -717,6 +899,44 @@ def _write_result(
         raise RuntimeError(f"artifact exceeds frozen byte limit: {projected} > {limit}")
     write_once(output_root / "RESULT.json", payload)
     freeze_directory(output_root)
+
+
+def run_processor_smoke(output_root: Path, *, provenance: Mapping[str, Any]) -> dict[str, Any]:
+    if os.path.lexists(output_root):
+        raise FileExistsError(output_root)
+    started = time.monotonic()
+    receipt = _construct_collator_smoke()
+    elapsed = time.monotonic() - started
+    gates = {
+        "official_model_id_preserved": receipt["collator_model_name"] == REMOTE_MODEL_ID,
+        "one_local_builder_call": _validate_local_builder_calls(receipt["builder_calls"]),
+        "network_calls_zero": receipt["network_calls"] == [],
+        "left_padding_preserved": receipt["padding_side"] == "left",
+        "gpu_contexts_zero": not torch.cuda.is_initialized(),
+        "wall_within_5_minutes": elapsed <= PROCESSOR_SMOKE_WALL_SECONDS,
+    }
+    result = {
+        "schema": f"{EXPERIMENT_ID}/processor-smoke-v1",
+        "status": "passed" if all(gates.values()) else "gate_failed",
+        "mode": "processor_smoke",
+        "receipt": receipt,
+        "gates": gates,
+        "wall_seconds": elapsed,
+        "provenance": dict(provenance),
+        "gpu_contexts": 0,
+        "model_weight_loads": 0,
+        "model_calls": 0,
+        "image_outputs": 0,
+        "target_manifest_opened": False,
+        "target_npz_opened": [],
+        "fresh_data_opened": False,
+        "action_outputs": 0,
+        "optimizer_steps": 0,
+        "retry_count": 0,
+    }
+    output_root.mkdir(parents=True)
+    _write_result(output_root, result, limit=PROCESSOR_SMOKE_ARTIFACT_LIMIT)
+    return result
 
 
 def run_layout(
@@ -758,6 +978,7 @@ def run_layout(
         == repeated_boundary["merged_token_sha256"]
         and torch.equal(first, repeated),
         "public_boundary_exact": _public_boundary_exact(boundary, 2),
+        "local_processor_repair_exact": _local_processor_repair_exact(loading),
         "forbidden_paths_zero": forbidden == [],
         "parameter_versions_unchanged": versions == _parameter_versions(model),
         "gradients_zero": all(parameter.grad is None for parameter in model.parameters()),
@@ -882,6 +1103,7 @@ def run_cache(
         "first_batch_repeat_exact": first_batch_exact is True,
         "public_boundary_exact": boundary_receipt is not None
         and _public_boundary_exact(boundary_receipt, FRAME_BATCH_SIZE * len(CAMERAS)),
+        "local_processor_repair_exact": _local_processor_repair_exact(loading),
         "forbidden_paths_zero": forbidden == [],
         "parameter_versions_unchanged": versions == _parameter_versions(model),
         "gradients_zero": all(parameter.grad is None for parameter in model.parameters()),
@@ -1351,6 +1573,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--source-result", type=Path)
     parser.add_argument("--source-sha256")
+    parser.add_argument("--processor-smoke-result", type=Path)
+    parser.add_argument("--processor-smoke-sha256")
     parser.add_argument("--layout-result", type=Path)
     parser.add_argument("--layout-sha256")
     parser.add_argument("--cache-root", type=Path)
@@ -1381,6 +1605,24 @@ def main(argv: list[str] | None = None) -> int:
             "source_acceptance": source_receipt,
             "runtime_source_identity": current_source,
         }
+        if args.phase == "processor_smoke":
+            provenance["runtime_external_materials"] = bind_runtime_external_materials(source)
+            result = run_processor_smoke(args.output_root, provenance=provenance)
+            print(json.dumps(result, indent=2, sort_keys=True), flush=True)
+            return 0 if result["status"] == "passed" else 2
+        else:
+            smoke, smoke_receipt = _read_receipt(
+                _required(args.processor_smoke_result, "--processor-smoke-result"),
+                _required(args.processor_smoke_sha256, "--processor-smoke-sha256"),
+                "processor_smoke",
+            )
+            if smoke.get("schema") != f"{EXPERIMENT_ID}/processor-smoke-v1" or not all(
+                smoke.get("gates", {}).values()
+            ):
+                raise PermissionError("processor smoke gates did not all pass")
+            if smoke.get("provenance", {}).get("source_acceptance") != source_receipt:
+                raise PermissionError("processor-smoke/source provenance changed")
+            provenance["processor_smoke"] = smoke_receipt
         if args.phase == "layout":
             provenance["runtime_external_materials"] = bind_runtime_external_materials(source)
             device, runtime = _formal_runtime(args.device)
@@ -1403,6 +1645,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise PermissionError("layout probe gates did not all pass")
             if layout.get("provenance", {}).get("source_acceptance") != source_receipt:
                 raise PermissionError("layout/source-acceptance provenance changed")
+            if layout.get("provenance", {}).get("processor_smoke") != smoke_receipt:
+                raise PermissionError("layout/processor-smoke provenance changed")
             provenance["layout_probe"] = layout_receipt
             if args.phase == "cache":
                 provenance["runtime_external_materials"] = bind_runtime_external_materials(source)

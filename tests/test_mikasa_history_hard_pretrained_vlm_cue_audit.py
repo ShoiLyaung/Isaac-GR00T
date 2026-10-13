@@ -406,8 +406,16 @@ def test_dev_standardizer_failure_prevents_any_dev_target_read(
 
 
 def test_source_contract_adds_only_dedicated_files_and_no_core_model_diff() -> None:
-    assert runner.BASE_COMMIT == "7aa3ec5a31d6c3276abda0e660c378ce939aa70b"
-    assert runner.PHASES == ("source_acceptance", "layout", "cache", "train_audit", "dev")
+    assert runner.BASE_COMMIT == "3aa07d3bce8b84da3d959a48c50e5ecf105a9f29"
+    assert runner.EXPECTED_BRANCH.endswith("local-processor-r1")
+    assert runner.PHASES == (
+        "source_acceptance",
+        "processor_smoke",
+        "layout",
+        "cache",
+        "train_audit",
+        "dev",
+    )
     assert runner.SOURCE_PATHS == (
         "gr00t/experimental/mikasa_history_hard_pretrained_vlm_cue_audit.py",
         "gr00t/experimental/run_mikasa_history_hard_pretrained_vlm_cue_audit.py",
@@ -415,6 +423,7 @@ def test_source_contract_adds_only_dedicated_files_and_no_core_model_diff() -> N
     )
     assert runner.protocol()["public_boundary"] == "model.backbone.model.get_image_features"
     assert runner.protocol()["hf_revision"] == runner.HF_REVISION
+    assert runner.protocol()["repair_variable"].startswith("localize only")
     assert runner.protocol()["action_outputs"] == 0
     assert "gr00t/model/modules/qwen3_backbone.py" in runner.DEPENDENCY_PATHS
 
@@ -429,10 +438,23 @@ def test_layout_rebinds_external_materials_before_gpu_context(
 ) -> None:
     calls = []
     source = {"status": "passed", "mode": "source_acceptance"}
+    source_receipt = {"mode": "source_acceptance"}
+    smoke_receipt = {"mode": "processor_smoke"}
+    smoke = {
+        "schema": f"{runner.EXPERIMENT_ID}/processor-smoke-v1",
+        "status": "passed",
+        "mode": "processor_smoke",
+        "gates": {"passed": True},
+        "provenance": {"source_acceptance": source_receipt},
+    }
+
+    def receipt(_path, _sha, mode):
+        return (source, source_receipt) if mode == "source_acceptance" else (smoke, smoke_receipt)
+
     monkeypatch.setattr(
         runner,
         "_read_receipt",
-        lambda *_args, **_kwargs: (source, {"mode": "source_acceptance"}),
+        receipt,
     )
     monkeypatch.setattr(runner, "bind_runtime_source", lambda *_args: {})
     monkeypatch.setattr(
@@ -457,6 +479,10 @@ def test_layout_rebinds_external_materials_before_gpu_context(
                 str(tmp_path / "source"),
                 "--source-sha256",
                 "a" * 64,
+                "--processor-smoke-result",
+                str(tmp_path / "smoke"),
+                "--processor-smoke-sha256",
+                "b" * 64,
             ]
         )
     assert calls == ["external", "gpu"]
@@ -496,6 +522,89 @@ def test_hf_snapshot_is_revision_pinned_and_content_hashed(
         runner.validate_hf_snapshot()
 
 
+def test_local_collator_builder_preserves_official_id_and_restores_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gr00t.model.gr00t_n1d7 import processing_gr00t_n1d7 as processing
+    from transformers import Qwen3VLProcessor
+
+    fake = type("Qwen3VLProcessor", (), {})()
+    fake.tokenizer = SimpleNamespace(
+        name_or_path=str(runner.HF_SNAPSHOT_ROOT),
+        padding_side="right",
+    )
+    observed = []
+
+    def from_pretrained(_cls, path, **kwargs):
+        observed.append((path, kwargs))
+        return fake
+
+    monkeypatch.setattr(Qwen3VLProcessor, "from_pretrained", classmethod(from_pretrained))
+    original = processing.build_processor
+    with runner._local_collator_processor_builder() as calls:
+        value = processing.build_processor(
+            runner.REMOTE_MODEL_ID,
+            runner._frozen_loading_kwargs(),
+        )
+    assert value is fake
+    assert processing.build_processor is original
+    assert observed == [(str(runner.HF_SNAPSHOT_ROOT), runner._frozen_loading_kwargs())]
+    assert runner._validate_local_builder_calls(calls)
+
+
+def test_actual_collator_smoke_contract_with_stub_processor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from transformers import Qwen3VLProcessor
+
+    fake = type("Qwen3VLProcessor", (), {})()
+    fake.tokenizer = SimpleNamespace(
+        name_or_path=str(runner.HF_SNAPSHOT_ROOT),
+        padding_side="right",
+    )
+    monkeypatch.setattr(
+        Qwen3VLProcessor,
+        "from_pretrained",
+        classmethod(lambda _cls, *_args, **_kwargs: fake),
+    )
+    receipt = runner._construct_collator_smoke()
+    assert receipt["collator_model_name"] == runner.REMOTE_MODEL_ID
+    assert receipt["padding_side"] == "left"
+    assert receipt["network_calls"] == []
+    assert runner._validate_local_builder_calls(receipt["builder_calls"])
+
+
+def test_network_calls_fail_closed_during_local_processor_repair() -> None:
+    import requests
+
+    with runner._forbidden_network_calls() as calls:
+        with pytest.raises(RuntimeError, match="network call forbidden"):
+            requests.Session().request("GET", "https://example.invalid")
+    assert calls == ["requests.Session.request"]
+
+
+def test_local_processor_repair_gate_requires_exact_receipt() -> None:
+    receipt = {
+        "local_processor_repair": {
+            "serialized_model_name": runner.REMOTE_MODEL_ID,
+            "collator_model_name": runner.REMOTE_MODEL_ID,
+            "compatibility_processor_model_name": str(runner.HF_SNAPSHOT_ROOT),
+            "builder_calls": [
+                {
+                    "requested_model_name": runner.REMOTE_MODEL_ID,
+                    "resolved_snapshot": str(runner.HF_SNAPSHOT_ROOT),
+                    "processor_class": "transformers.Qwen3VLProcessor",
+                    "tokenizer_name_or_path": str(runner.HF_SNAPSHOT_ROOT),
+                }
+            ],
+            "network_calls": [],
+        }
+    }
+    assert runner._local_processor_repair_exact(receipt)
+    receipt["local_processor_repair"]["network_calls"] = ["model_info"]
+    assert not runner._local_processor_repair_exact(receipt)
+
+
 def test_train_phase_validates_cache_before_label_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -514,11 +623,26 @@ def test_train_phase_validates_cache_before_label_access(
         "status": "passed",
         "mode": "layout_probe",
         "gates": {"passed": True},
+        "provenance": {
+            "source_acceptance": {"mode": "source_acceptance"},
+            "processor_smoke": {"mode": "processor_smoke"},
+        },
+    }
+    smoke = {
+        "schema": f"{runner.EXPERIMENT_ID}/processor-smoke-v1",
+        "status": "passed",
+        "mode": "processor_smoke",
+        "gates": {"passed": True},
         "provenance": {"source_acceptance": {"mode": "source_acceptance"}},
     }
 
     def receipt(_path, _sha, mode):
-        return (source if mode == "source_acceptance" else layout), {"mode": mode}
+        values = {
+            "source_acceptance": source,
+            "processor_smoke": smoke,
+            "layout_probe": layout,
+        }
+        return values[mode], {"mode": mode}
 
     monkeypatch.setattr(runner, "_read_receipt", receipt)
     monkeypatch.setattr(runner, "bind_runtime_source", lambda *_args: {})
@@ -544,6 +668,10 @@ def test_train_phase_validates_cache_before_label_access(
                 str(tmp_path / "source"),
                 "--source-sha256",
                 "a" * 64,
+                "--processor-smoke-result",
+                str(tmp_path / "smoke"),
+                "--processor-smoke-sha256",
+                "d" * 64,
                 "--layout-result",
                 str(tmp_path / "layout"),
                 "--layout-sha256",

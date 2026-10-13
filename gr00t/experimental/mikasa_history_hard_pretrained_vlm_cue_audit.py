@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 
-EXPERIMENT_ID: Final = "g1-mikasa-history-hard-pretrained-vlm-cue-audit-r1"
+EXPERIMENT_ID: Final = "g1-mikasa-history-hard-pretrained-vlm-cue-audit-local-processor-r1"
 CAMERAS: Final = ("base_camera", "hand_camera")
 CUE_FRAMES: Final = 130
 SLOT_FRAMES: Final = 65
