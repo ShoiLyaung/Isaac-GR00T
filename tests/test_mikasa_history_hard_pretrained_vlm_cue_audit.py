@@ -198,6 +198,32 @@ def test_train_loo_fits_only_the_five_candidate_geometries(
         assert len({row // 6 for row in rows}) == 5
 
 
+def test_train_shuffle_reuses_ordered_fold_standardizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _small_descriptor_contract(monkeypatch, dim=2)
+    rng = np.random.default_rng(19)
+    cue = rng.normal(size=(48, 130, 2, 2)).astype(np.float32)
+    current = rng.normal(size=(48, 2, 2)).astype(np.float32)
+    sample_ids = tuple(f"{index:064x}" for index in range(48))
+    labels = np.tile(np.asarray([[0, 1], [0, 2], [1, 0], [1, 2], [2, 0], [2, 1]]), (8, 1))
+    groups = np.arange(48, dtype=np.int64) // 6
+    primary = audit.condition_slots(cue, current, sample_ids, audit.PRIMARY_CONDITION)
+    seen = []
+    original = audit.fit_standardizer
+
+    def record(slots, rows):
+        seen.append(np.array_equal(slots, primary))
+        return original(slots, rows)
+
+    monkeypatch.setattr(runner, "fit_standardizer", record)
+    runner._train_loo_evidence(cue, current, sample_ids, labels, groups)
+    # Four gated/descriptive conditions x six folds, then four shuffle seeds x
+    # six folds. Every shuffle fit must use the primary ordered tensor.
+    assert len(seen) == 48
+    assert all(seen[-24:])
+
+
 def test_neighbor_mapping_is_label_blind_and_ties_use_sample_id_then_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

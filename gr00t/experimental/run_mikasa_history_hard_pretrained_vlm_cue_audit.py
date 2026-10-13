@@ -247,6 +247,7 @@ def protocol() -> dict[str, Any]:
             "axes": "candidate rows x slots x time; separate camera x feature dimensions",
             "train_loo": "five candidate geometry groups per held-out fold",
             "dev": "all train groups 0..5",
+            "sample_shuffle": "reuse ordered-current-relative statistics for the same fold",
             "constant_scale": 1.0,
         },
         "formal_runtime": {
@@ -1038,6 +1039,7 @@ def _train_loo_evidence(
             )
             folds.append(score_neighbor_mapping(mapping, labels, groups))
         evidence[condition] = _merge_single_group_sections(folds)
+    primary_slots = condition_slots(cue, current, sample_ids, PRIMARY_CONDITION)
     shuffle_sections = []
     for seed in SHUFFLE_SEEDS:
         slots = condition_slots(
@@ -1051,7 +1053,7 @@ def _train_loo_evidence(
         for held_out in TRAIN_GROUPS:
             query_rows = tuple(row for row in TRAIN_ROWS if int(groups[row]) == held_out)
             candidate_rows = tuple(row for row in TRAIN_ROWS if int(groups[row]) != held_out)
-            standardizer = fit_standardizer(slots, candidate_rows)
+            standardizer = fit_standardizer(primary_slots, candidate_rows)
             standardized = apply_standardizer(slots, standardizer)
             mapping = build_neighbor_mapping(
                 standardized,
