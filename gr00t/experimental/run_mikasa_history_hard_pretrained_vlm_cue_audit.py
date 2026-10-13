@@ -22,6 +22,7 @@ import numpy as np
 from PIL import Image
 import torch
 
+import gr00t
 from gr00t.experimental.mikasa_history_hard_order_runtime import (
     CORPUS_ROOT,
     MODEL_FIELDS,
@@ -73,6 +74,14 @@ SOURCE_PATHS: Final = (
     "gr00t/experimental/run_mikasa_history_hard_pretrained_vlm_cue_audit.py",
     "tests/test_mikasa_history_hard_pretrained_vlm_cue_audit.py",
 )
+DEPENDENCY_PATHS: Final = (
+    "gr00t/experimental/mikasa_history_hard_order.py",
+    "gr00t/experimental/mikasa_history_hard_order_runtime.py",
+    "gr00t/model/gr00t_n1d7/gr00t_n1d7.py",
+    "gr00t/model/gr00t_n1d7/image_augmentations.py",
+    "gr00t/model/gr00t_n1d7/processing_gr00t_n1d7.py",
+    "gr00t/model/modules/qwen3_backbone.py",
+)
 PHASES: Final = ("source_acceptance", "layout", "cache", "train_audit", "dev")
 
 PRE_RUN: Final = Path(
@@ -94,6 +103,10 @@ PROCESSOR_ROOT: Final = Path(
 FORMAL_PYTHON: Final = Path("/home/yuqi/Isaac-GR00T-N1.7/.venv/bin/python")
 FORMAL_TORCH: Final = "2.7.1+cu128"
 FORMAL_TRANSFORMERS: Final = "4.57.3"
+HF_REVISION: Final = "9ce19a195e423419c349abfc86fd07178b230561"
+HF_CACHE_ROOT: Final = Path("/home/sl/.cache/huggingface/hub")
+HF_MODEL_ROOT: Final = HF_CACHE_ROOT / "models--nvidia--Cosmos-Reason2-2B"
+HF_SNAPSHOT_ROOT: Final = HF_MODEL_ROOT / "snapshots" / HF_REVISION
 PROMPT: Final = "Trace the demonstrated paths in the shown order."
 ALTERNATE_PROMPT: Final = "This fixed text must not change the visual descriptor."
 FRAME_BATCH_SIZE: Final = 8
@@ -117,6 +130,42 @@ PROCESSOR_IDENTITIES: Final = {
         "4e058f83bef04f3180ab006c791967fe0d36e0e6a3902f030d338b37069a0483",
     ),
 }
+HF_SNAPSHOT_IDENTITIES: Final = {
+    "chat_template.json": (
+        5_502,
+        "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4",
+    ),
+    "config.json": (1_505, "bec4b3d446efa05807365c9e1cec03ac590836879d02f3a6da879971154bdd3b"),
+    "generation_config.json": (
+        269,
+        "1e241830b48b397cb0900101421df5450baddc7adf01e5fc86b5615865f3bae4",
+    ),
+    "merges.txt": (1_671_839, "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"),
+    "model.safetensors": (
+        4_877_470_304,
+        "fa5a6e6ef4fce40216b185cc48a3b24d31637ac3e2ba69c107ed1f389c1e6ede",
+    ),
+    "preprocessor_config.json": (
+        390,
+        "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+    ),
+    "tokenizer_config.json": (
+        10_868,
+        "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399",
+    ),
+    "tokenizer.json": (
+        7_032_403,
+        "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+    ),
+    "video_preprocessor_config.json": (
+        385,
+        "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+    ),
+    "vocab.json": (
+        2_776_833,
+        "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    ),
+}
 
 
 def _git(repo: Path, *args: str) -> bytes:
@@ -126,8 +175,24 @@ def _git(repo: Path, *args: str) -> bytes:
         raise RuntimeError(exc.stderr.decode(errors="replace").strip()) from exc
 
 
+def _bind_repo_root(repo: Path) -> Path:
+    resolved = repo.resolve(strict=True)
+    expected = REPO.resolve(strict=True)
+    if resolved != expected:
+        raise RuntimeError(f"cue-audit repo-root differs from imported runner: {resolved}")
+    import_roots = {
+        Path(__file__).resolve(),
+        Path(gr00t.__file__).resolve(),
+        Path(sys.modules[HistoryHardSources.__module__].__file__).resolve(),
+        Path(sys.modules[condition_slots.__module__].__file__).resolve(),
+    }
+    if any(expected not in path.parents for path in import_roots):
+        raise RuntimeError(f"cue-audit import escaped repo-root: {sorted(map(str, import_roots))}")
+    return resolved
+
+
 def source_identity(repo: Path) -> dict[str, Any]:
-    repo = repo.resolve(strict=True)
+    repo = _bind_repo_root(repo)
     head = _git(repo, "rev-parse", "HEAD").decode().strip()
     _git(repo, "merge-base", "--is-ancestor", BASE_COMMIT, head)
     raw = _git(repo, "diff", "--name-status", f"{BASE_COMMIT}..{head}").decode()
@@ -138,15 +203,16 @@ def source_identity(repo: Path) -> dict[str, Any]:
     expected = {path: "A" for path in SOURCE_PATHS}
     if observed != expected:
         raise RuntimeError(f"cue-audit exact source diff changed: {observed}")
+    bound_paths = (*SOURCE_PATHS, *DEPENDENCY_PATHS)
     dirty = (
-        _git(repo, "status", "--porcelain=v1", "--untracked-files=all", "--", *SOURCE_PATHS)
+        _git(repo, "status", "--porcelain=v1", "--untracked-files=all", "--", *bound_paths)
         .decode()
         .splitlines()
     )
     if dirty:
         raise RuntimeError(f"cue-audit source is dirty: {dirty}")
     files = {}
-    for relative in SOURCE_PATHS:
+    for relative in bound_paths:
         path = repo / relative
         value = path.read_bytes()
         if path.is_symlink() or value != _git(repo, "show", f"HEAD:{relative}"):
@@ -157,7 +223,8 @@ def source_identity(repo: Path) -> dict[str, Any]:
         "head_commit": head,
         "branch": _git(repo, "branch", "--show-current").decode().strip(),
         "exact_diff": observed,
-        "files": files,
+        "files": {path: files[path] for path in SOURCE_PATHS},
+        "dependency_files": {path: files[path] for path in DEPENDENCY_PATHS},
         "owned_source_clean": True,
     }
 
@@ -170,6 +237,28 @@ def _regular_identity(path: Path, expected_bytes: int, expected_sha256: str) -> 
     if observed != expected_sha256:
         raise RuntimeError(f"material hash changed: {path}")
     return {"path": str(path.resolve()), "bytes": expected_bytes, "sha256": observed}
+
+
+def _snapshot_identity(path: Path, expected_bytes: int, expected_sha256: str) -> dict[str, Any]:
+    info = path.lstat()
+    if not stat.S_ISLNK(info.st_mode):
+        raise RuntimeError(f"HF snapshot entry must remain a symlink: {path}")
+    resolved = path.resolve(strict=True)
+    try:
+        resolved.relative_to((HF_MODEL_ROOT / "blobs").resolve(strict=True))
+    except ValueError as exc:
+        raise RuntimeError(f"HF snapshot entry escapes the frozen model cache: {path}") from exc
+    if not resolved.is_file() or resolved.stat().st_size != expected_bytes:
+        raise RuntimeError(f"HF snapshot material size/type changed: {path}")
+    observed = sha256_file(resolved)
+    if observed != expected_sha256:
+        raise RuntimeError(f"HF snapshot material hash changed: {path}")
+    return {
+        "path": str(path),
+        "resolved_path": str(resolved),
+        "bytes": expected_bytes,
+        "sha256": observed,
+    }
 
 
 def validate_pre_run() -> dict[str, Any]:
@@ -224,6 +313,43 @@ def validate_pre_run() -> dict[str, Any]:
     return {"pre_run": receipt, "checkpoint_files": checkpoint_files, "processor": processor}
 
 
+def validate_hf_snapshot() -> dict[str, Any]:
+    if not HF_SNAPSHOT_ROOT.is_dir():
+        raise RuntimeError(f"frozen HF snapshot is missing: {HF_SNAPSHOT_ROOT}")
+    observed_names = {path.name for path in HF_SNAPSHOT_ROOT.iterdir()}
+    if observed_names != set(HF_SNAPSHOT_IDENTITIES):
+        raise RuntimeError(f"HF snapshot file set changed: {sorted(observed_names)}")
+    files = {
+        name: _snapshot_identity(HF_SNAPSHOT_ROOT / name, size, digest)
+        for name, (size, digest) in HF_SNAPSHOT_IDENTITIES.items()
+    }
+    config = json.loads((HF_SNAPSHOT_ROOT / "config.json").read_bytes())
+    if (
+        config.get("model_type") != "qwen3_vl"
+        or config.get("text_config", {}).get("hidden_size") != EMBED_DIM
+        or config.get("vision_config", {}).get("out_hidden_size") != EMBED_DIM
+    ):
+        raise RuntimeError("frozen Cosmos/Qwen3-VL snapshot config changed")
+    return {
+        "model_id": "nvidia/Cosmos-Reason2-2B",
+        "revision": HF_REVISION,
+        "snapshot_root": str(HF_SNAPSHOT_ROOT),
+        "files": files,
+    }
+
+
+def validate_external_materials() -> dict[str, Any]:
+    return {"checkpoint_and_processor": validate_pre_run(), "hf_snapshot": validate_hf_snapshot()}
+
+
+def bind_runtime_external_materials(source: Mapping[str, Any]) -> dict[str, Any]:
+    accepted = source.get("external_materials")
+    current = validate_external_materials()
+    if current != accepted:
+        raise PermissionError("cue-audit external checkpoint/processor/snapshot identity changed")
+    return current
+
+
 def protocol() -> dict[str, Any]:
     return {
         "experiment_id": EXPERIMENT_ID,
@@ -233,6 +359,8 @@ def protocol() -> dict[str, Any]:
         "alternate_prompt": ALTERNATE_PROMPT,
         "public_boundary": "model.backbone.model.get_image_features",
         "pre_run_sha256": PRE_RUN_SHA256,
+        "hf_revision": HF_REVISION,
+        "hf_snapshot_files": sorted(HF_SNAPSHOT_IDENTITIES),
         "privileged_label_manifest_sha256_frozen_but_unopened": (PRIVILEGED_LABEL_MANIFEST_SHA256),
         "merged_tokens_per_image": 64,
         "embedding_dim": EMBED_DIM,
@@ -308,7 +436,7 @@ def run_source_acceptance(output_root: Path, repo: Path = REPO) -> dict[str, Any
     if os.path.lexists(output_root):
         raise FileExistsError(output_root)
     identity = source_identity(repo)
-    pre_run = validate_pre_run()
+    external_materials = validate_external_materials()
     evidence = validate_frozen_evidence(include_target=False)
     tests = _run_focused_tests(repo)
     result = {
@@ -316,7 +444,7 @@ def run_source_acceptance(output_root: Path, repo: Path = REPO) -> dict[str, Any
         "status": "passed",
         "mode": "source_acceptance",
         "source_identity": identity,
-        "pre_run_identity": pre_run,
+        "external_materials": external_materials,
         "frozen_evidence": evidence,
         "focused_tests": tests,
         "protocol": protocol(),
@@ -380,6 +508,8 @@ def _formal_runtime(device_name: str) -> tuple[torch.device, dict[str, Any]]:
         raise RuntimeError("model phases require Python 3.10")
     if torch.__version__ != FORMAL_TORCH or transformers.__version__ != FORMAL_TRANSFORMERS:
         raise RuntimeError("model phase torch/transformers identity changed")
+    if os.environ.get("HF_HUB_OFFLINE") != "1" or os.environ.get("TRANSFORMERS_OFFLINE") != "1":
+        raise RuntimeError("model phases require frozen offline Hugging Face resolution")
     if os.environ.get("CUDA_VISIBLE_DEVICES") != "0":
         raise RuntimeError("model phases require CUDA_VISIBLE_DEVICES=0")
     gr00t_file = Path(gr00t.__file__).resolve()
@@ -408,7 +538,12 @@ def _load_model_and_processor(device: torch.device):
     from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7
     from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import Gr00tN1d7Processor
 
-    loading = {"local_files_only": True, "trust_remote_code": True}
+    loading = {
+        "local_files_only": True,
+        "trust_remote_code": True,
+        "revision": HF_REVISION,
+        "cache_dir": str(HF_CACHE_ROOT),
+    }
     model, info = Gr00tN1d7.from_pretrained(
         CHECKPOINT,
         local_files_only=True,
@@ -1166,14 +1301,15 @@ def run_dev(
     if not all(train.get("gates", {}).values()):
         raise PermissionError("train-only audit gates did not all pass")
     labels = _train_labels_from_receipt(train, sample_ids)
-    dev_labels, opened = _load_labels(DEV_ROWS, "dev")
-    labels[np.asarray(DEV_ROWS)] = dev_labels[np.asarray(DEV_ROWS)]
     standardizer_receipt = train.get("standardizers")
     if not isinstance(standardizer_receipt, Mapping):
         raise PermissionError("train standardizer receipt missing")
     standardizers = _load_standardizers(
         train_root / "TRAIN_STANDARDIZERS.npz", standardizer_receipt
     )
+    # Validate every train-derived material before the one-time dev-label read.
+    dev_labels, opened = _load_labels(DEV_ROWS, "dev")
+    labels[np.asarray(DEV_ROWS)] = dev_labels[np.asarray(DEV_ROWS)]
     groups = np.arange(ROWS, dtype=np.int64) // ROWS_PER_GROUP
     evidence = _condition_evidence(
         cue,
@@ -1246,6 +1382,7 @@ def main(argv: list[str] | None = None) -> int:
             "runtime_source_identity": current_source,
         }
         if args.phase == "layout":
+            provenance["runtime_external_materials"] = bind_runtime_external_materials(source)
             device, runtime = _formal_runtime(args.device)
             torch.cuda.reset_peak_memory_stats(device)
             result = run_layout(
@@ -1268,6 +1405,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise PermissionError("layout/source-acceptance provenance changed")
             provenance["layout_probe"] = layout_receipt
             if args.phase == "cache":
+                provenance["runtime_external_materials"] = bind_runtime_external_materials(source)
                 device, runtime = _formal_runtime(args.device)
                 torch.cuda.reset_peak_memory_stats(device)
                 result = run_cache(

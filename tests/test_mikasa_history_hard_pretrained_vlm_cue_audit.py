@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 from pathlib import Path
 import sys
 import types
@@ -371,6 +372,39 @@ def test_dev_gate_failure_prevents_any_dev_target_read(
     assert not (tmp_path / "dev").exists()
 
 
+def test_dev_standardizer_failure_prevents_any_dev_target_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened = []
+    monkeypatch.setattr(
+        runner,
+        "_train_labels_from_receipt",
+        lambda *_args, **_kwargs: np.full((48, 2), -1, dtype=np.int64),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_load_standardizers",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("stats invalid")),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_load_labels",
+        lambda *_args, **_kwargs: opened.append(True),
+    )
+    with pytest.raises(PermissionError, match="stats invalid"):
+        runner.run_dev(
+            tmp_path / "dev",
+            cue=np.empty(0),
+            current=np.empty(0),
+            sample_ids=(),
+            train={"gates": {"passed": True}, "standardizers": {}},
+            train_root=tmp_path,
+            provenance={},
+        )
+    assert opened == []
+    assert not (tmp_path / "dev").exists()
+
+
 def test_source_contract_adds_only_dedicated_files_and_no_core_model_diff() -> None:
     assert runner.BASE_COMMIT == "7aa3ec5a31d6c3276abda0e660c378ce939aa70b"
     assert runner.PHASES == ("source_acceptance", "layout", "cache", "train_audit", "dev")
@@ -380,7 +414,86 @@ def test_source_contract_adds_only_dedicated_files_and_no_core_model_diff() -> N
         "tests/test_mikasa_history_hard_pretrained_vlm_cue_audit.py",
     )
     assert runner.protocol()["public_boundary"] == "model.backbone.model.get_image_features"
+    assert runner.protocol()["hf_revision"] == runner.HF_REVISION
     assert runner.protocol()["action_outputs"] == 0
+    assert "gr00t/model/modules/qwen3_backbone.py" in runner.DEPENDENCY_PATHS
+
+
+def test_repo_root_must_match_imported_runner(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="differs from imported runner"):
+        runner._bind_repo_root(tmp_path)
+
+
+def test_layout_rebinds_external_materials_before_gpu_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+    source = {"status": "passed", "mode": "source_acceptance"}
+    monkeypatch.setattr(
+        runner,
+        "_read_receipt",
+        lambda *_args, **_kwargs: (source, {"mode": "source_acceptance"}),
+    )
+    monkeypatch.setattr(runner, "bind_runtime_source", lambda *_args: {})
+    monkeypatch.setattr(
+        runner,
+        "bind_runtime_external_materials",
+        lambda *_args: calls.append("external") or {},
+    )
+
+    def gpu(_device):
+        calls.append("gpu")
+        raise RuntimeError("stop before model")
+
+    monkeypatch.setattr(runner, "_formal_runtime", gpu)
+    with pytest.raises(RuntimeError, match="stop before model"):
+        runner.main(
+            [
+                "--phase",
+                "layout",
+                "--output-root",
+                str(tmp_path / "out"),
+                "--source-result",
+                str(tmp_path / "source"),
+                "--source-sha256",
+                "a" * 64,
+            ]
+        )
+    assert calls == ["external", "gpu"]
+
+
+def test_hf_snapshot_is_revision_pinned_and_content_hashed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_root = tmp_path / "models--nvidia--Cosmos-Reason2-2B"
+    blobs = model_root / "blobs"
+    snapshot = model_root / "snapshots" / "revision"
+    blobs.mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+    payload = json.dumps(
+        {
+            "model_type": "qwen3_vl",
+            "text_config": {"hidden_size": runner.EMBED_DIM},
+            "vision_config": {"out_hidden_size": runner.EMBED_DIM},
+        },
+        sort_keys=True,
+    ).encode()
+    blob = blobs / "config-blob"
+    blob.write_bytes(payload)
+    (snapshot / "config.json").symlink_to(blob)
+    digest = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setattr(runner, "HF_MODEL_ROOT", model_root)
+    monkeypatch.setattr(runner, "HF_SNAPSHOT_ROOT", snapshot)
+    monkeypatch.setattr(
+        runner,
+        "HF_SNAPSHOT_IDENTITIES",
+        {"config.json": (len(payload), digest)},
+    )
+    identity = runner.validate_hf_snapshot()
+    assert identity["files"]["config.json"]["sha256"] == digest
+    blob.write_bytes(payload[:-1] + bytes([payload[-1] ^ 1]))
+    with pytest.raises(RuntimeError, match="hash changed"):
+        runner.validate_hf_snapshot()
 
 
 def test_train_phase_validates_cache_before_label_access(
