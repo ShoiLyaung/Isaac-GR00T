@@ -148,8 +148,12 @@ def select_topk_event_cache(
 ) -> dict[str, np.ndarray]:
     """Select stable K4 current-relative events from one target-blind row."""
 
-    if cue_tokens.shape != (CUE_FRAMES, len(CAMERAS), TOKENS_PER_IMAGE, EMBED_DIM):
-        raise CueAuditContractError("cue token grid must be [130,2,64,2048]")
+    if (
+        cue_tokens.ndim != 4
+        or cue_tokens.shape[0] < 1
+        or cue_tokens.shape[1:] != (len(CAMERAS), TOKENS_PER_IMAGE, EMBED_DIM)
+    ):
+        raise CueAuditContractError("cue token grid must be [time>=1,2,64,2048]")
     if current_tokens.shape != (len(CAMERAS), TOKENS_PER_IMAGE, EMBED_DIM):
         raise CueAuditContractError("current token grid must be [2,64,2048]")
     cue_norm = _l2_normalize(cue_tokens)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import inspect
 import json
@@ -100,6 +101,86 @@ def test_stable_topk_uses_delta_l2_lower_index_ties_and_row_major_coordinates(
     assert selected["coords"][0, 0, 1].tolist() == pytest.approx([0.0, 2 / 7])
     assert np.allclose(np.linalg.norm(selected["cue"], axis=-1), 1.0)
     assert np.allclose(np.linalg.norm(selected["current"], axis=-1), 1.0)
+
+
+def test_run_layout_two_frame_encode_reaches_selector_and_passes_all_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = SimpleNamespace(rows=[object()], input_samples=[{}])
+    monkeypatch.setattr(
+        runner.HistoryHardSources,
+        "discover",
+        classmethod(lambda _cls: sources),
+    )
+    cue_rgb = np.zeros((130, 2, 128, 128, 3), dtype=np.uint8)
+    current_rgb = np.zeros((2, 128, 128, 3), dtype=np.uint8)
+    monkeypatch.setattr(runner, "_load_row_rgb", lambda *_args: (cue_rgb, current_rgb))
+
+    class Model:
+        def named_parameters(self):
+            return iter(())
+
+        def parameters(self):
+            return iter(())
+
+    model = Model()
+    monkeypatch.setattr(
+        runner,
+        "_load_model_and_processor",
+        lambda _device: (model, object(), {}),
+    )
+    monkeypatch.setattr(runner, "_forbidden_model_paths", lambda _model: nullcontext([]))
+    monkeypatch.setattr(runner, "_local_processor_repair_exact", lambda _loading: True)
+
+    tokens = torch.zeros(2, 2, 64, 2048, dtype=torch.float32)
+    tokens[..., 0] = 1.0
+    tokens[0, :, 10, 0] = -1.0
+    tokens[0, :, 2, 0] = 0.0
+    tokens[0, :, 2, 1] = 1.0
+    tokens[0, :, 5, 0] = 0.0
+    tokens[0, :, 5, 1] = 1.0
+    pixels = torch.ones(4, 3)
+    grid = torch.tensor([[1, 16, 16]] * 4)
+    receipt = {
+        "owner_type": "transformers.Qwen3VLForConditionalGeneration",
+        "method_qualname": "Qwen3VLForConditionalGeneration.get_image_features",
+        "images": 4,
+        "merged_tokens_per_image": 64,
+        "embedding_dim": 2048,
+        "grid_side": 8,
+        "top_k": 4,
+        "event_width": 2051,
+        "merged_token_sha256": [f"{index:064x}" for index in range(4)],
+    }
+    encode_calls = []
+
+    def encode(_model, _processor, rgb, prompt, _device, *, hash_tokens):
+        encode_calls.append((rgb.shape, prompt, hash_tokens))
+        return tokens.clone(), pixels.clone(), grid.clone(), dict(receipt)
+
+    monkeypatch.setattr(runner, "_encode_rgb_batch", encode)
+    monkeypatch.setattr(runner.torch.cuda, "max_memory_allocated", lambda _device: 0)
+    written = []
+    monkeypatch.setattr(
+        runner,
+        "_write_result",
+        lambda _root, result, *, limit: written.append((result, limit)),
+    )
+
+    result = runner.run_layout(
+        tmp_path / "layout",
+        device=torch.device("cpu"),
+        runtime={"mock": True},
+        provenance={"source": "mock"},
+    )
+    assert result["status"] == "passed"
+    assert all(result["gates"].values())
+    assert result["event_cache_shapes"]["cue"] == [1, 2, 4, 2048]
+    assert result["selected_indices"][0][0] == [10, 2, 5, 0]
+    assert len(encode_calls) == 3
+    assert all(shape == (2, 2, 128, 128, 3) for shape, _prompt, _hash in encode_calls)
+    assert written == [(result, runner.LAYOUT_ARTIFACT_LIMIT)]
+    assert result["target_npz_opened"] == []
 
 
 def test_public_boundary_rejects_grid_shape_and_nonfinite_tokens(
@@ -239,6 +320,10 @@ def test_cache_requires_selected_tokens_indices_coords_and_reliability(
     with pytest.raises(audit.CueAuditContractError, match="cue cache shape"):
         audit.validate_descriptor_cache(
             cue[:, :, :, 0], current, indices, coords, reliability, sample_ids
+        )
+    with pytest.raises(audit.CueAuditContractError, match="cue cache shape"):
+        audit.validate_descriptor_cache(
+            cue[:, :1], current, indices, coords, reliability, sample_ids
         )
     bad_coords = coords.copy()
     bad_coords[0, 0, 0, 0] = (1.0, 1.0)
