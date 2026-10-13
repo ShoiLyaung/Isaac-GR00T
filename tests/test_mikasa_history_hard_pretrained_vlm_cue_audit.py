@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 from pathlib import Path
 import sys
@@ -427,3 +428,14 @@ def test_existing_source_output_fails_before_git_or_evidence(
     with pytest.raises(FileExistsError):
         runner.run_source_acceptance(output)
     assert calls == []
+
+
+def test_regular_identity_rehashes_same_size_material(tmp_path: Path) -> None:
+    material = tmp_path / "weights.safetensors"
+    material.write_bytes(b"abc")
+    expected = hashlib.sha256(b"abc").hexdigest()
+    identity = runner._regular_identity(material, 3, expected)
+    assert identity["sha256"] == expected
+    material.write_bytes(b"abd")
+    with pytest.raises(RuntimeError, match="hash changed"):
+        runner._regular_identity(material, 3, expected)

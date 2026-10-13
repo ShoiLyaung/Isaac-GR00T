@@ -190,6 +190,7 @@ def validate_pre_run() -> dict[str, Any]:
         "processor_config.json": "516e938ce7970c7d1b66b6ebafc5b28fdb64c6b1266f40c275ec81ab715f14d3",
         "statistics.json": "4e058f83bef04f3180ab006c791967fe0d36e0e6a3902f030d338b37069a0483",
     }
+    checkpoint_files = {}
     for name, digest in required_checkpoint.items():
         record = source_files.get(name)
         if record is None or record.get("sha256") != digest:
@@ -197,8 +198,7 @@ def validate_pre_run() -> dict[str, Any]:
         path = Path(str(record["path"]))
         if path.parent.resolve() != CHECKPOINT.resolve() or path.is_symlink() or not path.is_file():
             raise RuntimeError(f"PRE_RUN checkpoint path changed: {name}")
-        if path.stat().st_size != int(record["bytes"]):
-            raise RuntimeError(f"PRE_RUN checkpoint size changed: {name}")
+        checkpoint_files[name] = _regular_identity(path, int(record["bytes"]), digest)
     processor = {
         name: _regular_identity(PROCESSOR_ROOT / name, size, digest)
         for name, (size, digest) in PROCESSOR_IDENTITIES.items()
@@ -221,7 +221,7 @@ def validate_pre_run() -> dict[str, Any]:
         or kwargs.get("crop_fraction") != 0.95
     ):
         raise RuntimeError("Yuqi compatibility processor contract changed")
-    return {"pre_run": receipt, "checkpoint_files": required_checkpoint, "processor": processor}
+    return {"pre_run": receipt, "checkpoint_files": checkpoint_files, "processor": processor}
 
 
 def protocol() -> dict[str, Any]:
