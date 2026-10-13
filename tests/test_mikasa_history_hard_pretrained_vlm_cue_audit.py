@@ -406,8 +406,8 @@ def test_dev_standardizer_failure_prevents_any_dev_target_read(
 
 
 def test_source_contract_adds_only_dedicated_files_and_no_core_model_diff() -> None:
-    assert runner.BASE_COMMIT == "3aa07d3bce8b84da3d959a48c50e5ecf105a9f29"
-    assert runner.EXPECTED_BRANCH.endswith("local-processor-r1")
+    assert runner.BASE_COMMIT == "972352f25ebea7ec8fb5ab078bad0bf97c8255cf"
+    assert runner.EXPECTED_BRANCH.endswith("cache-bool-repair-r1")
     assert runner.PHASES == (
         "source_acceptance",
         "processor_smoke",
@@ -423,7 +423,7 @@ def test_source_contract_adds_only_dedicated_files_and_no_core_model_diff() -> N
     )
     assert runner.protocol()["public_boundary"] == "model.backbone.model.get_image_features"
     assert runner.protocol()["hf_revision"] == runner.HF_REVISION
-    assert runner.protocol()["repair_variable"].startswith("localize only")
+    assert runner.protocol()["repair_variable"].startswith("normalize cache gate")
     assert runner.protocol()["action_outputs"] == 0
     assert "gr00t/model/modules/qwen3_backbone.py" in runner.DEPENDENCY_PATHS
 
@@ -603,6 +603,22 @@ def test_local_processor_repair_gate_requires_exact_receipt() -> None:
     assert runner._local_processor_repair_exact(receipt)
     receipt["local_processor_repair"]["network_calls"] = ["model_info"]
     assert not runner._local_processor_repair_exact(receipt)
+
+
+def test_cache_gate_normalization_converts_numpy_bools_and_serializes() -> None:
+    values = {
+        key: np.bool_(index % 2 == 0) if index % 3 == 0 else index % 2 == 0
+        for index, key in enumerate(runner.CACHE_GATE_KEYS)
+    }
+    normalized = runner._native_python_bool_gates(values)
+    assert tuple(normalized) == runner.CACHE_GATE_KEYS
+    assert all(type(value) is bool for value in normalized.values())
+    runner.canonical_json_bytes(normalized)
+
+
+def test_cache_gate_normalization_rejects_key_drift() -> None:
+    with pytest.raises(RuntimeError, match="key/order changed"):
+        runner._native_python_bool_gates({"unexpected": np.bool_(True)})
 
 
 def test_train_phase_validates_cache_before_label_access(

@@ -69,8 +69,10 @@ from gr00t.experimental.mikasa_history_hard_pretrained_vlm_cue_audit import (
 
 
 REPO: Final = Path(__file__).resolve().parents[2]
-BASE_COMMIT: Final = "3aa07d3bce8b84da3d959a48c50e5ecf105a9f29"
-EXPECTED_BRANCH: Final = "codex/g1-mikasa-history-hard-pretrained-vlm-cue-audit-local-processor-r1"
+BASE_COMMIT: Final = "972352f25ebea7ec8fb5ab078bad0bf97c8255cf"
+EXPECTED_BRANCH: Final = (
+    "codex/g1-mikasa-history-hard-pretrained-vlm-cue-audit-cache-bool-repair-r1"
+)
 SOURCE_PATHS: Final = (
     "gr00t/experimental/mikasa_history_hard_pretrained_vlm_cue_audit.py",
     "gr00t/experimental/run_mikasa_history_hard_pretrained_vlm_cue_audit.py",
@@ -112,7 +114,34 @@ PREDECESSOR_IDENTITIES: Final = {
         1_387,
         "f730a0d5197edc08bf821b1a6ae55f50a85d857218a677a5a7057dd711c7c2c3",
     ),
+    "local_processor_cache_failure": (
+        Path(
+            "/home/sl/research/icra27-artifacts/"
+            "g1-mikasa-history-hard-pretrained-vlm-cue-audit-local-processor-r1/"
+            "target-blind-cache-gpu0-r1.FAILED.json"
+        ),
+        1_390,
+        "03b77aaa0d2b09cd42dfd9b1c35a558405b34006c0464bd06c1a8007e2d9523c",
+    ),
 }
+QUALIFIED_PREDECESSOR_LAYOUT: Final = (
+    Path(
+        "/home/sl/research/icra27-artifacts/"
+        "g1-mikasa-history-hard-pretrained-vlm-cue-audit-local-processor-r1/"
+        "layout-probe-gpu0-r1/RESULT.json"
+    ),
+    12_433,
+    "511e46c6d24aa02f29aad137e163c3a1b7d34485665bfbe63754ff03a8cf0fbe",
+)
+FORBIDDEN_PARTIAL_DESCRIPTOR: Final = (
+    Path(
+        "/home/sl/research/icra27-artifacts/"
+        "g1-mikasa-history-hard-pretrained-vlm-cue-audit-local-processor-r1/"
+        "target-blind-cache-gpu0-r1/DESCRIPTORS.npz"
+    ),
+    65_816_096,
+    "9bf07ca5e0523c4bc034dcc6628dc47cc61ae248cdbd2d70a60532a1a72f0833",
+)
 REMOTE_MODEL_ID: Final = "nvidia/Cosmos-Reason2-2B"
 PROCESSOR_SMOKE_WALL_SECONDS: Final = 5 * 60.0
 PROCESSOR_SMOKE_ARTIFACT_LIMIT: Final = 16 * 1024 * 1024
@@ -147,6 +176,21 @@ LAYOUT_WALL_SECONDS: Final = 10 * 60.0
 LAYOUT_ARTIFACT_LIMIT: Final = 32 * 1024 * 1024
 CACHE_WALL_SECONDS: Final = 45 * 60.0
 CACHE_ARTIFACT_LIMIT: Final = 512 * 1024 * 1024
+CACHE_GATE_KEYS: Final = (
+    "all_48_rows",
+    "descriptor_shapes_exact",
+    "all_finite_float32",
+    "six_current_exact_each_geometry",
+    "six_unique_cue_hashes_each_geometry",
+    "first_batch_repeat_exact",
+    "public_boundary_exact",
+    "local_processor_repair_exact",
+    "forbidden_paths_zero",
+    "parameter_versions_unchanged",
+    "gradients_zero",
+    "wall_within_45_minutes",
+    "forbidden_partial_inode_not_reused",
+)
 
 PROCESSOR_IDENTITIES: Final = {
     "config.json": (2_190, "e1b5c231f440e5cc6b2a899f27f623558e441bdea9e3c37593d781a2bda3876e"),
@@ -381,14 +425,36 @@ def validate_predecessors() -> dict[str, Any]:
     }
     for name, (path, _size, _digest) in PREDECESSOR_IDENTITIES.items():
         value = json.loads(path.read_bytes())
-        if (
-            value.get("status") != "technical_failed"
-            or value.get("model_forward_calls") != 0
-            or value.get("target_npz_opened") != []
-            or value.get("retry_count") != 0
-        ):
+        common_failed = (
+            value.get("status") == "technical_failed"
+            and value.get("target_npz_opened") == []
+            and value.get("retry_count") == 0
+        )
+        boundary_ok = (
+            value.get("result_written") is False
+            and value.get("partial_artifact", {}).get("sha256") == FORBIDDEN_PARTIAL_DESCRIPTOR[2]
+            if name == "local_processor_cache_failure"
+            else value.get("model_forward_calls") == 0
+        )
+        if not common_failed or not boundary_ok:
             raise RuntimeError(f"predecessor failure boundary changed: {name}")
-    return identities
+    layout_path, layout_size, layout_sha = QUALIFIED_PREDECESSOR_LAYOUT
+    layout_identity = _regular_identity(layout_path, layout_size, layout_sha)
+    layout = json.loads(layout_path.read_bytes())
+    if layout.get("status") != "passed" or not all(layout.get("gates", {}).values()):
+        raise RuntimeError("qualified predecessor layout changed")
+    partial_path, partial_size, partial_sha = FORBIDDEN_PARTIAL_DESCRIPTOR
+    partial_identity = _regular_identity(partial_path, partial_size, partial_sha)
+    if (
+        stat.S_IMODE(partial_path.stat().st_mode) != 0o444
+        or stat.S_IMODE(partial_path.parent.stat().st_mode) != 0o555
+    ):
+        raise RuntimeError("forbidden partial descriptor is not read-only frozen")
+    return {
+        "failures": identities,
+        "qualified_layout": layout_identity,
+        "forbidden_partial_descriptor": partial_identity,
+    }
 
 
 def validate_external_materials() -> dict[str, Any]:
@@ -410,10 +476,12 @@ def bind_runtime_external_materials(source: Mapping[str, Any]) -> dict[str, Any]
 def protocol() -> dict[str, Any]:
     return {
         "experiment_id": EXPERIMENT_ID,
-        "repair_variable": "localize only bounded collator build_processor resolution",
+        "repair_variable": "normalize cache gate scalars to exact Python bool",
         "predecessor_failure_sha256": {
             name: identity[2] for name, identity in PREDECESSOR_IDENTITIES.items()
         },
+        "qualified_predecessor_layout_sha256": QUALIFIED_PREDECESSOR_LAYOUT[2],
+        "forbidden_partial_descriptor_sha256": FORBIDDEN_PARTIAL_DESCRIPTOR[2],
         "phases": list(PHASES),
         "camera_order": list(CAMERAS),
         "prompt": PROMPT,
@@ -890,6 +958,16 @@ def _local_processor_repair_exact(loading: Mapping[str, Any]) -> bool:
     )
 
 
+def _native_python_bool_gates(values: Mapping[str, Any]) -> dict[str, bool]:
+    if tuple(values) != CACHE_GATE_KEYS:
+        raise RuntimeError(f"cache gate key/order changed: {tuple(values)}")
+    result = {key: bool(value) for key, value in values.items()}
+    if any(type(value) is not bool for value in result.values()):
+        raise RuntimeError("cache gate normalization did not produce exact Python bool")
+    canonical_json_bytes(result)
+    return result
+
+
 def _write_result(
     output_root: Path, result: Mapping[str, Any], *, limit: int | None = None
 ) -> None:
@@ -1117,6 +1195,10 @@ def run_cache(
         output_root / "DESCRIPTORS.npz",
         feature_payload,
     )
+    feature_path = Path(str(feature["path"]))
+    inode_reused = os.path.samefile(feature_path, FORBIDDEN_PARTIAL_DESCRIPTOR[0])
+    gates["forbidden_partial_inode_not_reused"] = not inode_reused
+    gates = _native_python_bool_gates(gates)
     result = {
         "schema": f"{EXPERIMENT_ID}/cache-v1",
         "status": "passed" if all(gates.values()) else "gate_failed",
@@ -1131,6 +1213,11 @@ def run_cache(
         "current_equal_by_geometry": current_equal,
         "cue_hashes_by_geometry": cue_hashes,
         "gates": gates,
+        "predecessor_partial_comparison": {
+            "content_sha256_equal": feature["sha256"] == FORBIDDEN_PARTIAL_DESCRIPTOR[2],
+            "inode_reused": inode_reused,
+            "source_recomputed": True,
+        },
         "wall_seconds": elapsed,
         "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
         "loading_info": loading,
