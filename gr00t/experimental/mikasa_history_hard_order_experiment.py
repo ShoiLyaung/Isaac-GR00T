@@ -48,6 +48,8 @@ PREFLIGHT_MEMORY_LIMIT: Final = 1_073_741_824
 OVERFIT_WALL_SECONDS: Final = 15 * 60.0
 MATCHED_WALL_SECONDS: Final = 30 * 60.0
 MATCHED_ARTIFACT_LIMIT: Final = 256 * 1024 * 1024
+DEV_WALL_SECONDS: Final = 15 * 60.0
+DEV_ARTIFACT_LIMIT: Final = 64 * 1024 * 1024
 EVALUATOR_EXPERIMENT_ID: Final = "g1-mikasa-history-hard-native-order-dev-evaluator-r2"
 
 
@@ -643,6 +645,22 @@ def _directory_bytes(path: Path) -> int:
     return sum(value.stat().st_size for value in path.rglob("*") if value.is_file())
 
 
+def _check_dev_wall(started: float) -> float:
+    wall_seconds = time.monotonic() - started
+    if wall_seconds > DEV_WALL_SECONDS:
+        raise TimeoutError("dev evaluation exceeded 15 minutes")
+    return wall_seconds
+
+
+def _dev_result_payload(output_root: Path, result: Mapping[str, Any], wall_seconds: float) -> bytes:
+    if wall_seconds > DEV_WALL_SECONDS:
+        raise TimeoutError("dev evaluation exceeded 15 minutes")
+    payload = canonical_json_bytes(result)
+    if _directory_bytes(output_root) + len(payload) > DEV_ARTIFACT_LIMIT:
+        raise RuntimeError("dev artifacts exceed 64 MiB")
+    return payload
+
+
 def run_matched_training(
     data: CachedOrderData,
     output_root: Path,
@@ -772,6 +790,7 @@ def run_dev_evaluation(
 ) -> dict[str, Any]:
     if output_root.exists():
         raise FileExistsError(output_root)
+    started = time.monotonic()
     output_root.mkdir(parents=True)
     standard: dict[str, Any] = {}
     full_models: dict[int, MikasaHistoryHardOrderModel] = {}
@@ -793,6 +812,7 @@ def run_dev_evaluation(
             by_seed[seed] = records
             if condition == "mamba_full":
                 full_models[seed] = model
+            _check_dev_wall(started)
         standard[condition] = {"records": by_seed, "aggregates": aggregate_records(by_seed)}
     interventions = {}
     for name in ("substitute", "zero", "shuffle"):
@@ -810,6 +830,7 @@ def run_dev_evaluation(
                     )
                 )
             by_seed[seed] = records
+            _check_dev_wall(started)
         interventions[name] = {"records": by_seed, "aggregates": aggregate_records(by_seed)}
     evidence = {
         "standard": standard,
@@ -820,6 +841,7 @@ def run_dev_evaluation(
         "matched_finite": True,
     }
     gates = dev_gates(evidence)
+    wall_seconds = _check_dev_wall(started)
     result = {
         "schema": f"{EVALUATOR_EXPERIMENT_ID}/dev-v1",
         "status": "passed" if all(gates.values()) else "gate_failed",
@@ -832,9 +854,13 @@ def run_dev_evaluation(
         "codec_runs": 0,
         "vla_runs": 0,
         "simulator_runs": 0,
+        "wall_seconds": wall_seconds,
+        "wall_limit_seconds": DEV_WALL_SECONDS,
+        "artifact_limit_bytes": DEV_ARTIFACT_LIMIT,
         "retry_count": 0,
         "provenance": dict(provenance),
     }
-    write_once(output_root / "RESULT.json", canonical_json_bytes(result))
+    payload = _dev_result_payload(output_root, result, wall_seconds)
+    write_once(output_root / "RESULT.json", payload)
     freeze_directory(output_root)
     return result

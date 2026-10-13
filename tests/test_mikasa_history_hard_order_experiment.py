@@ -128,6 +128,8 @@ def test_frozen_recipe_schedule_and_phase_order() -> None:
     assert experiment.BETAS == (0.9, 0.95)
     assert experiment.WEIGHT_DECAY == 1e-4
     assert experiment.GRADIENT_CLIP == 1.0
+    assert experiment.DEV_WALL_SECONDS == 15 * 60.0
+    assert experiment.DEV_ARTIFACT_LIMIT == 64 * 1024 * 1024
     assert runner.PHASES == ("source_acceptance", "dev")
     assert runner.protocol()["contract"] == "evaluator-r2"
     assert runner.protocol()["retry_count"] == 0
@@ -293,3 +295,20 @@ def test_gradient_validator_requires_every_parameter_gradient() -> None:
     assert experiment.module_has_finite_nonzero_gradient(module)
     next(module.parameters()).grad.fill_(float("nan"))
     assert not experiment.module_has_finite_nonzero_gradient(module)
+
+
+def test_dev_limits_fail_closed_before_result_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "dev"
+    output.mkdir()
+    oversized = {"payload": "x" * 32}
+    monkeypatch.setattr(experiment, "DEV_ARTIFACT_LIMIT", 1)
+    with pytest.raises(RuntimeError, match="64 MiB"):
+        experiment._dev_result_payload(output, oversized, wall_seconds=0.0)
+    monkeypatch.setattr(experiment, "DEV_ARTIFACT_LIMIT", 64 * 1024 * 1024)
+    with pytest.raises(TimeoutError, match="15 minutes"):
+        experiment._dev_result_payload(
+            output, {"status": "passed"}, wall_seconds=experiment.DEV_WALL_SECONDS + 1.0
+        )
+    assert not (output / "RESULT.json").exists()
