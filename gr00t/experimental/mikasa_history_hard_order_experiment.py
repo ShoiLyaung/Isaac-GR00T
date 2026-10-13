@@ -48,6 +48,7 @@ PREFLIGHT_MEMORY_LIMIT: Final = 1_073_741_824
 OVERFIT_WALL_SECONDS: Final = 15 * 60.0
 MATCHED_WALL_SECONDS: Final = 30 * 60.0
 MATCHED_ARTIFACT_LIMIT: Final = 256 * 1024 * 1024
+EVALUATOR_EXPERIMENT_ID: Final = "g1-mikasa-history-hard-native-order-dev-evaluator-r2"
 
 
 def lr_multiplier(step: int, total_steps: int) -> float:
@@ -300,6 +301,27 @@ def _accuracy_records(
 
 
 @torch.inference_mode()
+def cue_only_substitution(
+    batch: OrderBatch, labels: torch.Tensor
+) -> tuple[OrderBatch, torch.Tensor]:
+    """Roll only cue evidence while holding every recipient-current input fixed."""
+
+    batch.validate()
+    if batch.batch_size != ROWS_PER_GROUP or labels.shape != (ROWS_PER_GROUP, 2):
+        raise ValueError("cue substitution requires one complete six-row group")
+    donor_cue = batch.temporal_grid[..., :3].roll(shifts=-1, dims=0)
+    recipient_current = batch.temporal_grid[..., 3:6]
+    temporal = torch.cat((donor_cue, recipient_current, donor_cue - recipient_current), dim=-1)
+    substituted = OrderBatch(
+        temporal_grid=temporal,
+        current_rgb_grid=batch.current_rgb_grid,
+        current_proprio=batch.current_proprio,
+    )
+    substituted.validate()
+    return substituted, labels.roll(shifts=-1, dims=0)
+
+
+@torch.inference_mode()
 def evaluate_group(
     model: MikasaHistoryHardOrderModel,
     data: CachedOrderData,
@@ -312,12 +334,7 @@ def evaluate_group(
     device = next(model.parameters()).device
     labels = labels.to(device=device)
     if intervention == "substitute":
-        batch = OrderBatch(
-            temporal_grid=batch.temporal_grid.roll(shifts=-1, dims=0),
-            current_rgb_grid=batch.current_rgb_grid,
-            current_proprio=batch.current_proprio,
-        )
-        labels = labels.roll(shifts=-1, dims=0)
+        batch, labels = cue_only_substitution(batch, labels)
         output = model(batch)
         return _accuracy_records(
             output,
@@ -456,13 +473,13 @@ def dev_gates(evidence: Mapping[str, Any]) -> dict[str, bool]:
             > other["by_seed"][str(seed)]["group_equal"]["pair_accuracy"]
             for seed in TRAIN_SEEDS
         )
-    best_backbone = max(
-        (standard[name]["aggregates"] for name in ("gru_full", "transformer_full")),
-        key=lambda value: value["seed_equal"]["pair_accuracy"],
-    )
     for metric in metrics:
+        best_control = max(
+            standard[name]["aggregates"]["seed_equal"][metric]
+            for name in ("gru_full", "transformer_full")
+        )
         gates[f"full_backbone_noninferior_{metric}"] = (
-            full["seed_equal"][metric] >= best_backbone["seed_equal"][metric] - 0.02
+            full["seed_equal"][metric] >= best_control - 0.02
         )
     interventions = evidence["mamba_full_interventions"]
     substitute = interventions["substitute"]["aggregates"]
@@ -804,7 +821,7 @@ def run_dev_evaluation(
     }
     gates = dev_gates(evidence)
     result = {
-        "schema": "g1-mikasa-history-hard-native-order-backbones-r1/dev-v1",
+        "schema": f"{EVALUATOR_EXPERIMENT_ID}/dev-v1",
         "status": "passed" if all(gates.values()) else "gate_failed",
         "mode": "revealed_dev",
         "evidence": evidence,

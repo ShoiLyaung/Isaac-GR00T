@@ -14,7 +14,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
-from typing import Any, Final
+from typing import Any, Final, Mapping
 
 
 REPO: Final = Path(__file__).resolve().parents[2]
@@ -31,31 +31,14 @@ import torch  # noqa: E402
 
 from gr00t.experimental.mikasa_history_hard_order import CONDITIONS  # noqa: E402
 from gr00t.experimental.mikasa_history_hard_order_experiment import (  # noqa: E402
-    BETAS,
     DEV_SHUFFLE_SEEDS,
-    FINAL_LEARNING_RATE,
-    GRADIENT_CLIP,
-    LEARNING_RATE,
-    MATCHED_ARTIFACT_LIMIT,
-    MATCHED_WALL_SECONDS,
-    OVERFIT_STEPS,
-    OVERFIT_WALL_SECONDS,
-    PREFLIGHT_MEMORY_LIMIT,
-    PREFLIGHT_STEPS,
     TRAIN_SEEDS,
-    TRAIN_STEPS,
-    WARMUP_STEPS,
-    WEIGHT_DECAY,
     run_dev_evaluation,
-    run_matched_training,
-    run_overfit,
-    run_preflight,
     validate_matched_checkpoints,
 )
 from gr00t.experimental.mikasa_history_hard_order_runtime import (  # noqa: E402
     FRESH_PURE_ROOT,
     TARGET_MANIFEST_SHA256,
-    build_target_blind_cache,
     canonical_json_bytes,
     freeze_directory,
     load_order_data,
@@ -66,8 +49,19 @@ from gr00t.experimental.mikasa_history_hard_order_runtime import (  # noqa: E402
 )
 
 
-EXPERIMENT_ID: Final = "g1-mikasa-history-hard-native-order-backbones-r1"
-BASE_COMMIT: Final = "dfd928df5b7c398b34b1e1c5326cdefe07e13385"
+EXPERIMENT_ID: Final = "g1-mikasa-history-hard-native-order-dev-evaluator-r2"
+TRAINING_EXPERIMENT_ID: Final = "g1-mikasa-history-hard-native-order-backbones-r1"
+TRAINING_SOURCE_COMMIT: Final = "6f9bf220132fc896d3ec0ce3decd13d316bd0692"
+BASE_COMMIT: Final = TRAINING_SOURCE_COMMIT
+TRAINING_SOURCE_RESULT_SHA256: Final = (
+    "28bd9dd5525f7b5f627b2beef24f262ffc529490c0d75bae163900110157057d"
+)
+TRAINING_CACHE_RESULT_SHA256: Final = (
+    "4ad8bca4d6c1f9f71880cc73260e247380de0f28616639abfea73343a1c87c0f"
+)
+TRAINING_MATCHED_RESULT_SHA256: Final = (
+    "5dd8e56d05fa81cb42c603b2c88397286f32bbb7f27e048b1e39d7668aba5eaa"
+)
 MAMBA_VERSION: Final = "2.3.2.post1"
 SOURCE_PATHS: Final = (
     "gr00t/experimental/mikasa_history_hard_order.py",
@@ -76,6 +70,11 @@ SOURCE_PATHS: Final = (
     "gr00t/experimental/run_mikasa_history_hard_order.py",
     "tests/test_mikasa_history_hard_order.py",
     "tests/test_mikasa_history_hard_order_runtime.py",
+    "tests/test_mikasa_history_hard_order_experiment.py",
+)
+EVALUATOR_REPAIR_PATHS: Final = (
+    "gr00t/experimental/mikasa_history_hard_order_experiment.py",
+    "gr00t/experimental/run_mikasa_history_hard_order.py",
     "tests/test_mikasa_history_hard_order_experiment.py",
 )
 OVERLAY_MATERIALS: Final = {
@@ -95,7 +94,7 @@ OVERLAY_MATERIALS: Final = {
         "c6aedc73d29161fdb121caae8ec793617bfd05ed48992706f7981a0df19b4d4d",
     ),
 }
-PHASES: Final = ("source_acceptance", "cache", "preflight", "overfit", "matched", "dev")
+PHASES: Final = ("source_acceptance", "dev")
 
 
 def _git(repo: Path, *args: str) -> bytes:
@@ -136,22 +135,22 @@ def verify_overlay(*, import_package: bool) -> dict[str, Any]:
 def source_identity(repo: Path) -> dict[str, Any]:
     repo = repo.resolve(strict=True)
     head = _git(repo, "rev-parse", "HEAD").decode().strip()
-    _git(repo, "merge-base", "--is-ancestor", BASE_COMMIT, head)
-    raw = _git(repo, "diff", "--name-status", f"{BASE_COMMIT}..{head}").decode()
+    _git(repo, "merge-base", "--is-ancestor", TRAINING_SOURCE_COMMIT, head)
+    raw = _git(repo, "diff", "--name-status", f"{TRAINING_SOURCE_COMMIT}..{head}").decode()
     observed = {}
     for line in raw.splitlines():
         status_code, path = line.split("\t", maxsplit=1)
         observed[path] = status_code
-    expected = {path: "A" for path in SOURCE_PATHS}
+    expected = {path: "M" for path in EVALUATOR_REPAIR_PATHS}
     if observed != expected:
-        raise RuntimeError(f"native-order exact source diff changed: {observed}")
+        raise RuntimeError(f"native-order evaluator exact source diff changed: {observed}")
     dirty = (
         _git(repo, "status", "--porcelain=v1", "--untracked-files=all", "--", *SOURCE_PATHS)
         .decode()
         .splitlines()
     )
     if dirty:
-        raise RuntimeError(f"native-order owned source is dirty: {dirty}")
+        raise RuntimeError(f"native-order evaluator source is dirty: {dirty}")
     files = {}
     for relative in SOURCE_PATHS:
         path = repo / relative
@@ -160,7 +159,7 @@ def source_identity(repo: Path) -> dict[str, Any]:
             raise RuntimeError(f"native-order source differs from HEAD: {relative}")
         files[relative] = {"bytes": len(value), "sha256": sha256_bytes(value)}
     return {
-        "base_commit": BASE_COMMIT,
+        "training_source_commit": TRAINING_SOURCE_COMMIT,
         "head_commit": head,
         "branch": _git(repo, "branch", "--show-current").decode().strip(),
         "exact_diff": observed,
@@ -169,28 +168,35 @@ def source_identity(repo: Path) -> dict[str, Any]:
     }
 
 
+def training_source_identity() -> dict[str, Any]:
+    return {
+        "experiment_id": TRAINING_EXPERIMENT_ID,
+        "head_commit": TRAINING_SOURCE_COMMIT,
+        "source_acceptance_result_sha256": TRAINING_SOURCE_RESULT_SHA256,
+        "target_blind_cache_result_sha256": TRAINING_CACHE_RESULT_SHA256,
+        "matched_training_result_sha256": TRAINING_MATCHED_RESULT_SHA256,
+        "checkpoint_schema": f"{TRAINING_EXPERIMENT_ID}/checkpoint-v1",
+        "checkpoint_selection": "all_18_final_step_1500_only",
+    }
+
+
 def protocol() -> dict[str, Any]:
     return {
+        "contract": "evaluator-r2",
         "conditions": list(CONDITIONS),
         "training_seeds": list(TRAIN_SEEDS),
         "dev_shuffle_seeds": list(DEV_SHUFFLE_SEEDS),
-        "preflight_steps": PREFLIGHT_STEPS,
-        "overfit_steps": OVERFIT_STEPS,
-        "matched_steps": TRAIN_STEPS,
-        "optimizer": {
-            "name": "AdamW",
-            "lr": LEARNING_RATE,
-            "betas": list(BETAS),
-            "weight_decay": WEIGHT_DECAY,
-            "warmup_steps": WARMUP_STEPS,
-            "final_lr": FINAL_LEARNING_RATE,
-            "gradient_clip": GRADIENT_CLIP,
+        "dev_groups": [6, 7],
+        "cue_substitution": {
+            "rolled_channels": [0, 1, 2],
+            "recipient_current_channels": [3, 4, 5],
+            "recomputed_delta_channels": [6, 7, 8],
+            "label_permutation": "roll_minus_one_within_sixpack",
         },
-        "preflight_peak_allocated_limit_bytes": PREFLIGHT_MEMORY_LIMIT,
-        "overfit_wall_seconds": OVERFIT_WALL_SECONDS,
-        "matched_wall_seconds": MATCHED_WALL_SECONDS,
-        "matched_artifact_limit_bytes": MATCHED_ARTIFACT_LIMIT,
-        "batch_size": 24,
+        "matched_noninferiority_control": "per_metric_max_of_gru_full_and_transformer_full",
+        "training_source": training_source_identity(),
+        "dev_wall_seconds": 15 * 60,
+        "dev_artifact_limit_bytes": 64 * 1024 * 1024,
         "retry_count": 0,
         "target_manifest_sha256_frozen_but_unopened": TARGET_MANIFEST_SHA256,
     }
@@ -199,14 +205,17 @@ def protocol() -> dict[str, Any]:
 def run_source_acceptance(output_root: Path, repo: Path = REPO) -> dict[str, Any]:
     if os.path.lexists(output_root):
         raise FileExistsError(output_root)
-    output_root.mkdir(parents=True)
+    evaluator_source = source_identity(repo)
+    overlay = verify_overlay(import_package=True)
     result = {
         "schema": f"{EXPERIMENT_ID}/source-acceptance-v1",
         "status": "passed",
         "mode": "source_acceptance",
-        "source_identity": source_identity(repo),
+        "source_identity": evaluator_source,
+        "evaluator_source_identity": evaluator_source,
+        "training_source_identity": training_source_identity(),
         "frozen_evidence": validate_frozen_evidence(include_target=False),
-        "mamba_overlay": verify_overlay(import_package=True),
+        "mamba_overlay": overlay,
         "protocol": protocol(),
         "fresh_pure_root_opened_only_for_result": str(FRESH_PURE_ROOT),
         "fresh_data_paths_opened": False,
@@ -216,9 +225,53 @@ def run_source_acceptance(output_root: Path, repo: Path = REPO) -> dict[str, Any
         "optimizer_steps": 0,
         "retry_count": 0,
     }
+    output_root.mkdir(parents=True)
     write_once(output_root / "RESULT.json", canonical_json_bytes(result))
     freeze_directory(output_root)
     return result
+
+
+def bind_runtime_source(source: Mapping[str, Any], repo: Path) -> dict[str, Any]:
+    """Recompute the evaluator identity before any data or checkpoint is opened."""
+
+    if (
+        source.get("schema") != f"{EXPERIMENT_ID}/source-acceptance-v1"
+        or source.get("protocol") != protocol()
+        or source.get("training_source_identity") != training_source_identity()
+    ):
+        raise PermissionError("evaluator-r2 source acceptance contract changed")
+    accepted = source.get("evaluator_source_identity")
+    if accepted != source.get("source_identity"):
+        raise PermissionError("evaluator-r2 source identities disagree")
+    current = source_identity(repo)
+    if current != accepted:
+        raise PermissionError("runtime evaluator source identity changed")
+    return current
+
+
+def validate_training_lineage(
+    cache: Mapping[str, Any], matched: Mapping[str, Any] | None = None
+) -> None:
+    source_receipt = cache.get("source_acceptance")
+    if (
+        not isinstance(source_receipt, Mapping)
+        or source_receipt.get("sha256") != TRAINING_SOURCE_RESULT_SHA256
+    ):
+        raise PermissionError("target-blind cache training-source lineage changed")
+    if matched is None:
+        return
+    provenance = matched.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise PermissionError("matched-training provenance missing")
+    matched_source = provenance.get("source_acceptance")
+    matched_cache = provenance.get("cache")
+    if (
+        not isinstance(matched_source, Mapping)
+        or matched_source.get("sha256") != TRAINING_SOURCE_RESULT_SHA256
+        or not isinstance(matched_cache, Mapping)
+        or matched_cache.get("sha256") != TRAINING_CACHE_RESULT_SHA256
+    ):
+        raise PermissionError("matched-training frozen lineage changed")
 
 
 def _read_receipt(
@@ -268,10 +321,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--source-sha256")
     parser.add_argument("--cache-root", type=Path)
     parser.add_argument("--cache-sha256")
-    parser.add_argument("--preflight-result", type=Path)
-    parser.add_argument("--preflight-sha256")
-    parser.add_argument("--overfit-result", type=Path)
-    parser.add_argument("--overfit-sha256")
     parser.add_argument("--matched-root", type=Path)
     parser.add_argument("--matched-sha256")
     return parser.parse_args(argv)
@@ -293,89 +342,48 @@ def main(argv: list[str] | None = None) -> int:
             _required(args.source_sha256, "--source-sha256"),
             "source_acceptance",
         )
-        if source.get("protocol") != protocol() or source.get("mamba_overlay") != verify_overlay(
-            import_package=True
-        ):
+        evaluator_source = bind_runtime_source(source, args.repo_root)
+        if source.get("mamba_overlay") != verify_overlay(import_package=True):
             raise PermissionError("source acceptance protocol/overlay changed")
-        if args.phase == "cache":
-            result = build_target_blind_cache(
-                args.output_root,
-                source_acceptance=source_identity_record,
-            )
-        else:
-            cache_root = _required(args.cache_root, "--cache-root")
-            cache, cache_identity_record = _cache_identity(
-                cache_root, _required(args.cache_sha256, "--cache-sha256")
-            )
-            if cache.get("source_acceptance") != source_identity_record:
-                raise PermissionError("cache/source-acceptance provenance changed")
-            data, data_receipt = load_order_data(cache_root)
-            provenance = {
-                "source_acceptance": source_identity_record,
-                "cache": cache_identity_record,
-                "data": data_receipt,
-                "mamba_overlay": verify_overlay(import_package=True),
-            }
-            device = _cuda0(args.device)
-            if args.phase == "preflight":
-                result = run_preflight(
-                    data,
-                    args.output_root,
-                    device=device,
-                    cache_result_sha256=cache_identity_record["sha256"],
-                    provenance=provenance,
-                )
-            elif args.phase == "overfit":
-                preflight, preflight_identity = _read_receipt(
-                    _required(args.preflight_result, "--preflight-result"),
-                    _required(args.preflight_sha256, "--preflight-sha256"),
-                    "batch24_preflight",
-                )
-                if not all(preflight.get("gates", {}).values()):
-                    raise PermissionError("preflight gates did not all pass")
-                provenance["preflight"] = preflight_identity
-                result = run_overfit(
-                    data,
-                    args.output_root,
-                    device=device,
-                    cache_result_sha256=cache_identity_record["sha256"],
-                    provenance=provenance,
-                )
-            elif args.phase == "matched":
-                overfit, overfit_identity = _read_receipt(
-                    _required(args.overfit_result, "--overfit-result"),
-                    _required(args.overfit_sha256, "--overfit-sha256"),
-                    "overfit",
-                )
-                if not all(overfit.get("gates", {}).values()):
-                    raise PermissionError("overfit gates did not all pass")
-                provenance["overfit"] = overfit_identity
-                result = run_matched_training(
-                    data,
-                    args.output_root,
-                    device=device,
-                    cache_result_sha256=cache_identity_record["sha256"],
-                    provenance=provenance,
-                )
-            else:
-                matched_root = _required(args.matched_root, "--matched-root")
-                matched, matched_identity = _read_receipt(
-                    matched_root / "RESULT.json",
-                    _required(args.matched_sha256, "--matched-sha256"),
-                    "matched_training",
-                )
-                if not all(matched.get("gates", {}).values()):
-                    raise PermissionError("matched training gates did not all pass")
-                validate_matched_checkpoints(matched, matched_root)
-                provenance["matched_training"] = matched_identity
-                result = run_dev_evaluation(
-                    data,
-                    matched_root,
-                    args.output_root,
-                    device=device,
-                    cache_result_sha256=cache_identity_record["sha256"],
-                    provenance=provenance,
-                )
+        cache_sha256 = _required(args.cache_sha256, "--cache-sha256")
+        if cache_sha256 != TRAINING_CACHE_RESULT_SHA256:
+            raise PermissionError("unfrozen target-blind cache result")
+        cache_root = _required(args.cache_root, "--cache-root")
+        cache, cache_identity_record = _cache_identity(cache_root, cache_sha256)
+        validate_training_lineage(cache)
+        data, data_receipt = load_order_data(cache_root)
+
+        matched_sha256 = _required(args.matched_sha256, "--matched-sha256")
+        if matched_sha256 != TRAINING_MATCHED_RESULT_SHA256:
+            raise PermissionError("unfrozen matched-training result")
+        matched_root = _required(args.matched_root, "--matched-root")
+        matched, matched_identity = _read_receipt(
+            matched_root / "RESULT.json",
+            matched_sha256,
+            "matched_training",
+        )
+        if not all(matched.get("gates", {}).values()):
+            raise PermissionError("matched training gates did not all pass")
+        validate_training_lineage(cache, matched)
+        validate_matched_checkpoints(matched, matched_root)
+        provenance = {
+            "evaluator_source_acceptance": source_identity_record,
+            "evaluator_source_identity": evaluator_source,
+            "training_source_identity": training_source_identity(),
+            "cache": cache_identity_record,
+            "data": data_receipt,
+            "matched_training": matched_identity,
+            "mamba_overlay": verify_overlay(import_package=True),
+        }
+        device = _cuda0(args.device)
+        result = run_dev_evaluation(
+            data,
+            matched_root,
+            args.output_root,
+            device=device,
+            cache_result_sha256=cache_identity_record["sha256"],
+            provenance=provenance,
+        )
     print(json.dumps(result, indent=2, sort_keys=True), flush=True)
     return 0 if result["status"] == "passed" else 2
 
