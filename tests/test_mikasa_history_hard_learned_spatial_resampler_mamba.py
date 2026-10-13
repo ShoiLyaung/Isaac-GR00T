@@ -465,7 +465,7 @@ def test_cache_loader_checks_tiny_full_grid_shape_and_file_identity(
         "target_manifest_opened": False,
         "target_npz_opened": [],
         "fresh_data_opened": False,
-        "gates": {"passed": True},
+        "gates": {key: True for key in runner.CACHE_GATE_KEYS},
         "rows": rows,
         "camera_order": list(runner.CAMERA_ORDER),
         "frame_batch_size": runner.FRAME_BATCH_SIZE,
@@ -618,3 +618,114 @@ def test_source_contract_is_dedicated_and_protocol_freezes_mamba_shape() -> None
 def test_repo_root_must_match_imported_runner(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="differs from imported runner"):
         runner._bind_repo_root(tmp_path)
+
+
+def test_phase_receipt_rejects_missing_empty_or_nonboolean_gates(tmp_path: Path) -> None:
+    def write_receipt(name: str, gates: dict) -> tuple[Path, str]:
+        path = tmp_path / f"{name}.json"
+        payload = runner.canonical_json_bytes(
+            {
+                "schema": f"{runner.EXPERIMENT_ID}/synthetic-v1",
+                "status": "passed",
+                "mode": "synthetic",
+                "gates": gates,
+                "provenance": {"source": {"sha256": "a" * 64}},
+                "target_manifest_opened": False,
+                "target_npz_opened": [],
+                "fresh_data_opened": False,
+            }
+        )
+        path.write_bytes(payload)
+        path.chmod(0o444)
+        return path, runner.sha256_bytes(payload)
+
+    for name, gates in (
+        ("missing", {}),
+        ("nonboolean", {"required": 1}),
+        ("extra", {"required": True, "unexpected": True}),
+    ):
+        path, digest = write_receipt(name, gates)
+        with pytest.raises(PermissionError, match="exact gates"):
+            runner._require_phase_receipt(
+                path,
+                digest,
+                mode="synthetic",
+                schema=f"{runner.EXPERIMENT_ID}/synthetic-v1",
+                expected_gate_keys=("required",),
+                provenance_key="source",
+                provenance_value={"sha256": "a" * 64},
+            )
+
+    valid_path, valid_digest = write_receipt("valid-sorted", {"alpha": True, "zeta": True})
+    value, _receipt = runner._require_phase_receipt(
+        valid_path,
+        valid_digest,
+        mode="synthetic",
+        schema=f"{runner.EXPERIMENT_ID}/synthetic-v1",
+        expected_gate_keys=("zeta", "alpha"),
+        provenance_key="source",
+        provenance_value={"sha256": "a" * 64},
+    )
+    assert value["gates"] == {"alpha": True, "zeta": True}
+
+
+def test_five_accumulation_microbatches_share_one_slot_local_shuffle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeShuffleModel(nn.Module):
+        condition = "mamba_shuffle"
+
+        def __init__(self):
+            super().__init__()
+            self.class_bias = nn.Parameter(torch.tensor([0.1, -0.2, 0.3]))
+            self.permutations: list[torch.Tensor] = []
+
+        def forward(
+            self,
+            cue: torch.Tensor,
+            current: torch.Tensor,
+            *,
+            shuffle_seed: int | None,
+            shuffle_step: int | None,
+        ) -> learned.LearnedSpatialOutput:
+            del current
+            assert shuffle_seed is not None and shuffle_step is not None
+            self.permutations.append(
+                learned.slot_shuffle_permutation(shuffle_seed, shuffle_step).clone()
+            )
+            logits = self.class_bias.view(1, 1, 3).expand(cue.shape[0], 2, 3)
+            return learned.LearnedSpatialOutput(
+                logits=logits,
+                sequence=torch.zeros(cue.shape[0], 1, 1),
+                permutation=self.permutations[-1],
+            )
+
+    model = FakeShuffleModel()
+    target = torch.zeros(6, 2, dtype=torch.int64)
+    monkeypatch.setattr(
+        runner,
+        "_group_tensors",
+        lambda _arrays, _labels, _group, _device: (
+            torch.ones(6, 1),
+            torch.ones(6, 1),
+            target,
+        ),
+    )
+    monkeypatch.setattr(runner, "_module_parameters", lambda _model: {"fake": [model.class_bias]})
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    record, gradients = runner._optimizer_step(
+        model,
+        optimizer,
+        {},
+        np.zeros((runner.ROWS, 2), dtype=np.int64),
+        groups=(0, 1, 2, 3, 4),
+        step=7,
+        total_steps=runner.PREFLIGHT_STEPS,
+        device=torch.device("cpu"),
+    )
+    assert len(model.permutations) == runner.ACCUMULATION == 5
+    assert all(torch.equal(model.permutations[0], value) for value in model.permutations[1:])
+    assert torch.all(model.permutations[0][:65] < 65)
+    assert torch.all(model.permutations[0][65:] >= 65)
+    assert gradients == {"fake": True}
+    assert record["step"] == 8
