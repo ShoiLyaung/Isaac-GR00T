@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 from io import BytesIO
 from pathlib import Path
 import time
@@ -718,3 +719,161 @@ def test_train_label_loader_opens_rows_zero_through_35_once_and_no_dev(
     assert labels.shape == (48, 2)
     assert np.array_equal(labels, _train_labels())
     assert np.all(labels[36:] == -1)
+
+
+def test_run_train_freezes_plan_before_targets_and_declares_every_technical_gate() -> None:
+    source = inspect.getsource(runner.run_train)
+    assert (
+        source.index('output_root / "FROZEN_PLAN.json"')
+        < source.index("validate_frozen_evidence(include_target=True)")
+        < source.index("_load_train_labels()")
+    )
+    for gate in runner.TRAIN_GATE_KEYS:
+        assert f'"{gate}"' in source
+    assert "pre_target_plan_frozen_exact" in runner.TRAIN_GATE_KEYS
+    assert runner.protocol()["formal_output_root"] == str(runner.FORMAL_OUTPUT_ROOT)
+
+
+def test_heldout_and_substitution_fail_after_crossing_deadline_without_denominator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    labels = _train_labels()
+    evaluator = _SeededEvaluationModel("mamba_ordered", labels)
+    evaluation_clock = iter((0.0, 2.0))
+    monkeypatch.setattr(train.time, "monotonic", lambda: next(evaluation_clock))
+    with pytest.raises(TimeoutError, match="evaluation budget"):
+        train.evaluate_fold(
+            evaluator,
+            {},
+            labels,
+            condition="mamba_ordered",
+            heldout_group=0,
+            device=torch.device("cpu"),
+            group_loader=_row_group_loader,
+            deadline=1.0,
+        )
+    assert len(evaluator.calls) == 1
+
+    arrays = _row_encoded_arrays()
+    models = {group: _DonorReadingModel(labels) for group in train.FOLD_ORDER}
+    substitution_clock = iter((0.0, 2.0))
+    monkeypatch.setattr(train.time, "monotonic", lambda: next(substitution_clock))
+    with pytest.raises(TimeoutError, match="substitution budget"):
+        train.evaluate_ordered_substitutions(
+            models,
+            arrays,
+            labels,
+            device=torch.device("cpu"),
+            deadline=1.0,
+        )
+    assert sum(len(model.inputs) for model in models.values()) == 1
+
+
+def test_run_train_deadline_failure_after_24_folds_writes_no_scientific_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    train_calls: list[tuple[str, int]] = []
+    evaluation_calls: list[tuple[str, int]] = []
+    scientific_calls: list[object] = []
+
+    monkeypatch.setattr(runner, "new_model", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(runner, "model_initialization_hash", lambda _model: "1" * 64)
+    monkeypatch.setattr(
+        runner,
+        "validate_frozen_evidence",
+        lambda *, include_target: {
+            "target_manifest_opened": include_target,
+            "target_manifest": {"sha256": runner.TARGET_MANIFEST_SHA256},
+            "fresh_data_opened": False,
+        },
+    )
+    monkeypatch.setattr(runner, "_load_train_labels", lambda: (_train_labels(), []))
+    monkeypatch.setattr(runner, "freeze_directory", lambda _root: None)
+    monkeypatch.setattr(runner, "_checkpoint_receipts_exact", lambda *_args: True)
+
+    def fake_train_fold(*_args, condition: str, heldout_group: int, **_kwargs) -> dict:
+        train_calls.append((condition, heldout_group))
+        spec = train.fold_spec(heldout_group)
+        return {
+            "condition": condition,
+            "heldout_group": heldout_group,
+            "candidate_groups": list(spec.candidate_groups),
+            "candidate_rows": list(spec.candidate_rows),
+            "heldout_rows": list(spec.heldout_rows),
+            "steps": train.TRAIN_STEPS,
+            "initial_state_sha256": "1" * 64,
+            "optimizer_schedule_sha256": train.optimizer_schedule_sha256(),
+            "effective_samples_sha256": train.effective_samples_sha256(spec),
+            "curve": [],
+            "gradients_finite": True,
+            "reload_parity": True,
+            "gradient_seen": {"module": True, "learned_queries": True},
+            "module_changed": {"module": True, "learned_queries": True},
+            "checkpoint": {"path": "unused", "bytes": 0, "sha256": "2" * 64},
+        }
+
+    monkeypatch.setattr(runner, "train_fold", fake_train_fold)
+    monkeypatch.setattr(
+        runner,
+        "load_checkpoint",
+        lambda *_args, condition, heldout_group, **_kwargs: SimpleNamespace(
+            condition=condition, heldout_group=heldout_group
+        ),
+    )
+
+    def fake_evaluate_fold(
+        _model: object, *_args: object, condition: str, heldout_group: int, **_kwargs: object
+    ) -> dict:
+        evaluation_calls.append((condition, heldout_group))
+        return {
+            "condition": condition,
+            "heldout_group": heldout_group,
+            "finite": True,
+            "section": {
+                "by_group": {
+                    str(heldout_group): {
+                        "rows": 6,
+                        "pair_accuracy": 0.0,
+                        "slot0_accuracy": 0.0,
+                        "slot1_accuracy": 0.0,
+                    }
+                }
+            },
+        }
+
+    monkeypatch.setattr(runner, "evaluate_fold", fake_evaluate_fold)
+    monkeypatch.setattr(
+        runner,
+        "combine_condition_evidence",
+        lambda condition, _values: {"condition": condition},
+    )
+    monkeypatch.setattr(
+        runner,
+        "evaluate_ordered_substitutions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            TimeoutError("six-hour cumulative substitution budget exhausted")
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "train_scientific_gates",
+        lambda *_args, **_kwargs: scientific_calls.append(object()),
+    )
+
+    output_root = tmp_path / "formal-attempt"
+    with pytest.raises(TimeoutError, match="substitution budget"):
+        runner.run_train(
+            output_root,
+            arrays={},
+            device=torch.device("cpu"),
+            runtime={"synthetic": True},
+            provenance={"source_acceptance": {"sha256": "a" * 64}},
+        )
+    expected = [
+        (condition, heldout) for condition in train.CONDITION_ORDER for heldout in train.FOLD_ORDER
+    ]
+    assert train_calls == expected
+    assert evaluation_calls == expected
+    assert scientific_calls == []
+    assert (output_root / "FROZEN_PLAN.json").is_file()
+    assert not (output_root / "RESULT.json").exists()
