@@ -171,3 +171,23 @@ offline_open_loop_eval_plots/
 
 # Per-worktree link to the shared immutable runtime.
 .venv
+
+# ICRA27 research branch exclusions
+.agents/
+.codex/
+AGENTS.md
+CLAUDE.md
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.engine
+*.gguf
+*.npy
+*.npz
+checkpoints/
+weights/
+runs/
+outputs/
+artifacts/
